@@ -1,0 +1,247 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+#Loading packages
+library(tidyverse) #data wrangling
+library(patchwork) #plotting panels
+library(readxl) #read excel files
+library(here) #data management, file structure
+library(scales)
+library(ggpmisc)
+```
+
+```{r}
+#Downloading data - I need to download new versions of both QU24 and QU39 as changes made to the portal making it hard to bind the files.
+
+
+
+#Download CTD data - entire QU39 data-set
+ctd <- read.csv(here("files_big", "ctd_kc10_2024-03-27.csv"))
+
+```
+
+```{r}
+#Wrangling CTD profiles data
+prof <- ctd %>%
+  filter(Cast.Direction == "d") %>% 
+  mutate(date = lubridate::date(Measurement.time)) %>%
+  mutate(year = lubridate::year(Measurement.time)) %>%
+  select(castpk = Cast.PK, hakai_id = Hakai.ID, Cruise, ctdNum = CTD.serial.number,
+         station = Station, lat = Latitude,
+         long = Longitude, time = Measurement.time, date, year,
+         dep = Depth..m., pres = Pressure..dbar.,
+         flu = Fluorometry.Chlorophyll..ug.L., sal = Salinity..PSU.)
+
+```
+
+```{r}
+#Determining total number of profiles
+prof_num <- prof %>% 
+  select(castpk, station) %>% 
+  group_by(station) %>% 
+  distinct(castpk, station) %>% 
+  summarise(n = n()) %>% 
+  ungroup()
+
+```
+
+```{r}
+#creating cast number to organize plotting profiles
+prof <- prof %>% 
+group_by(castpk) %>%
+  mutate(cast_num = cur_group_id()) %>% 
+ungroup()
+```
+
+```{r}
+#Lists of questionable profiles - bad data or profile starts deeper than 3m depth. I should separate the profiles that start deeper in case some can be saved -  don't need to be removed with bad data casts.
+
+# prof_check_list <- c(258, #Needs further investigation - SVD flag for CTD parameters - REMOVE
+#                      706, #Only goes to about 60m - Keep depending on integration depth. Righ now 100m.
+#                      754, #Starts deep - REMOVE
+#                      761, #Starts deep - REMOVE
+#                      798, #starts deep - REMOVE
+#                      965, #starts deep, but only at 4m. REMOVE for now.
+#                      1076, #starts deep - REMOVE
+#                      6838, #Really weird profile
+#                      7031, #Really weird profile
+#                      7066, #All following have high offset and bad data - REMOVE
+#                      7086, 
+#                      7102, 
+#                      7111, 
+#                      7119, 
+#                      7123,
+#                      7135, 
+#                      7145, 
+#                      7161, 
+#                      7162, 
+#                      7176, 
+#                      7184, 
+#                      7189, 
+#                      7202, 
+#                      7203, 
+#                      7204, 
+#                      8531, #Large spike among very low values. Will skew integration. REMOVE?
+#                      9558, #starts deep - REMOVE
+#                      10964, #Bad cast, not sure why not removed from initial investigation
+#                      10982, #Not sure why this wasn't deleted...
+#                      13377, #High offset and much higher than chl - REMOVE
+#                      13712, #Saturated - REMOVE as not representative.
+#                      16083, #Very shallow cast - REMOVE
+#                      17453, #Very high surface spike - 3x > profile. Real? Not supported by Chl - REMOVE?
+#                      18685) #Shallow cast. 
+
+#Look at 8532. looks like there are duplicate records.
+
+```
+
+
+```{r}
+#For now, I am removing the above list of profiles, but this needs to be reviewed as some may be salvagable. 
+
+# prof_qc1 <- prof %>%
+#   filter(!(ctdNum == 80217 & year == 2015)) %>% 
+#   filter(!castpk == 3826)
+
+#I am also removing records that have zero or negative values. I investigated these and they are from the seabird CTDs and result in a poor dark count as they pull the mean down. 
+
+#there are still values that go very low that are not being removed. Need to look at these. I think removing flu values that are < 0.01 will target most of these - they are all from 7674 and deep. This helped, but still some downspikes -  if I raise the threshhold then it starts to include some surface values from 80217 that were very low - probably either had air/bubbles or strong NPQ.
+
+prof_qc1 <- prof_qc1 %>% 
+  mutate(flu = replace(flu, which( flu < 0), NA),
+         flu = replace(flu, which( flu == 0), NA),
+         flu = replace(flu, which( flu < 0.01), NA))
+
+#this is where my NAs are coming from.
+```
+
+```{r}
+#Continuing on with dark count analysis - Could do this in a similar way that I did in Jen's paper -  used an average of values deeper than 250 m. Although I'm not sure that all casts go this deep. 
+
+#Checking the min and max depth of each profile so I can see what depth range I could use for dark offsets
+prof_dep <- prof_qc1 %>% 
+  group_by(castpk) %>% 
+  summarise(min_dep = min(pres),
+            max_dep = max(pres)) %>%
+  ungroup() 
+
+#For now, I am going to eliminate profiles that are shallower than 100m. It is hard to derive a dark value for these profiles and I'm not sure that they are deep enough to incorporate. I will do analysis to asses and if useable, then I will subtract the offsets from prior/post casts.
+prof_shallow <- prof_dep %>% 
+  filter(max_dep < 100)
+
+#List of shallow casts to remove.
+prof_shallow_list <- prof_shallow$castpk
+
+#Removing shallow casts.
+prof_qc1 <- prof_qc1 %>% 
+  filter(!castpk %in% prof_shallow_list)
+```
+
+
+```{r}
+#To start - trying to find lowest 20 values and then averaging these to derive a dark value.
+
+#I remove profiles that didn't extend past 100m. I am going to use 50m as a threshold for the selection of the 20 dark values for averaging. I was using 100m, but there was one profile that had a minima between 50-100m. This minima was slightly lower than the deeper waters, so doesn't make a huge difference, but good to target the lowest values.
+prof_20 <- prof_qc1 %>%
+  group_by(castpk) %>%
+  filter(pres > 100 & min_rank((flu)) <= 10) %>% 
+  group_by(castpk) %>% 
+  mutate(min_flu = min(flu),
+         max_flu = max(flu),
+         min_mean = mean(flu),
+         min_std = sd(flu),
+         min_dep = min(pres),
+         max_dep = max(pres)) %>% 
+  ungroup()
+
+#Selecting distinct dark mean values for each cast pk - two profiles where both the min and max dark value was derived shallow than 100 m (7031). 
+prof_20_means <- prof_20 %>% 
+  distinct(castpk, .keep_all = TRUE) %>% 
+  select(castpk, ctdNum, station, date, min_flu, max_flu, min_mean, min_std,
+         min_dep, max_dep)
+
+```
+
+```{r}
+#Plot showing average and standard deviation of 10 minimum values for each cast.
+
+prof_20 %>% 
+  ggplot(aes(x = date, y = min_mean)) +
+  geom_point(size = 3, pch = 21, fill = "white", stroke = 1.2) +
+  geom_errorbar(aes(ymin = min_mean - min_std,
+                    ymax = min_mean + min_std)) + 
+  facet_wrap(~ ctdNum, ncol = 1, scales = "free_y") +
+  labs(x = "Date",
+           y = "Profile Avg. 10 minimum fluorescence values") +
+  scale_y_continuous(limits = c(0, NA)) +
+  theme_bw() +
+  theme(text = element_text(size = 40),
+        axis.text = element_text(colour = "black"))
+
+ggsave(here("figures", "dark_correction_mean_minimum_10_all_ctds_kc10_rem_80217.png"), 
+       width = 16, height = 16, dpi = 300)
+
+```
+
+```{r}
+# prof_qc1 %>% 
+#   ggplot(aes(x = flu, y = pres)) +
+#   geom_point() +
+#   scale_y_reverse() +
+#   facet_wrap(~castpk, scales = "free_x") +
+#   theme_bw()
+# 
+# ggsave(here("figures", "profile_check_kc10.png"), 
+#        width = 20, height = 20, dpi = 300)
+```
+
+```{r}
+
+
+prof_qc1 <- prof_qc1 %>% 
+  mutate(month = lubridate::month(date))
+
+prof_qc1 <- prof_qc1 %>%
+  mutate(season = case_when(month == 12 | month == 1 | month == 2 ~ "Winter",
+                            month >= 3 & month <= 5 ~ "Spring",
+                            month >= 6 & month <= 8 ~ "Summer",
+                            month >= 9 & month <= 11 ~ "Autumn",)) %>%
+  relocate(season, .after = month)    
+  
+#Order locations from fjord to shelf
+order_loc_seas <- c("Winter", "Spring", "Summer", "Autumn")
+
+#Chemtax - Specify order of phyto groups for figures
+prof_qc1 <- arrange(mutate(prof_qc1,
+                         season = factor(season, levels = order_loc_seas)))
+
+
+```
+
+```{r}
+write.csv(prof_qc1, here("outputs", "kc10_profs_qc1.csv"))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
