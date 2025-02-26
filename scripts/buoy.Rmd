@@ -1,0 +1,550 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+#Upload packages
+library(tidyverse)
+library(here)
+library(patchwork)
+```
+
+```{r}
+#Downloading hourly data from the KC10 buoy fl
+chl <- read_csv(here("files", "buoy_chl_all_hourly.csv"))
+
+#Downloading discrete chlorophyll samples
+cd <- read_csv(here("files", "2024-12-05_HakaiData_chlorophyll.csv"))
+```
+
+```{r}
+#To start I'm going to try to "fix" the 2022 data as it is extremely spikey. All of the fl data columns have the same output, so just selecting fl. Also, adjusting time to be in a standardized format and creating a date column. shawn says that times are in PST.
+chl_22 <- chl %>% 
+  filter(year == 2022) %>% 
+  select(measurementTime:year, fl = Fluorometer) %>% 
+  mutate(measurementTime_2 = lubridate::mdy_hm(measurementTime),
+         date = lubridate::date(measurementTime_2),
+         month = lubridate::month(measurementTime_2),
+         hour = lubridate::hour(measurementTime_2))
+
+#Reducing size and complexity of the chlorophyll data. none of this data is currently QC'd.
+cd <- cd %>% 
+  filter(filter_type == "Bulk GF/F" & line_out_depth == 0) %>% 
+  select(date, chla)
+```
+
+```{r}
+#Trying a method to assess logarithmic increases between two points. Because it is point by point, I am keeping all data here. Equation I found is from the website below.
+chl_22 <- chl_22 %>% 
+  mutate(gf = diff(fl)/lag(fl))
+
+# https://people.duke.edu/~rnau/Decision411_2007/411log.htm#:~:text=Thus%2C%20the%20series%20DIFF(LOG,the%20percentage%20change%20is%20small.
+```
+
+```{r}
+#Plotting the raw dataset and saving to combine in single figure.
+f1 <- chl_22 %>% 
+  ggplot(aes(measurementTime_2, fl)) +
+  geom_line() +
+  labs(y = "Fluorescence") +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+```
+
+```{r}
+#Removing points and recalculating increase between points.
+chl_22_q1 <- chl_22 %>% 
+  filter(gf > -1) %>%
+  # filter(gf < 1) %>%
+  filter(fl < 50) %>%
+  mutate(gf1 = diff(fl)/lag(fl))
+
+#Using similar thresholds to remove more points after first round of removals - picks up spikes that were repeated.
+chl_22_q2 <- chl_22_q1 %>% 
+  filter(gf1 > -1) %>%
+  # filter(gf1 < 1) %>%
+  filter(fl < 40) %>% #Based on above figure where values >40 appear to be spikes
+  mutate(gf2 = diff(fl)/lag(fl))
+
+#applying 3rd round of removals
+chl_22_q3 <- chl_22_q2 %>% 
+  filter(gf2 > -1) %>%
+  # filter(gf2 < 1) %>%
+  filter(fl < 25) %>% # Here this may remove some real data from the summer/autumn bloom
+  mutate(gf3 = diff(fl)/lag(fl))
+
+#Applying 4th round of removals
+chl_22_q4 <- chl_22_q3 %>% 
+  filter(gf3 > -1) %>%
+  # filter(gf3 < 1) %>%
+  mutate(gf4 = diff(fl)/lag(fl))
+
+#Applying 5th round of removals - 
+chl_22_q5 <- chl_22_q4 %>% 
+  filter(gf4 > -1) %>%
+  # filter(gf4 < 1) %>%
+  mutate(gf5 = diff(fl)/lag(fl))
+
+#I thought this method would eventually result in no additional points removed, but turns out that is not the situation. It could be because it starts jumping days...
+
+#Applying 6th round of removals
+chl_22_q6 <- chl_22_q5 %>% 
+  filter(gf5 > -1) %>%
+  # filter(gf5 < 1) %>%
+  mutate(gf6 = diff(fl)/lag(fl))
+```
+```{r}
+#Looking at dataset after first round of removals
+chl_22_q6 %>% 
+  ggplot(aes(x = measurementTime_2, y = fl)) +
+  geom_line() +
+  geom_point(data = filter(chl_22_q6, gf6 < -1), color = "red")
+```
+
+
+```{r}
+f2 <- chl_22_q6 %>% 
+  ggplot(aes(measurementTime_2, fl)) +
+  geom_line() +
+  labs(y = "Fluorescence") +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+```
+
+```{r}
+chl_22_q7 <- chl_22_q6 %>%
+  group_by(date) %>%
+  filter(hour <= 6 | hour >= 20) %>% #This filters out anything before 6am and after 9pm
+  ungroup() %>%
+  mutate(date_corr = case_when(hour >= 0 & hour <= 6 ~ (date-1),
+                              TRUE ~ as.Date(date))) %>% 
+  group_by(month) %>% 
+  mutate(sd_all = sd(fl),
+         mean_all = mean(fl),
+         sd_mean_all = (fl - mean_all)/sd_all,
+         cv = (sd_all/mean_all)*100,
+         cv100 = cv*2) %>% 
+  ungroup()
+```
+
+```{r}
+#Plotting the raw dataset
+f3 <- chl_22_q7 %>% 
+  ggplot(aes(measurementTime_2, fl)) +
+  geom_line() +
+  geom_point(data = filter(chl_22_q7, sd_mean_all > 3), color = "red") +
+  geom_vline(xintercept = lubridate::ymd_hms("2022-05-16 00:12:00"), color = "red",
+             size = 2) +
+  labs(y = "Fluorescence") +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+```
+```{r}
+chl_22_q8 <- chl_22_q7 %>% 
+  filter(sd_mean_all < 3) %>% 
+  filter(sd_mean_all > -3)
+```
+
+```{r}
+chl_22_q8 %>% 
+  ggplot(aes(measurementTime_2, fl)) +
+  geom_line() 
+```
+```{r}
+chl_22_q9 <- chl_22_q8 %>% 
+  group_by(date_corr) %>% 
+  mutate(fl_med_day = median(fl), 
+         fl_med_3 = zoo::rollapply(fl, 3, median, align = 'right', fill = NA),) %>% 
+  ungroup()
+```
+
+```{r}
+f4 <- chl_22_q9 %>% 
+  ggplot() +
+  geom_line(aes(measurementTime_2, fl), size = 2, color = "grey") +
+  labs(y = "Fluorescence") +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+
+# f2 <- chl_22_q9 %>% 
+#   ggplot() +
+#   geom_line(aes(date_corr, fl_med_3), size = 2, color = "blue") +
+#   labs(y = "Fluorescence") +
+#   theme_bw() +
+#   theme(legend.position = "none",
+#         text = element_text(size = 35), #35
+#         axis.text = element_text(color = "black"),
+#         axis.title.x = element_blank())
+
+f5 <- chl_22_q9 %>%
+  left_join(cd) %>% 
+  ggplot() +
+  geom_line(aes(date_corr, fl_med_day), size = 2, color = "blue") +
+  geom_point(aes(date, chla), size = 3, pch = 21, fill = "white", stroke = 1.5) +
+  labs(y = "Fluorescence") +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+
+fig <- f1/f2/f3/f4/f5 + plot_layout(axis_titles = "collect")
+
+ggsave(here("figures", "buoy_2022_correction.png"), fig,
+        width = 16, height = 12, dpi = 300)
+```
+
+```{r}
+join_test <- chl_22_q9 %>%
+  select(date = date_corr, fl_med_day) %>% 
+  left_join(cd) %>% 
+  drop_na() %>% 
+  distinct()
+
+
+join_test %>% 
+  ggplot(aes(chla, fl_med_day)) +
+  geom_point() +
+  geom_abline(slope = 1) +
+  geom_smooth(method = "lm", color = "black", 
+               size = 1) +
+  ggpubr::stat_cor(aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")),
+                   p.accuracy = 0.001, size = 9, label.y.npc = 0.8) +
+  ggpubr::stat_regline_equation(size = 9, label.y.npc = 0.9) +
+  lims(x = c(0, 14),
+       y = c(0, 14)) +
+  labs(x = "Chla",
+       y = "Fluorescence") +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"))
+
+ggsave(here("figures", "scatter_2022.png"), 
+        width = 8, height = 6, dpi = 300)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+chl_22_test <- chl_22 %>% 
+  # filter(date < "2022-01-30") %>% 
+  group_by(month) %>% 
+  mutate(sd_month = sd(fl),
+         mean_month = mean(fl),
+         sd_mean_month = (fl - mean_month)/sd_month) %>% 
+  ungroup()
+
+
+chl_22_test %>%
+  filter(month == 4 & fl < 20) %>% 
+  ggplot(aes(x = measurementTime_2, y = fl)) +
+  geom_line() +
+  geom_point(data = filter(chl_22_test, sd_mean_month > 1 & month == 4),
+             color = "purple")
+```
+
+
+
+
+
+
+
+
+```{r}
+chl_22_qc1 <- chl_22 %>%
+  mutate(day = lubridate::day(date)) %>% 
+  group_by(day) %>% 
+  mutate(sd_day = sd(fl),
+         mean_day = mean(fl),
+         sd_mean_day = (fl - mean_day)/sd_day) %>%
+  ungroup() %>% 
+  filter(sd_mean_day < 2)  
+```
+
+
+
+
+```{r}
+chl_22_qc1 %>% 
+  ggplot(aes(measurementTime_2, fl)) +
+  geom_line() 
+```
+
+
+```{r}
+#Looking at when more than an hour was missing between records - I am not currently using this threshold, but could be important for my next filters.
+chl_22_time <- chl_22_qc1 %>% 
+  group_by(date) %>% 
+  mutate(time_diff = lead(hour) - hour) %>% 
+  ungroup() 
+
+# %>% 
+#   filter(time_diff == 1)
+```
+
+```{r}
+
+#Following Roesler method, filtering out daytime values to remove NPQ. I need to refine this and/or correct for it using their method or others. Probably removing too many points - could preserve cloudy days or probably more evening or morning data
+# chl_22_qc1 <- chl_22_qc1 %>% 
+#   group_by(date) %>% 
+#   filter(hour <= 6 | hour >= 20) %>% #This filters out anything before 6am and after 9pm
+#   ungroup() %>% 
+#   mutate(date_corr = case_when(hour >= 0 & hour <= 6 ~ (date-1),
+#                                 TRUE ~ as.Date(date)))
+
+```
+
+```{r}
+chl_22_qc1 <- chl_22_qc1 %>% 
+  mutate(p_change = (fl - lag(fl))/fl,
+         gf = (1 + p_change))
+```
+
+```{r}
+chl_22_qc1 %>% 
+  ggplot(aes(x = measurementTime_2, y = fl)) +
+  geom_line() +
+  # geom_point(data = filter(chl_22_qc2, sd_mean_month > 2), color = "red") +
+  geom_point(data = filter(chl_22_qc1, p_change > 0.5), color = "purple")
+```
+
+```{r}
+chl_22_qc2 <- chl_22_qc1 %>%
+  filter(!(p_change > 0.50 & fl > 5))
+```
+
+```{r}
+chl_22_qc2 %>% 
+  ggplot(aes(x = measurementTime_2, y = fl)) +
+  geom_line() 
+```
+
+
+
+```{r}
+#Doing calculations to define when hour to hour change is exponential following Roesler step #2
+chl_22_qc2 <- chl_22_qc2 %>% 
+  group_by(date) %>%
+  filter(hour <= 6 | hour >= 20) %>% #This filters out anything before 6am and after 9pm
+  ungroup() %>%
+  mutate(date_corr = case_when(hour >= 0 & hour <= 6 ~ (date-1),
+                                TRUE ~ as.Date(date))) %>% 
+  mutate(p_change = (fl - lag(fl))/fl, #% change between records
+         gf = (1 + p_change), #growth factor as defined a 1 + % change
+         ef = (1 + p_change)*fl,
+         sd_roll = zoo::rollapply(fl, 2, sd, align = 'right', fill = NA),
+         mean_roll = zoo::rollapply(fl, 3, mean, align = 'right', fill = NA),
+         sd_all = sd(fl),
+         mean_all = sd(fl),
+         sd_mean_all = (fl - mean_all)/sd_all) %>% 
+  group_by(date_corr) %>% 
+  mutate(mean_day = mean(fl),
+         sd_day = sd(fl),
+         sd_mean_day = (fl - mean_day)/sd_day) %>% 
+  ungroup() %>%
+  group_by(month) %>% 
+  mutate(mean_month = mean(fl),
+         sd_month = sd(fl),
+         sd_mean_month = (fl - mean_month)/sd_month) %>% 
+  ungroup() %>% 
+  mutate(day = lubridate::day(date)) %>% 
+  group_by(day, month) %>%
+  mutate(mean_5day = zoo::rollapply(fl, 5, mean, align = 'right', fill = NA),
+         sd_5day = zoo::rollapply(fl, 2, sd, align = 'right', fill = NA),
+         sd_mean_5d = (fl - mean_5day)/sd_5day) %>% 
+  ungroup() 
+
+
+  
+
+# , #exponential fit between two points, but I think gf more important
+         # sd_roll = zoo::rollapply(fl, 3, sd, align = 'right', fill = NA),
+         # mean_roll = zoo::rollapply(fl, 3, mean, align = 'right', fill = NA),
+         # sd_mean = abs(fl - mean_roll)/sd_roll)
+
+
+# Exponential Growth: Growth factor that is greater than 1. 
+
+# https://www.houseofmath.com/encyclopedia/numbers-and-quantities/fractions-and-percentages/percentages/how-to-calculate-growth-factor
+
+# https://study.com/skill/learn/finding-the-initial-amount-rate-of-change-with-an-exponential-function-explanation.html
+
+# Finally, high impulse values were defined by fluorescence observations that surpass 3σ of daily averaged fluorescence and were removed from the data set.
+# https://aslopubs.onlinelibrary.wiley.com/doi/10.1002/lom3.10480
+```
+
+
+
+```{r}
+chl_22_qc2 %>% 
+  ggplot(aes(x = measurementTime_2, y = fl)) +
+  geom_line() +
+  geom_point(data = filter(chl_22_qc2, sd_mean_month > 3), color = "red")
+```
+
+
+
+
+
+```{r}
+chl_22_qc3 <- chl_22_qc2 %>%
+  filter(!(sd_mean_month > 3 | sd_mean_month < -3))
+```
+
+```{r}
+chl_22_qc3 %>% 
+  ggplot(aes(x = measurementTime_2, y = fl)) +
+  geom_line()
+```
+
+
+```{r}
+n_check <- chl_22_qc4 %>% 
+  group_by(date_corr) %>% 
+  summarise(n = n()) %>% 
+  ungroup()
+```
+
+```{r}
+n_check %>% 
+  ggplot(aes(x = date_corr, y = n/11)) +
+  geom_line()
+```
+
+
+
+```{r}
+chl_22_qc5 <- chl_22_qc4 %>% 
+  group_by(date_corr) %>% 
+  summarise(med = median(fl)) %>% 
+  ungroup() %>% 
+  rename(date = date_corr)
+           
+           
+```
+
+```{r}
+cd <- cd %>% 
+  filter(filter_type == "Bulk GF/F" & line_out_depth == 0) %>% 
+  select(date, chla)
+```
+
+
+```{r}
+test <- chl_22_qc5 %>% 
+  left_join(cd) 
+
+test %>% 
+  ggplot() +
+  geom_line(aes(x = date, y = med)) +
+  geom_point(aes(x = date, y = chla))
+
+test %>% 
+  ggplot(aes(x = med, y = chla)) +
+  geom_point()
+```
+
+
+
+
+
+
+
+
+
+```{r}
+chl_22_qc2 %>% 
+  # filter(!(gf > 1 & fl > 15)) %>% 
+  filter(!(sd_mean_day > 2)) %>% 
+  filter(!(p_change > 0.3)) %>%
+  ggplot(aes(x = measurementTime_2, y = fl)) +
+  geom_line() 
+```
+
+
+
+
+```{r}
+#Removing any records where there is exponential growth between two records
+chl_22_qc2 <- chl_22_qc1 %>% 
+  filter(sd_roll <= 1)
+
+
+
+# %>% 
+#   filter(gf >= -1)
+```
+
+```{r}
+#Notes
+
+# Roesler, CS. 2016. In Situ Chlorophyll Fluorescence Observations on NERACOOS Mooring A01:
+# Revised Data Flagging and Changing Phenology. Boston: Massachusetts Water Resources
+# Authority. Report 2016-15. 11 p.
+
+# Step 2. Biofouling is identified by a logarithmic increase in signal to values determined to be out
+# of range or saturating for the sensor.
+
+#I'm not sure what this means. 
+
+# Data that were compromised by biofouling on sensor windows (microphytobentos), which were identified by an exponential increase of Fchla and bbp coefficient signal to values considered out of range over a short period (hours), were removed from the analysis according to Roesler (2016).To reduce the variability of the data, a median of 7 consecutive points was calculated as in Cetinić et al. (2015). https://doi.org/10.1016/j.csr.2020.104322
+
+# Optical data were median filtered (seven-point running median) to remove spikes associated with aggregates and other larger particles in the water column (Briggs et al., 2011). doi:10.5194/bg-12-2179-2015
+
+# Step 3. Removal of biofouled data. Biofouling manifests as a logarithmic signal increase leading to out-of-standard range or to saturating values. Biofouling takes two forms (Figure 7):  a smooth signal increase associated with biofilm growth or an extreme hour-to-hour variability due to structural growth on the sensor such as seaweeds that contaminate both the fluorescence and turbidity signals as they waft into the optical sensing volume (“frondular biofouling”). Bowdoin flags biofouled observations as either biofilm or structural based upon the pattern of anomalous observations and removes them from the data stream.
+# 
+
+# Step 4. Single value outliers (SVO) are identified by quantifying the first differences that exceed
+# 100% of the coefficient of variation and are in excess of 15 mg/m3 or 3 NTU. SVO observations
+# are flagged and removed from the data streams.
+
+#this I could figure out.
+```
+
+
+
+
+
+

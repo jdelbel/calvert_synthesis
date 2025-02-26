@@ -1,0 +1,674 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Some new interpolation tutorials to consider:
+https://search.r-project.org/CRAN/refmans/rioja/html/interp.dataset.html
+https://github.com/hdugan/NTLlakeloads
+
+```{r}
+#Upload packages
+library(tidyverse)
+library(here)
+library(readxl)
+library(patchwork)
+library(lubridate)
+library(MBA)
+library(mgcv)
+library(FNN)
+library(zoo)
+library(reshape2)
+library(rioja)
+
+```
+
+```{r}
+# 2024 corrected buoy data
+b24 <- read.csv(here("outputs", "buoy_corr_dm_2024.csv"))
+
+#Corrected CTD data
+ctd <- read_csv(here("outputs", "kc10_fzh01_dfo2_pruth_profs_qcs_qcs7_qc1_2025-01-14.csv"))
+
+#Downloading discrete chlorophyll samples
+cd <- read_csv(here("files", "2024-12-05_HakaiData_chlorophyll.csv"))
+
+sat <- read_csv(here("outputs", "sentinel_8day_kc10_avg.csv"))
+
+chl <- read_csv(here("files_big", "2025-02-13_HakaiData_chlorophyll.csv"))
+
+par <- read_xlsx(here("files_big", "8_binAvg-1739570403592.xlsx"), sheet = "Data")
+```
+
+```{r}
+b24 <- b24 %>% 
+  select(date_corr, fl_med_day, group) %>% 
+  distinct()
+```
+
+```{r}
+cd <- cd %>% 
+  filter(filter_type == "Bulk GF/F" & line_out_depth == 0) %>% 
+  select(date, chla)
+```
+
+```{r}
+ctd <- ctd %>% 
+  filter(station == "KC10" & year == 2024) %>% 
+  mutate(month = lubridate::month(date))
+
+
+ctd <- ctd %>% 
+  mutate(slope = case_when(ctdNum == 18032 & date < "2015-09-01" ~ 1.2,
+                           ctdNum == 18032 & date > "2015-09-01" ~ 1.4,
+                           ctdNum == 18066 & year < 2017 ~ 0.85,
+                           ctdNum == 18066 & year >= 2017 ~ 1.2,
+                           ctdNum == 80217 ~ 3,
+                           ctdNum == 211567 ~ 1.3,
+                           ctdNum == 1907467 ~ 0.86)) %>% 
+  mutate(flu_sc = flu_cor*slope) %>% 
+  mutate(flu_sc = round(flu_sc, 2))
+
+par <- par %>% 
+  select(castpk = `Cast PK`, pres = `Pressure (dbar)`,
+         par = `PAR (umol m-2 s-1)`)
+
+ctd <- ctd %>% 
+  left_join(par)
+```
+
+```{r}
+chl_qc <- chl %>% 
+  select(date, line_out_depth, filter_type, chla, chla_flag) %>% 
+  filter(filter_type == "Bulk GF/F") %>% 
+  filter(chla_flag == "AV" | chla_flag == "SVC" | chla_flag == "ADL" | is.na(chla_flag)) 
+
+chl_sf <- chl %>% 
+  select(date, line_out_depth, filter_type, chla, chla_flag) %>% 
+  filter(!filter_type == "Bulk GF/F") %>% 
+  filter(chla_flag == "AV" | chla_flag == "SVC" | chla_flag == "ADL" | is.na(chla_flag))
+
+chl_dm <- chl_qc %>% 
+  group_by(date, line_out_depth) %>% 
+  summarise(chl_dm = mean(chla)) %>% 
+  ungroup() %>% 
+  mutate(pres = round(line_out_depth)) %>%
+  drop_na() %>% 
+  group_by(date) %>% 
+  mutate(n_dep = n()) %>% 
+  ungroup() %>% 
+  filter(n_dep >= 5) %>% 
+  mutate(year = year(date))
+
+chl_sf_dm <- chl_sf %>% 
+  filter(!is.na(chla)) %>%
+  filter(chla > 0) %>% 
+  group_by(date, line_out_depth, filter_type) %>% 
+  summarise(avg_chla = mean(chla)) %>%
+  ungroup() %>% 
+  group_by(date, line_out_depth) %>% 
+  mutate(n_filt = n()) %>% 
+  ungroup() %>% 
+  group_by(date, line_out_depth, filter_type) %>% 
+  mutate(n_type = n()) %>% 
+  ungroup() %>% 
+  filter(n_filt == 3 & n_type == 1) %>% 
+  group_by(date, line_out_depth) %>% 
+  mutate(sum = sum(avg_chla)) %>% 
+  ungroup() %>% 
+  mutate(perc = avg_chla/sum) %>% 
+  select(date, pres = line_out_depth, filter_type, avg_chla, sum, perc) %>% 
+  mutate(filter_type2 = case_when(filter_type == "2um" ~ "3um",
+                                  TRUE ~ as.character(filter_type)))
+```
+
+
+```{r}
+b24 <- b24 %>% 
+  mutate(date = lubridate::ymd(date_corr),
+         year = lubridate::year(date),
+         yday = lubridate::yday(date)) 
+
+b24 <- b24 %>% 
+  left_join(cd)
+```
+
+```{r}
+f1 <- b24 %>% 
+  ggplot(aes(x = date, y = fl_med_day, color = as.factor(year))) +
+  geom_point(aes(x = date, y = chla, color = as.factor(year)),
+             fill = "white", size = 4, pch = 21, stroke = 1.5) +
+  geom_line(data = filter(b24, year == 2024 & group == 1),
+            size = 2) +
+  geom_line(data = filter(b24, year == 2024 & group == 2),
+            size = 2) +
+  ggsci::scale_color_futurama() +
+  scale_x_date(limits = as_date(c("2024-01-01", "2024-12-31")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  labs(y = "Daily Median Fluorescence",
+       x  = NULL,
+       color = NULL) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+
+ggsave(here("figures", "buoy_corrected_year_2024.png"),
+        width = 16, height = 12, dpi = 300)
+
+#Convert to a datetime so I can plot months.
+```
+
+
+
+```{r}
+#Now plot 2024 CTD profiles
+# f2 <- 
+  
+  ctd %>% 
+  filter(pres < 51) %>% 
+  mutate(day = 15) %>% 
+  unite(date_2, c(year, month, day), sep = "-", remove = F) %>% 
+  mutate(date_2 = date(date_2)) %>% 
+  ggplot(aes(x = date)) +
+  geom_tile(aes(y = pres, fill = flu_sc)) +
+  scale_y_reverse(breaks = seq(0,50,by = 10)) +
+  cmocean::scale_fill_cmocean(name = "delta",
+                              limits = c(0, 10),
+                              oob = scales::squish) +
+  labs(fill = bquote(CTD[FLU]~"(mg" ~ m^-3*")"),
+       y = "Depth") +
+  scale_x_date(limits = as_date(c("2024-01-01", "2024-12-31")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  theme_bw() +
+
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = "top",
+        legend.box = "horizontal") +
+  guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5,
+                                barwidth = 50, barheight = 1,
+                                frame.colour = "black", ticks.colour = "black"))
+```
+
+```{r}
+# For a surface plot, the date column must then be converted to numeric values for interpolation
+chl_dm$date_dec <- decimal_date(chl_dm$date)
+
+chl_dm_24 <- chl_dm %>% 
+  filter(year == 2024)
+```
+
+```{r}
+# Interpolate the data
+chl_mba_24 <- mba.surf(chl_dm_24[c("date_dec", "pres", "chl_dm")], no.X = 400, no.Y = 400,
+                    extend = F)
+dimnames(chl_mba_24$xyz.est$z) <- list(chl_mba_24$xyz.est$x, chl_mba_24$xyz.est$y)
+chl_mba_24 <- melt(chl_mba_24$xyz.est$z, varnames = c('date_dec', 'pres'), value.name = 'chl_dm') %>%
+  filter(pres < 101) 
+
+chl_mba_24 <- chl_mba_24 %>%
+  mutate(date_h = lubridate::date_decimal(date_dec),
+         date = lubridate::date(date_h),
+         year = lubridate::year(date))
+
+chl_24_date_list <- chl_dm_24$date
+
+chl_mba_24 <- chl_mba_24 %>% 
+  filter(date %in% chl_24_date_list)
+```
+
+
+```{r}
+#Now plot 2024 CTD profiles
+# f2 <- 
+  
+  chl_mba_24 %>% 
+  # filter(pres < 31) %>% 
+  mutate(month = month(date)) %>% 
+  ggplot(aes(x = date)) +
+  geom_tile(aes(y = pres, fill = chl_dm)) +
+  scale_y_reverse(breaks = seq(0,50,by = 10)) +
+  cmocean::scale_fill_cmocean(name = "delta",
+                              limits = c(0, 10),
+                              oob = scales::squish) +
+  labs(fill = bquote(Chl[DISCRETE]~"(mg" ~ m^-3*")"),
+       y = "Depth") +
+  scale_x_date(limits = as_date(c("2024-01-01", "2024-12-31")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  theme_bw() +
+
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = "top",
+        legend.box = "horizontal") +
+  guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5,
+                                barwidth = 50, barheight = 1,
+                                frame.colour = "black", ticks.colour = "black"))
+```
+
+```{r}
+chl_mm <- chl_dm %>% 
+  mutate(month = month(date)) %>% 
+  group_by(month, line_out_depth) %>% 
+  summarise(chl_mm = mean(chl_dm, na.rm = T),
+            chl_mmed = median(chl_dm, na.rm = T)) %>% 
+  ungroup() 
+
+chl_mm_wide <- chl_mm %>% 
+  select(line_out_depth, month, chl_mmed) %>% 
+  pivot_wider(names_from = "month", values_from = "chl_mmed") %>% 
+  filter(line_out_depth < 31 | line_out_depth == 100)
+  
+
+spec <- chl_mm_wide %>% 
+  select(2:12)
+
+
+# spec <- as.data.frame(chl_mm_wide$chl_dm)
+depth <- chl_mm_wide$line_out_depth
+
+# interpolate new dataset to every 0.5 cm
+# using default method (linear)
+x.new <- seq(0, 101, by = 1)
+sp.interp_all <- interp.dataset(y = spec, x = depth, xout = x.new, method = "loess",
+                            span = 0.5)
+
+mm_interp <- as.data.frame(sp.interp_all)
+
+mm_interp <- mm_interp %>% 
+  mutate(pres = x.new) %>% 
+  pivot_longer(cols = (1:11), names_to = "month", values_to = "chl_mm_loess") %>% 
+  mutate(month = as.double(month))
+
+```
+
+```{r}
+mm_interp %>% 
+  ggplot(aes(x = chl_mm_loess, y = pres*-1)) +
+  geom_line(orientation = "y") +
+  facet_grid(. ~ month)
+```
+```{r}
+#Now plot 2024 CTD profiles
+# f2 <- 
+  
+mm_interp %>%
+  filter(pres < 51) %>% 
+  ggplot() +
+  geom_tile(aes(x = as.factor(month), y = pres, fill = chl_mm_loess)) +
+  scale_y_reverse(breaks = seq(0,50,by = 10)) +
+  cmocean::scale_fill_cmocean(name = "delta",
+                              limits = c(0, 10),
+                              oob = scales::squish) +
+  labs(fill = bquote(Chl[DISCRETE]~"(mg" ~ m^-3*")"),
+       y = "Depth") +
+  # scale_x_date(limits = as_date(c("2024-01-01", "2024-12-31")),
+  #              expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = "top",
+        legend.box = "horizontal") +
+  guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5,
+                                barwidth = 50, barheight = 1,
+                                frame.colour = "black", ticks.colour = "black"))
+
+ggsave(here("figures", "monthly_climatology_discrete_leoss_median_scale10.png"),
+        width = 16, height = 6, dpi = 300)
+```
+
+
+
+```{r}
+# Interpolate the data
+chl_mba_24 <- mba.surf(chl_dm_24[c("date_dec", "pres", "chl_dm")], no.X = 400, no.Y = 400,
+                    extend = F)
+dimnames(chl_mba_24$xyz.est$z) <- list(chl_mba_24$xyz.est$x, chl_mba_24$xyz.est$y)
+chl_mba_24 <- melt(chl_mba_24$xyz.est$z, varnames = c('date_dec', 'pres'), value.name = 'chl_dm') %>%
+  filter(pres < 101) 
+
+chl_mba_24 <- chl_mba_24 %>%
+  mutate(date_h = lubridate::date_decimal(date_dec),
+         date = lubridate::date(date_h),
+         year = lubridate::year(date))
+
+chl_24_date_list <- chl_dm_24$date
+
+chl_mba_24 <- chl_mba_24 %>% 
+  filter(date %in% chl_24_date_list)
+```
+
+
+
+
+
+```{r}
+# panel <- f1/f2
+
+# ggsave(here("figures", "panel_buoy_flu.png"),
+#         width = 16, height = 12, dpi = 300)
+```
+
+```{r}
+ctd_sb <- ctd %>% 
+  filter(date == "2024-04-12")
+
+chl_sb <- chl_dm %>% 
+  filter(date == "2024-04-12") %>% 
+  mutate(pres = case_when(pres == 0 ~ 1,
+                          TRUE ~ as.numeric(pres)))
+
+chl_mba_24_sb <- chl_mba_24 %>% 
+  filter(date == "2024-04-12") %>% 
+  select(pres, chl_interp = chl_dm)
+
+
+sb_join <- ctd_sb %>% 
+  left_join(chl_sb)
+```
+
+
+```{r}
+
+spec <- as.data.frame(chl_sb$chl_dm)
+depth <- chl_sb$pres
+
+# interpolate new dataset to every 0.5 cm
+# using default method (linear)
+x.new <- seq(0, 325, by = 1)
+sp.interp <- interp.dataset(y=spec, x=depth, xout=x.new, method = "loess",
+                            span = 0.5)
+
+```
+
+```{r}
+test <- as.data.frame(sp.interp)
+
+test <- test %>% 
+  mutate(pres = x.new) %>% 
+  rename(chl_loess = `chl_sb$chl_dm`)
+```
+
+```{r}
+sb_join <- sb_join %>% 
+  left_join(test)
+```
+
+
+
+
+
+
+
+```{r}
+sb_join %>% 
+  ggplot() +
+  annotate("rect", xmin = -Inf, xmax = Inf, ymin = 0, ymax = -6, fill = 'gray') +
+  geom_line(aes(x = flu, y = pres*-1),
+            orientation = "y",
+            color = "black",
+            size = 1.5) +
+  geom_line(aes(x = flu*2.4, y = pres*-1),
+            orientation = "y",
+            color = "red",
+            size = 1.5) +
+  geom_line(data = chl_mba_24_sb, aes(x = chl_interp, y = pres*-1),
+            orientation = "y",
+            color = "green",
+            size = 1.5) +
+  geom_smooth(aes(x = chl_dm, y = pres*-1),
+              orientation = "y",
+              span = 0.5,
+              color = "blue",
+              size = 1.5) +
+  geom_smooth(aes(x = chl_loess, y = pres*-1),
+              orientation = "y",
+              span = 0.5,
+              color = "purple",
+              size = 1.5) +
+  geom_point(aes(x = chl_dm, y = pres*-1),
+             pch = 21,
+             color = "black",
+             fill = "white",
+             size = 3,
+             stroke = 1.5) +
+  ylim(-101, 0) +
+  labs(x = "Fluorescence",
+       y = "Depth") +
+  ggtitle("2024-04-12") +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black")) 
+
+ggsave(here("figures", "quench_2024-04-12.png"),
+        width = 10, height = 12, dpi = 300)
+```
+```{r}
+#Start and new script and make a plot like this for each
+```
+
+
+
+
+```{r}
+sb_join %>% 
+  ggplot() +
+  geom_line(aes(x = par, y = pres*-1),
+            orientation = "y",
+            color = "black",
+            size = 1.5) +
+  geom_vline(xintercept = 200) +
+  ylim(-101, 0) +
+  labs(x = "Fluorescence",
+       y = "Depth") +
+  ggtitle("2024-04-12") +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"))
+```
+
+
+
+```{r}
+ctd_scm <- ctd %>% 
+  filter(date == "2024-07-18")
+
+chl_scm <- chl_dm %>% 
+  filter(date == "2024-07-18") %>% 
+  mutate(pres = case_when(pres == 0 ~ 1,
+                          TRUE ~ as.numeric(pres)))
+
+chl_mba_scm <- chl_mba_24 %>% 
+  filter(date == "2024-07-18") %>% 
+  select(pres, chl_interp = chl_dm)
+
+
+scm_join <- ctd_scm %>% 
+  left_join(chl_scm)
+```
+
+
+```{r}
+scm_join %>% 
+  ggplot() +
+   annotate("rect", xmin = -Inf, xmax = Inf, ymin = 0, ymax = -6, fill = 'gray') +
+  geom_line(aes(x = flu, y = pres*-1),
+            orientation = "y",
+            color = "black",
+            size = 1.5) +
+  # geom_line(aes(x = flu*2.4, y = pres*-1),
+  #           orientation = "y",
+  #           color = "red",
+  #           size = 1.5) +
+  geom_line(data = chl_mba_scm, aes(x = chl_interp, y = pres*-1),
+            orientation = "y",
+            color = "green",
+            size = 1.5) +
+  geom_smooth(aes(x = chl_dm, y = pres*-1),
+              orientation = "y",
+              span = 0.5,
+              color = "blue",
+              size = 1.5) +
+  geom_point(aes(x = chl_dm, y = pres*-1),
+             pch = 21,
+             color = "black",
+             fill = "white",
+             size = 3) +
+  ylim(-101, 0) +
+  labs(x = "Fluorescence",
+       y = "Depth") +
+  ggtitle("2024-07-18") +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black")) 
+
+ggsave(here("figures", "quench_2024-07-18.png"),
+        width = 10, height = 12, dpi = 300)
+```
+
+
+```{r}
+scm_join %>% 
+  ggplot() +
+  geom_line(aes(x = par, y = pres*-1),
+            orientation = "y",
+            color = "black",
+            size = 1.5) +
+  geom_vline(xintercept = 200) +
+  ylim(-101, 0) +
+  labs(x = "Fluorescence",
+       y = "Depth") +
+  ggtitle("2024-04-12") +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"))
+```
+
+
+
+
+```{r}
+
+spec <- as.data.frame(chl_scm$chl_dm)
+depth <- chl_scm$pres
+
+# interpolate new dataset to every 0.5 cm
+# using default method (linear)
+x.new <- seq(0, 325, by = 1)
+sp.interp_scm <- interp.dataset(y=spec, x=depth, xout=x.new, method = "loess",
+                            span = 0.5)
+
+```
+
+```{r}
+test2 <- as.data.frame(sp.interp_scm)
+
+test2 <- test2 %>% 
+  mutate(pres = x.new) %>% 
+  rename(chl_loess = `chl_scm$chl_dm`)
+```
+
+```{r}
+test2 %>% 
+  filter(pres < 101) %>% 
+  ggplot() +
+  geom_line(aes(x = chl_loess, y = pres*-1),
+            orientation = "y",
+            color = "black",
+            size = 1.5) 
+```
+
+
+
+```{r}
+sb_join %>% 
+  filter(pres < 31 & par > 30 ) %>% 
+  ggplot(aes(y = flu, x = par)) +
+  geom_point() +
+  geom_abline(slope = 1) +
+  geom_smooth(method = "lm", color = "black") +
+  # geom_smooth(data = filter(flu_join, depth > 1),
+  #             method = "lm", color = "blue") + 
+  ggpubr::stat_cor(aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")),
+                   p.accuracy = 0.001, size = 9, label.y.npc = 0.9) +
+  ggpubr::stat_regline_equation(size = 9, label.y.npc = 0.96) 
+```
+```{r}
+test <- sb_join %>% 
+  mutate(par_cor = (0.0011*par))
+```
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+b24_join <- b24 %>% 
+  mutate(date = lubridate::ymd(date_corr))
+
+sat_join <- sat %>% 
+  distinct(chl_dm, .keep_all = T) %>% 
+  select(date, sat_chl = chl_dm)
+
+b24_join <- b24_join %>% 
+  left_join(sat_join) 
+
+b24_long <- b24_join %>%
+  select(date, group, fl_med_day, sat_chl) %>%
+  pivot_longer(c(fl_med_day, sat_chl), names_to = "type", values_to = "chl")
+
+b24_join %>% 
+  ggplot(aes(x = date, y = chl, color = type)) +
+  geom_line(data = filter(b24_long, group == 1),
+            size = 2) +
+  geom_line(data = filter(b24_long, group == 2),
+            size = 2) +
+  ggsci::scale_color_futurama() +
+  scale_x_date(date_breaks = "months", date_labels = "%b") +
+  labs(y = "Daily Median Fluorescence",
+       x  = NULL,
+       color = NULL) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+```
+```{r}
+ggplot() +
+  geom_line(data = filter(b24_join, group == 1),
+            aes(x = date, y = fl_med_day),
+            size = 2) +
+  geom_line(data = filter(b24_join, group == 2),
+            aes(x = date, y = fl_med_day),
+            size = 2) +
+  geom_line(data = sat_join, aes(x = date, y = sat_chl),
+            size = 2, color = "darkgreen") + 
+  geom_point(data = sat_join, aes(x = date, y = sat_chl),
+            pch = 21, size = 3, fill = "white", color = "darkgreen", stroke = 0.5) +
+  ggsci::scale_color_futurama() +
+  scale_x_date(date_breaks = "months", date_labels = "%b") +
+  labs(y = "Daily Median Fluorescence",
+       x  = NULL,
+       color = NULL) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+
+ggsave(here("figures", "buoy_sentinel_2024.png"),
+        width = 16, height = 6, dpi = 300)
+```
+

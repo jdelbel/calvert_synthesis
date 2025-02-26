@@ -1,0 +1,408 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+#Loading packages
+library(tidyverse) #data wrangling
+library(patchwork) #plotting panels
+library(readxl) #read excel files
+library(here) #data management, file structure
+library(data.table)
+```
+
+```{r}
+#Import baseline corrected fluorometer data
+flu <- read.csv(here("outputs", "kc10_fzh01_dfo2_profs_qc1_2024-12-18.csv"))
+
+off <- read.csv(here("outputs", "offset_low_month_mean.csv"))
+
+#Importing PRUTH data
+ctd <- read.csv(here("files_big", "8_binAvg-1736884493539.csv"))
+
+#For some reason the portal cut out the ctd serial number column from the main csv, so porting it in here.
+meta <- read.csv(here("files_big", "ctd-meta-1736884509824.csv"))
+
+#Adding QCS07 data.
+ctd_q7 <- read.csv(here("files_big", "qcs07_data.csv"))
+
+#For some reason the portal cut out the ctd serial number column from the main csv, so porting it in here.
+meta_q7 <- read.csv(here("files_big", "qcs07_meta.csv"))
+
+#import discrete chlorophyll data
+chl <- read_csv(here("files", "chl_all_station_2024-10-25.csv"))
+```
+
+```{r}
+ctd <- rbind(ctd, ctd_q7)
+
+meta <- rbind(meta, meta_q7)
+```
+
+```{r}
+
+#For now, just bringing in the CTD serial number, but I may need to pull more
+
+#Isolating the castpk and serial number.
+meta <- meta %>% 
+  select(Cast.PK, ctdNum = CTD.serial.number, ctdFirm = CTD.firmware.version)
+
+#Joining the CTD information to the dataset.
+ctd <- ctd %>% 
+  left_join(meta)
+
+```
+```{r}
+#Wrangling CTD profiles, setting date column and renaming columns 
+prof <- ctd %>%
+  filter(Cast.Direction.Flag == "d") %>% #downcast data
+  mutate(date = lubridate::date(Measurement.time)) %>%
+  mutate(year = lubridate::year(Measurement.time)) %>%
+  select(castpk = Cast.PK,
+         Cruise,
+         ctdNum,
+         ctdFirm,
+         station = Station,
+         lat = Latitude,
+         long = Longitude,
+         time = Measurement.time,
+         date,
+         year,
+         dep = Depth..m.,
+         pres = Pressure..dbar.,
+         flu = Fluorometry.Chlorophyll..ug.L.,
+         turb = Turbidity..FTU.)
+```
+
+```{r}
+#Filtering out KC10 size fractionated data that does not have a SVD flag, doing a daily average for replicates and then calculating a size-fractionated sum
+chl_sf <- chl %>% 
+  filter(site_id == "PRUTH" | site_id == "QCS01") %>% 
+  filter(!is.na(chla)) %>%
+  filter(chla > 0) %>% 
+  filter(chla_flag == "AV" | chla_flag == "SVC" | is.na(chla_flag)) %>%
+  filter(!filter_type == "Bulk GF/F") %>% 
+  group_by(event_pk, site_id, date, line_out_depth) %>% 
+  mutate(n_filt = n()) %>% 
+  ungroup() %>% 
+  group_by(event_pk, site_id, date, line_out_depth, filter_type) %>% 
+  mutate(n_type = n()) %>% 
+  ungroup() %>% 
+  filter(n_filt == 3 & n_type == 1) %>% 
+  group_by(site_id, date, line_out_depth, filter_type) %>% 
+  mutate(avg_chla = mean(chla),
+            n_dup = n()) %>% 
+  ungroup() %>% 
+  group_by(site_id, date, line_out_depth) %>% 
+  mutate(sum_chl_avg = sum(avg_chla)) %>% 
+  ungroup() %>% 
+  mutate(dep_diff_sf = line_out_depth - pressure_transducer_depth) %>% 
+  select(event_pk, date, site_id, line_out_depth, dep_diff_sf,
+         sum_chl_avg) 
+  
+
+#Doing the same but pulling out bulk chlorophyll
+chl_bulk <- chl %>%
+  filter(site_id == "PRUTH" | site_id == "QCS01") %>%  
+  filter(!is.na(chla)) %>% 
+  filter(chla_flag == "AV" | chla_flag == "SVC" | is.na(chla_flag)) %>%
+  filter(filter_type == "Bulk GF/F") %>% 
+  group_by(event_pk, site_id, date, line_out_depth) %>% 
+  mutate(n_filt = n()) %>% 
+  ungroup() %>% 
+  mutate(dep_diff_bulk= line_out_depth - pressure_transducer_depth) %>% 
+  select(event_pk, date, site_id, line_out_depth, dep_diff_bulk, chla)  
+  
+#Joining the bulk and size-fractionated sum so both are available - use the most available or fill when one is available and the other isn't
+chl_qc <- chl_sf %>% 
+  left_join(chl_bulk) %>% 
+  mutate(year = lubridate::year(date),
+         month = lubridate::month(date)) %>% 
+  rename(depth = line_out_depth) %>% 
+  mutate(depth = case_when(depth == 0 ~ 1,
+                           TRUE ~ as.numeric(depth))) %>% 
+  rename(station = site_id) %>% 
+  distinct()
+
+#Issue here is that samples weren't collected at KC10 for a large chunk of time - they were collected at FZH01. This doesn't matter as I could calibrate the sensor using FZH01 profiles and samples and then bring calibration over to KC10 (I could even expand to a much larger range of stations to increase sample size). I just need to QC more profiles!
+```
+
+
+
+```{r}
+#Looking at profiles where we have discrete chla matches.
+prof_join <- prof %>% 
+  group_by(date, station, pres, ctdNum) %>% 
+  summarise(flu_avg = mean(flu, na.rm = F)) %>% 
+  ungroup() %>% 
+  rename(depth = pres) %>% 
+  mutate(date = lubridate::ymd(date)) %>% 
+  left_join(chl_qc)
+```
+```{r}
+#So we do get quite a few additional matches here and they seem to look pretty good, maybe because the more sheltered location at PRUTH?
+prof_join %>% 
+  filter(!is.na(sum_chl_avg)) %>% 
+  ggplot(aes(x = sum_chl_avg, y = flu_avg, color = station)) +
+  geom_point() +
+  facet_wrap(~ctdNum)
+```
+
+```{r}
+prof_match_date <- prof_join %>% 
+  filter(!is.na(sum_chl_avg)) %>%
+  filter(station == "PRUTH") %>% 
+  distinct(date)
+
+#Creating a list of dates where there are Pruth CTD-Discrete Matches.
+pruth_date_list <- prof_match_date$date 
+
+#Going back to profile sheet where I didn't do daily averages, so I can retain all of the casts done on those days - cut it down considerably
+prof_match <- prof %>%
+  filter(station == "PRUTH") %>% 
+  filter(date %in% pruth_date_list)
+
+prof_ds <- prof %>% 
+  filter(station == "QCS01" | station == "QCS07")
+
+prof_ds <- rbind(prof_ds, prof_match)
+```
+
+```{r}
+#Determining total number of profiles - 176 
+prof_num <- prof_ds %>% 
+  select(castpk, station) %>% 
+  group_by(station) %>% 
+  distinct(castpk, station) %>% 
+  summarise(n = n()) %>% 
+  ungroup()
+```
+
+```{r}
+#Joining the monthly mean offset data with the pruth casts with matches
+off <- off %>%
+  mutate(month = lubridate::month(date),
+         year = lubridate::year(date)) %>%
+  select(year, month, min_mean_month)
+
+prof_ds <- prof_ds %>%
+    mutate(month = lubridate::month(date),
+         year = lubridate::year(date)) %>%
+  left_join(off)
+
+no_match <- prof_ds %>% 
+  filter(is.na(min_mean_month)) %>% 
+  distinct(castpk, .keep_all = T)
+```
+
+
+```{r}
+#Adding dark value for the casts that only went to 100m and a dark value couldn't be derived.
+prof_ds <- prof_ds %>% 
+  mutate(min_mean_month = case_when(ctdNum == 18032 & 
+                                is.na(min_mean_month) &
+                                year < 2014 ~ 0.06398537,
+                              ctdNum == 18066 & 
+                                is.na(min_mean_month) &
+                                year < 2014 ~ 0.06063780,
+                              TRUE ~ as.numeric(min_mean_month)))
+
+no_match2 <- prof_ds %>% 
+  filter(is.na(min_mean_month)) %>% 
+  distinct(castpk, .keep_all = T)
+
+#Adding dark value for the casts that only went to 100m and a dark value couldn't be derived.
+prof_ds <- prof_ds %>% 
+  filter(!is.na(min_mean_month))
+```
+
+
+```{r}
+#Seeing if any of the days where samples collected at PRUTH were the same as at KC10 or FZH01 
+# distinct_flu <- flu %>% 
+#   filter(station == "KC10" | station == "FZH01" | station == "DFO2") %>% 
+#   group_by(date, station, ctdNum) %>% 
+#   summarize(avg_off = mean(offset)) %>% 
+#   ungroup() %>% 
+#   distinct(date, station, ctdNum, avg_off) %>% 
+#   mutate(date = lubridate::ymd(date)) %>% 
+#   pivot_wider(values_from = avg_off, names_from = station)
+# 
+# setDT(distinct_flu)[, c("Date", "Date1") := as.Date(date)]
+# setDT(prof_match)[, c("Date", "nearest") := as.Date(date)]
+# prof_match2 <- prof_match[distinct_flu, on = .(Date), roll = "nearest"][, Date := NULL][]
+# 
+# 
+# prof_match_date2 <- prof_match2 %>% 
+#   distinct(date) %>% 
+#   mutate(data = T)
+# 
+# #For whatever reason it is not matching some profiles -it could be the bad profiles seen in the plots below
+# test <- prof_match_date %>% 
+#   left_join(prof_match_date2)
+```
+
+```{r}
+#Reduced the number of profiles down to 192.
+prof_num2 <- prof_ds %>% 
+  select(castpk, station) %>% 
+  group_by(station) %>% 
+  distinct(castpk, station) %>% 
+  summarise(n = n()) %>% 
+  ungroup()
+```
+
+```{r}
+prof_red_pruth <- prof_ds %>% 
+  filter(station == "PRUTH") %>% 
+  group_by(castpk) %>%
+  mutate(cast_num = cur_group_id()) %>% 
+ungroup()
+
+prof_red_qcs <- prof_ds %>% 
+  filter(station == "QCS01") %>% 
+  group_by(castpk) %>%
+  mutate(cast_num = cur_group_id()) %>% 
+ungroup()
+
+prof_red_qcs7 <- prof_ds %>% 
+  filter(station == "QCS07") %>% 
+  group_by(castpk) %>%
+  mutate(cast_num = cur_group_id()) %>% 
+ungroup()
+```
+
+```{r}
+#Plotting profiles to check for bad data - doing it in 25 cast chunks and separating by station
+# prof_red_pru %>%
+#   filter(cast_num > 175) %>%
+#   filter(cast_num < 201) %>%
+#   filter(pres < 101) %>%
+#   ggplot(aes(x = flu, y = pres)) +
+#   geom_line(orientation = "y", size = 2) +
+#   # geom_point(data = filter(prof, ctdNum == 80217 & year == 2015), color = "red") +
+#   # geom_point(data = filter(prof, castpk == 3826), color = "purple") +
+#   # geom_point(data = filter(prof, flu < 0), color = "pink") +
+#   scale_y_reverse() +
+#   facet_wrap(~castpk, scales = "free")
+# 
+# #Printing for easier visualization - just make sure to re-name with appropriate numbers
+# ggsave(here("figures", "prof_check_175-200_pruth.png"), 
+#        width = 16, height = 16, dpi = 300)
+
+#1767 saturated
+#2243 - bad data
+#2606 - straight line
+#5322 - NO DATA
+#9036 - bad data
+#9748 - dark cast?
+
+#80217 from 2015 removed as didn't have a dark count carried over
+```
+
+
+```{r}
+# Plotting profiles to check for bad data - doing it in 25 cast chunks and separating by station
+prof_red_qcs7 %>%
+  filter(cast_num > 25) %>%
+  # filter(cast_num < 26) %>%
+  filter(pres < 101) %>%
+  ggplot(aes(x = flu, y = pres)) +
+  geom_line(orientation = "y", size = 2) +
+  # geom_point(data = filter(prof, ctdNum == 80217 & year == 2015), color = "red") +
+  # geom_point(data = filter(prof, castpk == 3826), color = "purple") +
+  # geom_point(data = filter(prof, flu < 0), color = "pink") +
+  scale_y_reverse() +
+  facet_wrap(~castpk, scales = "free")
+
+#Printing for easier visualization - just make sure to re-name with appropriate numbers
+ggsave(here("figures", "prof_check_25-56_qcs07.png"),
+       width = 16, height = 16, dpi = 300)
+
+#10905 - pretty weird
+#10885 - weird
+#11010 - weird
+#15394 - saturated
+#18688 - saturated
+
+#QCS07 - 9400 saturated.
+
+#80217 from 2015 removed as didn't have a dark count carried over
+```
+
+
+
+```{r}
+prof_red_qcs7 %>%
+  filter(castpk == 9400) %>% 
+  ggplot(aes(x = flu, y = pres)) +
+  geom_line(orientation = "y", size = 2) +
+  # geom_point(data = filter(prof, ctdNum == 80217 & year == 2015), color = "red") +
+  # geom_point(data = filter(prof, castpk == 3826), color = "purple") +
+  # geom_point(data = filter(prof, flu < 0), color = "pink") +
+  scale_y_reverse() 
+```
+
+
+
+
+
+
+
+```{r}
+#removing data where we know the instrument was malfunctioning 
+prof_qc1 <- prof_ds %>%
+  filter(!castpk == 1767) %>% 
+  filter(!castpk == 2606) %>% 
+  filter(!castpk == 2243) %>% 
+  filter(!castpk == 5322) %>% 
+  filter(!castpk == 9036) %>% 
+  filter(!castpk == 9400) %>% 
+  filter(!castpk == 9748) %>% 
+  filter(!castpk == 10905) %>% 
+  filter(!castpk == 10885) %>% 
+  filter(!castpk == 11010) %>% 
+  filter(!castpk == 15394) %>% 
+  filter(!castpk == 18688) 
+
+#removing zero or negative values
+prof_qc1 <- prof_qc1 %>% 
+  mutate(flu = replace(flu, which( flu < 0), NA),
+         flu = replace(flu, which( flu == 0), NA),
+         flu = replace(flu, which( flu < 0.01), NA))
+```
+
+```{r}
+#Creating corrected column where offsets are subtracted.
+prof_qc1 <- prof_qc1 %>% 
+  rename(offset = min_mean_month) %>% 
+  mutate(flu_cor = flu - offset) %>% 
+  select(-turb)
+
+#checking how many negatives the correction creates - likely a lot, but hopefully mostly deep
+check_neg_final <- prof_qc1 %>% 
+  filter(flu_cor < 0)
+
+#Re-zeroing negatived created by offset removal.
+prof_qc1 <- prof_qc1 %>% 
+  mutate(flu = replace(flu_cor, which(flu_cor < 0), 0))
+```
+
+
+
+```{r}
+flu <- flu %>% 
+  select(-X) %>% 
+  mutate(date = lubridate::date(date)) 
+
+prof_qc1 <- prof_qc1 %>% 
+  select(-month) %>% 
+  mutate(date = lubridate::date(date))
+
+flu <- rbind(flu, prof_qc1)
+```
+
+```{r}
+write.csv(flu, here("outputs", "kc10_fzh01_dfo2_pruth_profs_qcs_qcs7_qc1_2025-01-14.csv"))
+```

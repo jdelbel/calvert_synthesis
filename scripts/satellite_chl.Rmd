@@ -1,0 +1,141 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+https://coastwatch.gitbook.io/satellite-course/tutorials/r-tutorial/1.-how-to-work-with-satellite-data-in-r
+
+```{r}
+library(ncdf4)
+library(httr)
+library(tidyverse)
+```
+
+```{r}
+junk <- GET('https://catalogue.hakai.org/erddap/griddap/sentinel_3A_POLYMER_8Day.nc?chl_conc_mean%5B(2024-01-01T00:00:00Z):1:(2024-12-31T00:00:00Z)%5D%5B(51.674002874595764):1:(51.63357887172117)%5D%5B(-127.93253683075817):1:(-127.89480776140854)%5D', write_disk("chl.nc", overwrite = TRUE))
+
+```
+
+```{r}
+nc = nc_open('chl.nc')
+names(nc$var)
+```
+```{r}
+print(nc)
+```
+
+
+
+
+
+```{r}
+v1 = nc$var[[1]]
+chl = ncvar_get(nc,v1)
+```
+
+```{r}
+dim(chl)
+```
+```{r}
+dates=as.POSIXlt(v1$dim[[3]]$vals,origin='1970-01-01',tz='GMT') 
+dates
+```
+
+```{r}
+lon = v1$dim[[1]]$vals 
+lat = v1$dim[[2]]$vals
+```
+
+
+
+
+
+
+```{r}
+nc_close(nc) 
+rm(junk,v1) 
+# file.remove('chl.nc')
+```
+
+
+```{r}
+# h = hist(chl[,,1], 100, plot=FALSE) 
+# breaks=h$breaks 
+# n=length(breaks)-1
+# 
+# jet.colors <-colorRampPalette(c("blue", "#007FFF", "cyan","#7FFF7F", "yellow", "#FF7F00", "red", "#7F0000"))
+# 
+# c=jet.colors(n)
+# 
+# layout(matrix(c(1,2,3,0,4,0), nrow=1, ncol=2), widths=c(5,1), heights=4) 
+# layout.show(2) 
+# par(mar=c(3,3,3,1))
+# 
+# image(lon,lat,chl[,,1],col=c,breaks=breaks,xlab='',ylab='',axes=TRUE,xaxs='i',yaxs='i',asp=1, main=paste("Monthly SST", dates[1]))
+```
+
+
+
+```{r}
+# I=which(lon>=-127.93523176428313 & lon<=-127.89480776140854)
+# J=which(lat>=51.674002874595764 & lat<=51.63357887172117)
+# chl2=chl[I,J,] 
+
+n = dim(chl)[3] 
+
+res=rep(NA,n) 
+for (i in 1:n) 
+    res[i] = mean(chl[,,i], na.rm = TRUE)
+```
+
+```{r}
+chl
+```
+
+
+
+```{r}
+res2 = rep(NA,n) 
+for (i in 1:n) 
+    res2[i]=sd(chl[,,i],na.rm=TRUE)
+```
+
+
+```{r}
+plot(1:n, res2, axes=FALSE, type='o', pch=20, xlab='',ylab='SST (ºC)') 
+axis(2) 
+axis(1,1:n,format(dates,'%M')) 
+box()
+```
+
+
+
+```{r}
+dates2 <- tibble::as.tibble(dates)
+dates2 <- dates2 %>% 
+  rename(date = value)
+
+chl_avg <- tibble::as.tibble(res)
+
+chl_avg <- chl_avg %>% 
+  rename(chl = value)
+
+chl_t <- tibble::as.tibble(chl)
+
+test <- cbind(dates2, chl_avg)
+
+
+```
+
+```{r}
+test %>% 
+  ggplot(aes(x = date, y = chl)) +
+  geom_point() +
+  geom_line()
+```
+```{r}
+test2 <- data.frame(matrix(chl, ncol = 3, byrow=TRUE))
+
+chl
+```
+

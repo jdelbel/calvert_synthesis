@@ -1,0 +1,328 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+#Loading packages
+library(tidyverse) #data wrangling
+library(patchwork) #plotting panels
+library(readxl) #read excel files
+library(here) #data management, file structure
+library(scales)
+library(ggpmisc)
+```
+
+```{r}
+#Import baseline corrected fluorometer data
+flu <- read.csv(here("outputs", "kc10_fzh01_dfo2_pruth_profs_qcs_qc1_2025-01-14.csv"))
+
+#import discrete chlorophyll data
+chl <- read_csv(here("files", "chl_all_station_2024-10-25.csv"))
+```
+```{r}
+#Checking stations
+distinct_flu <- flu %>% 
+  distinct(station)
+
+distinct_chl <- chl %>% 
+  distinct(site_id)
+```
+
+
+
+
+```{r}
+#Filtering out KC10 size fractionated data that does not have a SVD flag, doing a daily average for replicates and then calculating a size-fractionated sum
+chl_sf <- chl %>% 
+  filter(site_id == "KC10" | site_id == "FZH01" | site_id == "DFO2" | 
+           site_id == "PRUTH" | site_id == "QCS01") %>% 
+  filter(!is.na(chla)) %>%
+  filter(chla > 0) %>% 
+  filter(chla_flag == "AV" | chla_flag == "SVC" | is.na(chla_flag)) %>%
+  filter(!filter_type == "Bulk GF/F") %>% 
+  group_by(event_pk, site_id, date, line_out_depth) %>% 
+  mutate(n_filt = n()) %>% 
+  ungroup() %>% 
+  group_by(event_pk, site_id, date, line_out_depth, filter_type) %>% 
+  mutate(n_type = n()) %>% 
+  ungroup() %>% 
+  filter(n_filt == 3 & n_type == 1) %>% 
+  group_by(site_id, date, line_out_depth, filter_type) %>% 
+  mutate(avg_chla = mean(chla),
+            n_dup = n()) %>% 
+  ungroup() %>% 
+  group_by(site_id, date, line_out_depth) %>% 
+  mutate(sum_chl_avg = sum(avg_chla)) %>% 
+  ungroup() %>% 
+  mutate(dep_diff_sf = line_out_depth - pressure_transducer_depth) %>% 
+  select(event_pk, date, site_id, line_out_depth, dep_diff_sf,
+         sum_chl_avg) 
+  
+
+#Doing the same but pulling out bulk chlorophyll
+chl_bulk <- chl %>%
+  filter(site_id == "KC10" | site_id == "FZH01" | site_id == "DFO2" | 
+           site_id == "PRUTH" | site_id == "QCS01") %>%   
+  filter(!is.na(chla)) %>% 
+  filter(chla_flag == "AV" | chla_flag == "SVC" | is.na(chla_flag)) %>%
+  filter(filter_type == "Bulk GF/F") %>% 
+  group_by(event_pk, site_id, date, line_out_depth) %>% 
+  mutate(n_filt = n()) %>% 
+  ungroup() %>% 
+  mutate(dep_diff_bulk= line_out_depth - pressure_transducer_depth) %>% 
+  select(event_pk, date, site_id, line_out_depth, dep_diff_bulk, chla)  
+  
+#Joining the bulk and size-fractionated sum so both are available - use the most available or fill when one is available and the other isn't
+chl_qc <- chl_sf %>% 
+  left_join(chl_bulk) %>% 
+  mutate(year = lubridate::year(date),
+         month = lubridate::month(date)) %>% 
+  rename(depth = line_out_depth) %>% 
+  mutate(depth = case_when(depth == 0 ~ 1,
+                           TRUE ~ as.numeric(depth))) %>% 
+  rename(station = site_id) %>% 
+  distinct()
+
+#Issue here is that samples weren't collected at KC10 for a large chunk of time - they were collected at FZH01. This doesn't matter as I could calibrate the sensor using FZH01 profiles and samples and then bring calibration over to KC10 (I could even expand to a much larger range of stations to increase sample size). I just need to QC more profiles!
+```
+
+```{r}
+#For the KC10 fluorometer data, I am going to start out by doing a daily average for replicate casts, but this should be looked at
+flu_dm <- flu %>% 
+  group_by(date, station, pres, ctdNum) %>% 
+  summarise(flu_avg = mean(flu_cor, na.rm = F)) %>% 
+  ungroup() %>% 
+  rename(depth = pres) %>% 
+  mutate(date = lubridate::ymd(date))
+```
+
+```{r}
+#Joining the daily averaged replicate casts and chlorophyll data
+flu_join <- flu_dm %>% 
+  left_join(chl_qc)
+```
+
+
+
+```{r}
+#Trying to split up instruments from when they show basline offset changes - next step is to see if these line-up with calibrations.
+
+check_066 <- flu_join %>% 
+  mutate(year = lubridate::year(date)) %>%
+  filter(ctdNum == 18066) %>% 
+  distinct(date)
+  
+flu_join <- flu_join %>% 
+  mutate(year = lubridate::year(date)) %>%
+  mutate(ctdNum2 = case_when(ctdNum == 18066 & year > 2017 ~ 180662,
+                             TRUE ~ as.numeric(ctdNum)))
+
+```
+
+
+```{r}
+#Plotting 18032 
+flu_join %>% 
+  mutate(year = lubridate::year(date)) %>% 
+  filter(!is.na(sum_chl_avg)) %>%
+  filter(ctdNum2 == 180662 & depth > 9) %>% 
+  ggplot(aes(y = sum_chl_avg, x = flu_avg)) +
+  geom_point(aes(fill = as.factor(station)), size = 5, pch = 21) +
+  geom_abline(slope = 1) +
+  geom_smooth(method = "lm", color = "black") +
+  # geom_smooth(data = filter(flu_join, depth > 1),
+  #             method = "lm", color = "blue") + 
+  ggpubr::stat_cor(aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")),
+                   p.accuracy = 0.001, size = 9, label.y.npc = 0.9) +
+  ggpubr::stat_regline_equation(size = 9, label.y.npc = 0.96) +
+  # ggpubr::stat_cor(data = filter(flu_join, depth > 1 & ctdNum == 18032),
+  #                  aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")),
+  #                  p.accuracy = 0.001, size = 9, label.y.npc = 0.75,
+  #                  color = "blue") +
+  # ggpubr::stat_regline_equation(data = filter(flu_join, depth > 1 & ctdNum == 18032),
+  #                               size = 9, label.y.npc = 0.8,
+  #                               color = "blue") +
+  # facet_wrap(~year) +
+  lims(x = c(0, 40),
+       y = c(0, 40)) +
+  labs(fill = NULL) +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"))
+
+
+# ggsave(here("figures", "scatter_fluorometer_bulk_18032_all_pruth_gt-9m.png"), 
+#         width = 10, height = 8, dpi = 300)
+
+#September 1st, 2015 - 10% low and adjusted
+#October 27th, 2016 - in spec.
+#May 30th, 2018 - in spec.
+#March 9th, 2021 - in spec
+
+#Anything prior to 2015 should be kept separate - decent coverage following.
+```
+
+
+```{r}
+#Plotting 18066
+flu_join %>% 
+  mutate(year = lubridate::year(date)) %>% 
+  filter(!is.na(chla)) %>%
+  filter(ctdNum2 == 180662 & depth > 9 & station == "KC10") %>% 
+  mutate(fr = flu_avg/sum_chl_avg) %>% 
+  # filter(!(fr > 2.5 & flu_avg > 5)) %>% 
+  ggplot(aes(y = chla, x = flu_avg)) +
+  geom_point(aes(fill = station), size = 5, pch = 21) +
+  geom_abline(slope = 1) +
+  geom_smooth(method = "lm", color = "black") +
+  # geom_smooth(data = filter(flu_join, depth > 1),
+  #             method = "lm", color = "blue") + 
+  ggpubr::stat_cor(aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")),
+                   p.accuracy = 0.001, size = 9, label.y.npc = 0.9) +
+  ggpubr::stat_regline_equation(size = 9, label.y.npc = 0.96) +
+  # ggpubr::stat_cor(data = filter(flu_join, depth > 1 & ctdNum == 18032),
+  #                  aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")),
+  #                  p.accuracy = 0.001, size = 9, label.y.npc = 0.75,
+  #                  color = "blue") +
+  # ggpubr::stat_regline_equation(data = filter(flu_join, depth > 1 & ctdNum == 18032),
+  #                               size = 9, label.y.npc = 0.8,
+  #                               color = "blue") +
+  # facet_wrap(~year) +
+  lims(x = c(0, 40),
+       y = c(0, 40)) +
+  labs(fill = NULL) +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"))
+
+# ggsave(here("figures", "scatter_fluorometer_bulk_18066-2_pruth_gt-9.png"), 
+#         width = 10, height = 8, dpi = 300)
+
+#March 6th, 2018 - in spec
+
+```
+```{r}
+#Plotting 18066
+flu_join %>% 
+  mutate(year = lubridate::year(date)) %>% 
+  filter(!is.na(sum_chl_avg)) %>%
+  filter(ctdNum2 == 80217 & depth > 9) %>% 
+  mutate(fr = flu_avg/sum_chl_avg) %>% 
+  # filter(!(fr > 2.5 & flu_avg > 5)) %>% 
+  ggplot(aes(y = sum_chl_avg, x = flu_avg)) +
+  geom_point(aes(fill = station), size = 5, pch = 21) +
+  geom_abline(slope = 1) +
+  geom_smooth(method = "lm", color = "black") +
+  # geom_smooth(data = filter(flu_join, depth > 1),
+  #             method = "lm", color = "blue") + 
+  ggpubr::stat_cor(aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")),
+                   p.accuracy = 0.001, size = 9, label.y.npc = 0.9) +
+  ggpubr::stat_regline_equation(size = 9, label.y.npc = 0.96) +
+  # ggpubr::stat_cor(data = filter(flu_join, depth > 1 & ctdNum == 18032),
+  #                  aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")),
+  #                  p.accuracy = 0.001, size = 9, label.y.npc = 0.75,
+  #                  color = "blue") +
+  # ggpubr::stat_regline_equation(data = filter(flu_join, depth > 1 & ctdNum == 18032),
+  #                               size = 9, label.y.npc = 0.8,
+  #                               color = "blue") +
+  # facet_wrap(~year) +
+  lims(x = c(0, 40),
+       y = c(0, 40)) +
+  labs(fill = NULL) +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"))
+
+# ggsave(here("figures", "scatter_fluorometer_sfsum_80217-2_all.png"), 
+#         width = 10, height = 8, dpi = 300)
+
+#February 7th, 2018 - in spec
+#Seems to be some missing calibration sheets.
+```
+```{r}
+#Plotting 18066
+flu_join %>% 
+  mutate(year = lubridate::year(date)) %>% 
+  filter(!is.na(sum_chl_avg)) %>%
+  filter(ctdNum2 == 211567 & depth > 9 & flu_avg < 18) %>% 
+  mutate(fr = flu_avg/sum_chl_avg) %>% 
+  # filter(!(fr > 2.5 & flu_avg > 5)) %>% 
+  ggplot(aes(y = sum_chl_avg, x = flu_avg)) +
+  geom_point(aes(fill = station), size = 5, pch = 21) +
+  geom_abline(slope = 1) +
+  geom_smooth(method = "lm", color = "black") +
+  # geom_smooth(data = filter(flu_join, depth > 1),
+  #             method = "lm", color = "blue") + 
+  ggpubr::stat_cor(aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")),
+                   p.accuracy = 0.001, size = 9, label.y.npc = 0.9) +
+  ggpubr::stat_regline_equation(size = 9, label.y.npc = 0.96) +
+  # ggpubr::stat_cor(data = filter(flu_join, depth > 1 & ctdNum == 18032),
+  #                  aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")),
+  #                  p.accuracy = 0.001, size = 9, label.y.npc = 0.75,
+  #                  color = "blue") +
+  # ggpubr::stat_regline_equation(data = filter(flu_join, depth > 1 & ctdNum == 18032),
+  #                               size = 9, label.y.npc = 0.8,
+  #                               color = "blue") +
+  # facet_wrap(~year) +
+  lims(x = c(0, 40),
+       y = c(0, 40)) +
+  labs(fill = NULL) +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"))
+
+# ggsave(here("figures", "scatter_fluorometer_sfsum_211567_all.png"), 
+#         width = 10, height = 8, dpi = 300)
+```
+```{r}
+#Plotting 18066
+flu_join %>% 
+  mutate(year = lubridate::year(date)) %>% 
+  filter(!is.na(sum_chl_avg)) %>%
+  filter(ctdNum2 == 1907467 & depth > 9) %>% 
+  mutate(fr = flu_avg/sum_chl_avg) %>% 
+  # filter(!(fr > 2.5 & flu_avg > 5)) %>% 
+  ggplot(aes(y = sum_chl_avg, x = flu_avg)) +
+  geom_point(aes(fill = station), size = 5, pch = 21) +
+  geom_abline(slope = 1) +
+  geom_smooth(method = "lm", color = "black") +
+  # geom_smooth(data = filter(flu_join, depth > 1),
+  #             method = "lm", color = "blue") + 
+  ggpubr::stat_cor(aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")),
+                   p.accuracy = 0.001, size = 9, label.y.npc = 0.9) +
+  ggpubr::stat_regline_equation(size = 9, label.y.npc = 0.96) +
+  # ggpubr::stat_cor(data = filter(flu_join, depth > 1 & ctdNum == 18032),
+  #                  aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")),
+  #                  p.accuracy = 0.001, size = 9, label.y.npc = 0.75,
+  #                  color = "blue") +
+  # ggpubr::stat_regline_equation(data = filter(flu_join, depth > 1 & ctdNum == 18032),
+  #                               size = 9, label.y.npc = 0.8,
+  #                               color = "blue") +
+  # facet_wrap(~year) +
+  lims(x = c(0, 40),
+       y = c(0, 40)) +
+  labs(fill = NULL) +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"))
+
+# ggsave(here("figures", "scatter_fluorometer_sfsum_1907476_gt9.png"), 
+#         width = 10, height = 8, dpi = 300)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

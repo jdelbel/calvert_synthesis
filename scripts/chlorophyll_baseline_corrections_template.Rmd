@@ -16,10 +16,8 @@ library(ggpmisc)
 ```{r}
 #Downloading data - I need to download new versions of both QU24 and QU39 as changes made to the portal making it hard to bind the files.
 
-
-
 #Download CTD data - entire QU39 data-set
-ctd <- read.csv(here("files_big", "ctd_kc10_2024-03-27.csv"))
+ctd <- read.csv(here("files_big", "8_binAvg-1732667354443.csv"))
 
 ```
 
@@ -102,9 +100,9 @@ ungroup()
 ```{r}
 #For now, I am removing the above list of profiles, but this needs to be reviewed as some may be salvagable. 
 
-# prof_qc1 <- prof %>%
-#   filter(!(ctdNum == 80217 & year == 2015)) %>% 
-#   filter(!castpk == 3826)
+prof_qc1 <- prof %>%
+  filter(!(ctdNum == 80217 & year == 2015)) 
+  # filter(!castpk == 3826)
 
 #I am also removing records that have zero or negative values. I investigated these and they are from the seabird CTDs and result in a poor dark count as they pull the mean down. 
 
@@ -181,7 +179,7 @@ prof_20 %>%
   theme(text = element_text(size = 40),
         axis.text = element_text(colour = "black"))
 
-ggsave(here("figures", "dark_correction_mean_minimum_10_all_ctds_kc10_rem_80217.png"), 
+ggsave(here("figures", "dark_correction_mean_minimum_RVRS01.png"), 
        width = 16, height = 16, dpi = 300)
 
 ```
@@ -222,7 +220,7 @@ prof_qc1 <- arrange(mutate(prof_qc1,
 ```
 
 ```{r}
-write.csv(prof_qc1, here("outputs", "kc10_profs_qc1.csv"))
+write.csv(prof_qc1, here("outputs", "rvrs01_profs_qc1.csv"))
 ```
 
 

@@ -1,0 +1,680 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+#Loading packages
+library(tidyverse) #data wrangling
+library(patchwork) #plotting panels
+library(readxl) #read excel files
+library(here) #data management, file structure
+library(scales)
+library(ggpmisc)
+```
+
+```{r}
+#Download CTD data - entire KC10 FZH01, DFO2 dataset (I really could expand to look at dark count consistency, but these are all deep stations)
+ctd <- read.csv(here("files_big", "8_binAvg-1734114948350.csv"))
+
+#For some reason the portal cut out the ctd serial number column from the main csv, so porting it in here.
+meta <- read.csv(here("files", "ctd-meta-1734115567369.csv"))
+```
+
+```{r}
+#For now, just bringing in the CTD serial number, but I may need to pull more
+
+#Isolating the castpk and serial number.
+meta <- meta %>% 
+  select(Cast.PK, ctdNum = CTD.serial.number, ctdFirm = CTD.firmware.version)
+
+#Joining the CTD information to the dataset.
+ctd <- ctd %>% 
+  left_join(meta)
+```
+
+```{r}
+#Wrangling CTD profiles, setting date column and renaming columns 
+prof <- ctd %>%
+  filter(Cast.Direction.Flag == "d") %>% #downcast data
+  mutate(date = lubridate::date(Measurement.time)) %>%
+  mutate(year = lubridate::year(Measurement.time)) %>%
+  select(castpk = Cast.PK,
+         Cruise,
+         ctdNum,
+         ctdFirm,
+         station = Station,
+         lat = Latitude,
+         long = Longitude,
+         time = Measurement.time,
+         date,
+         year,
+         dep = Depth..m.,
+         pres = Pressure..dbar.,
+         flu = Fluorometry.Chlorophyll..ug.L.,
+         turb = Turbidity..FTU.)
+```
+
+```{r}
+#Determining total number of profiles - 241 
+prof_num <- prof %>% 
+  select(castpk, station) %>% 
+  group_by(station) %>% 
+  distinct(castpk, station) %>% 
+  summarise(n = n()) %>% 
+  ungroup()
+```
+
+```{r}
+#creating cast number to organize plotting profiles - used to plot for visual checks.
+prof_dfo2 <- prof %>% 
+  filter(station == "DFO2") %>% 
+  group_by(castpk) %>%
+  mutate(cast_num = cur_group_id()) %>% 
+ungroup()
+
+prof_fzh01 <- prof %>% 
+  filter(station == "FZH01") %>% 
+  group_by(castpk) %>%
+  mutate(cast_num = cur_group_id()) %>% 
+ungroup()
+```
+
+```{r}
+#Plotting profiles to check for bad data - doing it in 25 cast chunks and separating by station
+prof_dfo2 %>% 
+  filter(cast_num > 175) %>%
+  filter(cast_num < 201) %>%
+  filter(pres < 101) %>% 
+  ggplot(aes(x = flu, y = pres)) +
+  geom_line(orientation = "y", size = 2) +
+  # geom_point(data = filter(prof, ctdNum == 80217 & year == 2015), color = "red") +
+  # geom_point(data = filter(prof, castpk == 3826), color = "purple") +
+  # geom_point(data = filter(prof, flu < 0), color = "pink") +
+  scale_y_reverse() +
+  facet_wrap(~castpk, scales = "free")
+
+#Printing for easier visualization - just make sure to re-name with appropriate numbers
+ggsave(here("figures", "prof_check_176-200_dfo2.png"), 
+       width = 16, height = 16, dpi = 300)
+```
+
+```{r}
+#Plotting profiles to check for bad data - doing it in 25 cast chunks and separating by station
+prof_fzh01 %>% 
+  filter(cast_num > 200) %>%
+  filter(cast_num < 226) %>%
+  filter(pres < 101) %>% 
+  ggplot(aes(x = flu, y = pres)) +
+  geom_line(orientation = "y", size = 2) +
+  # geom_point(data = filter(prof, ctdNum == 80217 & year == 2015), color = "red") +
+  # geom_point(data = filter(prof, castpk == 3826), color = "purple") +
+  # geom_point(data = filter(prof, flu < 0), color = "pink") +
+  scale_y_reverse() +
+  facet_wrap(~castpk, scales = "free")
+
+#Printing for easier visualization - just make sure to re-name with appropriate numbers
+ggsave(here("figures", "prof_check_201-225_fzh01.png"), 
+       width = 16, height = 16, dpi = 300)
+
+#3827
+#4984
+#5107
+#5168
+#Above 80217?
+#7482 - very odd profile
+#9029 - clear issue
+#23180 - strong downspikes - through further inspection this does not look good and needs to be removed.
+
+```
+
+
+```{r}
+#For DFO2
+#4990
+#5074
+#5173
+#these must be 80217? Check.
+#8406 has some negative spikes - will keep it for now as looks ok.
+#9403 saturated
+```
+
+```{r}
+#All of these are from 80217 and will be removed from
+check_dfo <- prof_dfo2 %>% 
+  filter(castpk == 4990 | castpk == 5074 | castpk == 5173) %>% 
+  distinct(ctdNum, date)
+
+#All of these are from 80217
+check_fzh01 <- prof_fzh01 %>% 
+  filter(castpk == 3827 | castpk == 4984 | castpk == 5107 | castpk == 5168) %>% 
+  distinct(ctdNum, date)
+```
+
+```{r}
+prof %>% 
+  # filter(pres < 101) %>%
+  filter(ctdNum == 80217 & year == 2015) %>% 
+  ggplot(aes(x = flu, y = pres)) +
+  geom_line(orientation = "y", size = 2) +
+  scale_y_reverse() +
+  facet_wrap(~castpk, scales = "free")
+```
+
+```{r}
+# 14429 - saturated
+# 18683 - saturated
+
+prof %>% 
+  filter(pres < 25) %>%
+  filter(castpk == 14429 | castpk == 18682) %>% 
+  ggplot(aes(x = flu, y = pres)) +
+  geom_line(orientation = "y", size = 2) +
+  scale_y_reverse() +
+  facet_wrap(~castpk, scales = "free")
+
+```
+```{r}
+#These are likely quenched under low biomass conditions
+prof %>% 
+  filter(pres < 25) %>%
+  filter(castpk == 2055 | castpk == 2061 | castpk == 2767) %>% 
+  ggplot(aes(x = flu, y = pres)) +
+  geom_line(orientation = "y", size = 2) +
+  scale_y_reverse() +
+  facet_wrap(~castpk, scales = "free")
+```
+```{r}
+#I don't trust this profile - not sure what would cause such a steady decline and high fluorescence throught water column.
+prof %>% 
+  # filter(pres < 150) %>%
+  filter(castpk == 3826) %>% 
+  ggplot(aes(x = flu, y = pres)) +
+  geom_line(orientation = "y", size = 2) +
+  scale_y_reverse() +
+  facet_wrap(~castpk, scales = "free")
+```
+
+
+```{r}
+#Lists of questionable profiles - bad data or profile starts deeper than 3m depth. I should separate the profiles that start deeper in case some can be saved -  don't need to be removed with bad data casts.
+
+# prof_check_list <- c(258, #Needs further investigation - SVD flag for CTD parameters - REMOVE
+#                      706, #Only goes to about 60m - Keep depending on integration depth. Righ now 100m.
+#                      754, #Starts deep - REMOVE
+#                      761, #Starts deep - REMOVE
+#                      798, #starts deep - REMOVE
+#                      965, #starts deep, but only at 4m. REMOVE for now.
+#                      1076, #starts deep - REMOVE
+#                      6838, #Really weird profile
+#                      7031, #Really weird profile
+#                      7066, #All following have high offset and bad data - REMOVE
+#                      7086, 
+#                      7102, 
+#                      7111, 
+#                      7119, 
+#                      7123,
+#                      7135, 
+#                      7145, 
+#                      7161, 
+#                      7162, 
+#                      7176, 
+#                      7184, 
+#                      7189, 
+#                      7202, 
+#                      7203, 
+#                      7204, 
+#                      8531, #Large spike among very low values. Will skew integration. REMOVE?
+#                      9558, #starts deep - REMOVE
+#                      10964, #Bad cast, not sure why not removed from initial investigation
+#                      10982, #Not sure why this wasn't deleted...
+#                      13377, #High offset and much higher than chl - REMOVE
+#                      13712, #Saturated - REMOVE as not representative.
+#                      16083, #Very shallow cast - REMOVE
+#                      17453, #Very high surface spike - 3x > profile. Real? Not supported by Chl - REMOVE?
+#                      18685) #Shallow cast. 
+
+#Look at 8532. looks like there are duplicate records.
+
+```
+
+```{r}
+#removing data where we know the instrument was malfunctioning 
+prof_qc1 <- prof %>%
+  filter(!(ctdNum == 80217 & year == 2015)) %>% 
+  filter(!castpk == 3826) %>% #Super weird profile
+  filter(!castpk == 14429) %>% #saturated values
+  filter(!castpk == 18682) %>% #saturated values
+  filter(!castpk == 4990) %>%
+  filter(!castpk == 5074) %>%
+  filter(!castpk == 9403) %>% 
+  filter(!castpk == 3827) %>% 
+  filter(!castpk == 4984) %>% 
+  filter(!castpk == 5107) %>% 
+  filter(!castpk == 5168) %>% 
+  filter(!castpk == 8406) %>% 
+  filter(!castpk == 9403) %>% 
+  filter(!castpk == 23180)
+
+
+#removing zero or negative values
+prof_qc1 <- prof_qc1 %>% 
+  mutate(flu = replace(flu, which( flu < 0), NA),
+         flu = replace(flu, which( flu == 0), NA),
+         flu = replace(flu, which( flu < 0.01), NA))
+```
+
+```{r}
+#Checking the min and max depth of each profile so I can see what depth range I could use for dark offsets
+prof_dep <- prof_qc1 %>% 
+  group_by(castpk, date, ctdNum, station) %>% 
+  summarise(min_dep = min(pres),
+            max_dep = max(pres)) %>%
+  ungroup() 
+
+#For now, I am going to eliminate profiles that are shallower than 100m. It is hard to derive a dark value for these profiles and I'm not sure that they are deep enough to incorporate. I will do analysis to asses and if useable, then I will subtract the offsets from prior/post casts. Still needs to be done - 51 profiles and could probably save quite a few.
+prof_shallow <- prof_dep %>% 
+  filter(max_dep < 100)
+
+#removing profiles that start deeper than 3 meters
+prof_deep <- prof_dep %>% 
+  filter(min_dep > 3) #3 records that start below typical chl max - >16m
+
+#List of shallow casts to remove.
+prof_shallow_list <- prof_shallow$castpk
+prof_deep_list <- prof_deep$castpk
+
+#Removing shallow casts - looking at profiles, a lot of these could be salvaged by potentially using offset from later cast from same instrument.
+prof_qc1 <- prof_qc1 %>% 
+  filter(!castpk %in% prof_shallow_list) %>% 
+  filter(!castpk %in% prof_deep_list)
+```
+
+```{r}
+#isolating the 10 minima values below 100m depth for each profile for fluorescence
+prof_10_fl <- prof_qc1 %>%
+  group_by(castpk) %>%
+  filter(pres > 100 & min_rank((flu)) <= 10) %>% 
+  group_by(castpk) %>% 
+  mutate(min_flu = min(flu, na.rm = T),
+         max_flu = max(flu, na.rm = T),
+         min_mean = mean(flu, na.rm = T),
+         min_std = sd(flu, na.rm = T),
+         min_dep = min(pres, na.rm = T),
+         max_dep = max(pres, na.rm = T),
+         n = n()) %>% 
+  ungroup()
+
+#Selecting distinct dark mean values for each cast pk
+prof_10_fl_means <- prof_10_fl %>% 
+  distinct(castpk, .keep_all = TRUE) %>% 
+  select(castpk, ctdNum, station, date, min_flu, max_flu, min_mean, min_std, n)
+
+```
+
+```{r}
+#Plot showing average and standard deviation of 10 minimum values for each cast.
+
+prof_10_fl %>% 
+  ggplot(aes(x = date, y = min_mean, color = station)) +
+  geom_point(size = 3, pch = 21, fill = "white", stroke = 1.2) +
+  geom_errorbar(aes(ymin = min_mean - min_std,
+                    ymax = min_mean + min_std)) + 
+  facet_wrap(~ ctdNum, ncol = 1, scales = "free_y") +
+  labs(x = "Date",
+           y = "Profile Avg. 10 minimum fluorescence values") +
+  scale_y_continuous(limits = c(0, NA)) +
+  theme_bw() +
+  theme(text = element_text(size = 40),
+        axis.text = element_text(colour = "black"))
+
+ggsave(here("figures", "dark_correction_mean_minimum_10_all_ctds_kc10-fzho1-dfo2_rem_80217.png"), 
+       width = 16, height = 16, dpi = 300)
+
+#In general there is quite low cast to cast variability (< 0.1) and at this point I'm comfortable with using each casts derived dark value to subtract from the profile. Another option would be to just average over a period when they are stable and this could dampen noise.
+
+#Once I added DFO2 and FZH01, it looks like DFO2 generally has the lowest dark values, but they are relatively comparable. 
+
+#Exceptions:
+# 2014 18066 KC10 and FZH01 casts- investigate. Happening at both stations - sort sort of sinking event and maybe offsets not representative?
+#2024 - 18032 with very low offset - plot profile.
+
+
+```
+
+```{r}
+#Changing tack a bit as it's hard to match offsets to stations that didn't go deep enough and were collected on different days. Thinking I can do a monthly average for each sensor and use that.
+
+prof_10_fl %>% 
+  mutate(month = lubridate::month(date)) %>% 
+  group_by(ctdNum, station, year, month) %>% 
+  summarize(min_mean_month = mean(min_mean),
+            min_std_month = sd(min_mean)) %>%
+  ungroup() %>% 
+  mutate(day = 15) %>%
+  group_by(ctdNum, year, month) %>% 
+  filter(min_rank((min_mean_month)) == 1) %>% 
+  ungroup() %>% 
+  unite(date, c("year", "month", "day"), sep = "-") %>% 
+  mutate(date = lubridate::ymd(date)) %>% 
+  ggplot(aes(x = date, y = min_mean_month, color = station)) +
+  geom_point(size = 3, pch = 21, fill = "white", stroke = 1.2) +
+  geom_errorbar(aes(ymin = min_mean_month - min_std_month,
+                    ymax = min_mean_month + min_std_month)) + 
+  facet_wrap(~ ctdNum, ncol = 1, scales = "free_y") +
+  labs(x = "Date",
+           y = "Profile Avg. 10 minimum fluorescence values") +
+  scale_y_continuous(limits = c(0, NA)) +
+  theme_bw() +
+  theme(text = element_text(size = 40),
+        axis.text = element_text(colour = "black"))
+
+ggsave(here("figures", "dark_correction_mean_minimum_10_monthly_average.png"), 
+       width = 16, height = 16, dpi = 300)
+```
+
+```{r}
+#I feel like the monthly mean from station with the lowest value is probably the best. Can export it out and then apply in a different workbook. 
+month_low <- prof_10_fl %>% 
+  mutate(month = lubridate::month(date)) %>% 
+  group_by(ctdNum, station, year, month) %>% 
+  summarize(min_mean_month = mean(min_mean),
+            min_std_month = sd(min_mean)) %>%
+  ungroup() %>% 
+  mutate(day = 15) %>%
+  group_by(ctdNum, year, month) %>% 
+  filter(min_rank((min_mean_month)) == 1) %>% 
+  ungroup() %>% 
+  unite(date, c("year", "month", "day"), sep = "-") %>% 
+  mutate(date = lubridate::ymd(date))
+
+
+```
+
+
+
+
+```{r}
+#Investigating 2024 18066 profiles with high offsets
+check_18066 <- prof_10_fl_means %>% 
+  filter(ctdNum == 18066 & date < "2015-01-01")
+
+prof %>% 
+  filter(castpk == 2646 | castpk == 2645 | castpk == 2676 | castpk == 2681) %>% 
+  filter(pres > 100) %>% 
+  ggplot(aes(x = flu, y = pres, color = station)) +
+  geom_line(orientation = "y", size = 2) +
+  scale_y_reverse() +
+  facet_wrap(~castpk, scales = "free") +
+  lims(x = c(0, 0.4))
+
+#Not really sure on these casts...
+```
+```{r}
+check_18032 <- prof_10_fl_means %>% 
+  filter(ctdNum == 18032 & date > "2020-01-01")
+
+#I would say this is a bad cast. Very negative downspikes.
+prof %>% 
+  filter(castpk == 23180) %>% 
+  filter(pres > 100) %>% 
+  ggplot(aes(x = flu, y = pres, color = station)) +
+  geom_line(orientation = "y", size = 2) +
+  scale_y_reverse() +
+  facet_wrap(~castpk, scales = "free") +
+  lims(x = c(0, 0.4))
+```
+
+
+```{r}
+#Joining dark values to profiles
+prof_qc1 <- prof_qc1 %>% 
+  left_join(prof_10_fl_means) # not giving a dark value to each cast...
+
+# Checking which profiles lack dark value.
+check_no_dark <- prof_qc1 %>% 
+  filter(is.na(min_mean)) %>% 
+  group_by(castpk) %>% 
+  mutate(max_dep = max(pres)) %>% 
+  ungroup() %>% 
+  distinct(castpk, .keep_all = T) #They all end at 100m
+
+#1546 
+#1764
+#2099 
+#2246 
+
+#All these casts are from 2013. I can derive the average dark count for the instrument in that year -
+no_dark_dev <- prof_10_fl_means %>% 
+  filter((ctdNum == 18032 | ctdNum == 18066) & date < "2016-01-01") %>% 
+  group_by(ctdNum) %>% 
+  summarise(min_mean_na = mean(min_mean),
+            min_sd_na = sd(min_mean),
+            n = n()) %>% 
+  ungroup()
+
+#Adding dark value for the casts that only went to 100m and a dark value couldn't be derived.
+prof_qc1 <- prof_qc1 %>% 
+  mutate(min_mean = case_when(ctdNum == 18032 & is.na(min_mean) ~ 0.06398537,
+                              ctdNum == 18066 & is.na(min_mean) ~ 0.06063780,
+                              TRUE ~ as.numeric(min_mean)))
+```
+
+```{r}
+#Working to try to attach dark values to shallow casts where they couldn't be derived. Need to be careful though, because usability really depends on the depth that I integrate.
+
+#Pulling out 2017 profiles from SBE1907467 - they only go to about 40m
+prof_shallow_fix_467 <- prof_shallow %>% 
+  filter(ctdNum == 1907467)
+
+#Making a list of casts from this instrument to filter larger dataset from
+prof_shallow_fix_467_list <- prof_shallow_fix_467$castpk 
+
+#Deriving a mean dark count from 
+no_dark_dev_467 <- prof_10_fl_means %>% 
+  filter((ctdNum == 1907467)) %>% 
+  group_by(ctdNum) %>% 
+  summarise(min_mean_na = mean(min_mean),
+            min_sd_na = sd(min_mean),
+            min_date = min(date),
+            max_date = max(date),
+            n = n()) %>% 
+  ungroup()
+
+prof_shallow_467 <- prof %>% 
+  filter(castpk %in% prof_shallow_fix_467_list) %>% 
+  mutate(min_mean = 0.07777978)
+```
+
+```{r}
+#Doing the same as above for 18066
+
+#Pulling out 2017 profiles from SBE1907467 - they only go to about 40m
+prof_shallow_fix_066 <- prof_shallow %>% 
+  filter(ctdNum == 18066 & min_dep == 1)
+
+#Making a list of casts from this instrument to filter larger dataset from
+prof_shallow_fix_066_list <- prof_shallow_fix_066$castpk 
+
+#Deriving a mean dark count from 
+no_dark_dev_066 <- prof_10_fl_means %>% 
+  filter(ctdNum == 18066 & date < "2015-01-01") %>% 
+  group_by(ctdNum) %>% 
+  summarise(min_mean_na = mean(min_mean),
+            min_sd_na = sd(min_mean),
+            min_date = min(date),
+            max_date = max(date),
+            n = n()) %>% 
+  ungroup()
+
+prof_shallow_066 <- prof %>% 
+  filter(castpk %in% prof_shallow_fix_066_list) %>% 
+  mutate(min_mean = 0.0606378)
+```
+
+```{r}
+#Doing the same as above for 18032
+
+#Pulling out 2017 profiles from SBE1907467 - they only go to about 40m
+prof_shallow_fix_032 <- prof_shallow %>% 
+  filter(ctdNum == 18032 & min_dep == 1)
+
+#Making a list of casts from this instrument to filter larger dataset from
+prof_shallow_fix_032_list <- prof_shallow_fix_032$castpk 
+
+#Just using the value derived when I filled in the 100m casts above
+prof_shallow_032 <- prof %>% 
+  filter(castpk %in% prof_shallow_fix_032_list) %>% 
+  mutate(min_mean = 0.0606378)
+```
+
+```{r}
+#Check my above math.
+```
+
+```{r}
+#Getting all of my corrected sheets to have same format so that they can be merged with the main sheet
+
+#cutting down calculation columns in my main sheet so I can join everything
+prof_qc1_less <- prof_qc1 %>% 
+  select(castpk:flu, offset = min_mean)
+
+prof_shallow_467_less <- prof_shallow_467 %>% 
+  select(castpk:flu, offset = min_mean)
+
+prof_shallow_066_less <- prof_shallow_066 %>% 
+  select(castpk:flu, offset = min_mean)
+
+prof_shallow_032_less <- prof_shallow_032 %>% 
+  select(castpk:flu, offset = min_mean)
+
+#Now trying to join everything back together to make a complete dataset
+prof_qc1_join <- rbind(prof_qc1_less,
+                       prof_shallow_467_less,
+                       prof_shallow_066_less,
+                       prof_shallow_032_less)
+
+#Making sure I didn't duplicate casts in this process. I think this works as if there is a duplicate casts it would have the same castpk AND duplicated pressures. Everything = 1.
+check_dup_final <- prof_qc1_join %>% 
+  group_by(castpk, pres) %>% 
+  summarise(n = n()) %>% 
+  ungroup()
+```
+```{r}
+#Creating corrected column where offsets are subtracted.
+prof_qc1_join <- prof_qc1_join %>% 
+  mutate(flu_cor = flu - offset)
+
+#checking how many negatives the correction creates - likely a lot, but hopefully mostly deep
+check_neg_final <- prof_qc1_join %>% 
+  filter(flu_cor < 0)
+```
+
+
+```{r}
+#Looking at distribution of depths where there are negatives. 
+check_neg_final %>% 
+  ggplot(aes(x = pres)) + 
+  geom_histogram(colour = "black", fill = "white") +
+  geom_density(alpha = .2, fill = "#FF6666")  +
+  theme_bw()
+
+#Most are 100m or deeper. Surface negatives are likely quenched data under low biomass conditions. Investigate.
+```
+```{r}
+#Looking at shallow negatives - almost half are from a single cast.
+check_neg_final_shallow <- check_neg_final %>% 
+  filter(pres < 50)
+
+check_neg_final_shallow_list <- check_neg_final_shallow$castpk
+
+#Looking at single cast with lots of surface negatives and additional casts with more sporadic shallow negatives.
+prof %>% 
+  filter(castpk %in% check_neg_final_shallow_list) %>% 
+  # filter(pres < 100) %>% 
+  ggplot(aes(x = flu, y = pres)) +
+  geom_line(orientation = "y", size = 2) +
+  geom_vline(xintercept = 0.06063780) +
+  scale_y_reverse() +
+  facet_wrap(~castpk, scales = "free")
+
+#Must have missed - profiles to re-investigate
+#19428 - very weird. Remove.
+#10271 - has a big negative spike and a weird profile. Remove
+#1282 - likely quenching
+#2055 - winter cast that was likely quenched at surface.
+#2061 - winter cast that was likely quenched at surface.
+#2067 - winter cast that was likely quenched at surface.
+#2067 - winter cast that was likely quenched at surface.
+#2073 - likely quenched at the surface
+#2163 - likely quenched at the surface
+#2235 - likely quenched at the surface
+```
+
+```{r}
+#Removing bad casts
+prof_qc1_join <- prof_qc1_join %>% 
+  filter(!castpk == 19428) %>% 
+  filter(!castpk == 10271)
+```
+
+```{r}
+#Looking at distribution of negative values
+check_neg_final %>% 
+  ggplot(aes(x = flu_cor)) + 
+  geom_histogram(colour = "black", fill = "white") +
+  theme_bw()
+
+#Most are very close to zero - but there are some that are quite low - investigate.
+```
+```{r}
+#Looking into low negatives creates by offset correction - all at the surface and likely due to quenching or instrument issues in surface water.
+check_neg_final_big <- check_neg_final %>% 
+  filter(flu_cor < -0.1)
+
+```
+
+```{r}
+#Re-zeroing negatived created by offset removal.
+prof_qc1_join <- prof_qc1_join %>% 
+  mutate(flu = replace(flu_cor, which(flu_cor < 0), 0))
+```
+
+
+```{r}
+#Tomorrow
+#Create a new file where I try to calibrate with chlorophyll data.
+#Redo my calculations and figures looking at monthly climatology
+#Do the same for turbidity - although issue with surface data spikes as a result of bubbles, I think.
+
+#Create a surface map for big melt - at least showing clusters to start. Check out ggmap.
+```
+
+```{r}
+write.csv(prof_qc1_join, here("outputs", "kc10_fzh01_dfo2_profs_qc1_2024-12-18.csv"))
+
+write.csv(month_low, here("outputs", "offset_low_month_mean.csv"))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

@@ -1,0 +1,161 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+#Loading packages
+library(tidyverse) #data wrangling
+library(patchwork) #plotting panels
+library(readxl) #read excel files
+library(here) #data management, file structure
+```
+
+```{r}
+#Import baseline corrected fluorometer data
+flu <- read.csv(here("outputs", "kc10_fzh01_dfo2_profs_qc1_2024-12-18.csv"))
+
+#I want to add some other stations here. At least QCS01, right? It's just a pain to do all the QC work.
+pruth_ctd <- read.csv(here("files_big", "8_binAvg-1736293978195.csv"))
+
+#For some reason the portal cut out the ctd serial number column from the main csv, so porting it in here.
+pruth_meta <- read.csv(here("files_big", "ctd-meta-1736294072835.csv"))
+```
+
+```{r}
+
+#For now, just bringing in the CTD serial number, but I may need to pull more
+
+#Isolating the castpk and serial number.
+pruth_meta <- pruth_meta %>% 
+  select(Cast.PK, ctdNum = CTD.serial.number, ctdFirm = CTD.firmware.version)
+
+#Joining the CTD information to the dataset.
+pruth_ctd <- pruth_ctd %>% 
+  left_join(pruth_meta)
+
+```
+```{r}
+#Wrangling CTD profiles, setting date column and renaming columns 
+prof <- pruth_ctd %>%
+  filter(Cast.Direction.Flag == "d") %>% #downcast data
+  mutate(date = lubridate::date(Measurement.time)) %>%
+  mutate(year = lubridate::year(Measurement.time)) %>%
+  select(castpk = Cast.PK,
+         Cruise,
+         ctdNum,
+         ctdFirm,
+         station = Station,
+         lat = Latitude,
+         long = Longitude,
+         time = Measurement.time,
+         date,
+         year,
+         dep = Depth..m.,
+         pres = Pressure..dbar.,
+         flu = Fluorometry.Chlorophyll..ug.L.,
+         turb = Turbidity..FTU.)
+```
+
+```{r}
+#Determining total number of profiles - 241 
+prof_num <- prof %>% 
+  select(castpk, station) %>% 
+  group_by(station) %>% 
+  distinct(castpk, station) %>% 
+  summarise(n = n()) %>% 
+  ungroup()
+```
+
+```{r}
+#I'm going to start by just narrowing down to days where we did pruth and KC10 as there are so many profiles to sift through. Then I can more easily QC individual casts. 
+distinct_flu <- flu %>% 
+  filter(station == "KC10") %>% 
+  distinct(date, offset) %>% 
+  mutate(date = lubridate::ymd(date))
+
+prof_red <- prof %>% 
+  left_join(distinct_flu) %>% 
+  filter(!is.na(offset))
+```
+
+```{r}
+#Reduced the number of profiles down to 192.
+prof_num2 <- prof_red %>% 
+  select(castpk, station) %>% 
+  group_by(station) %>% 
+  distinct(castpk, station) %>% 
+  summarise(n = n()) %>% 
+  ungroup()
+```
+
+```{r}
+prof_red <- prof_red %>% 
+  group_by(castpk) %>%
+  mutate(cast_num = cur_group_id()) %>% 
+ungroup()
+```
+
+```{r}
+#Plotting profiles to check for bad data - doing it in 25 cast chunks and separating by station
+prof_red %>% 
+  filter(cast_num > 175) %>%
+  filter(cast_num < 201) %>%
+  filter(pres < 101) %>% 
+  ggplot(aes(x = flu, y = pres)) +
+  geom_line(orientation = "y", size = 2) +
+  # geom_point(data = filter(prof, ctdNum == 80217 & year == 2015), color = "red") +
+  # geom_point(data = filter(prof, castpk == 3826), color = "purple") +
+  # geom_point(data = filter(prof, flu < 0), color = "pink") +
+  scale_y_reverse() +
+  facet_wrap(~castpk, scales = "free")
+
+#Printing for easier visualization - just make sure to re-name with appropriate numbers
+ggsave(here("figures", "prof_check_151-175_pruth.png"), 
+       width = 16, height = 16, dpi = 300)
+
+#1767 saturated
+#2606 - straight line
+#80217 from 2015 already removed as not included in my KC10 file (already filtered out)
+
+```
+```{r}
+#removing data where we know the instrument was malfunctioning 
+prof_qc1 <- prof_red %>%
+  filter(!castpk == 1767) %>% #Super weird profile
+  filter(!castpk == 2606)
+
+
+#removing zero or negative values
+prof_qc1 <- prof_qc1 %>% 
+  mutate(flu = replace(flu, which( flu < 0), NA),
+         flu = replace(flu, which( flu == 0), NA),
+         flu = replace(flu, which( flu < 0.01), NA))
+```
+
+```{r}
+#Creating corrected column where offsets are subtracted.
+prof_qc1 <- prof_qc1 %>% 
+  mutate(flu_cor = flu - offset) %>% 
+  select(-cast_num, -turb)
+
+#checking how many negatives the correction creates - likely a lot, but hopefully mostly deep
+check_neg_final <- prof_qc1 %>% 
+  filter(flu_cor < 0)
+
+#Re-zeroing negatived created by offset removal.
+prof_qc1 <- prof_qc1 %>% 
+  mutate(flu = replace(flu_cor, which(flu_cor < 0), 0))
+```
+
+```{r}
+flu <- flu %>% 
+  select(-X)
+
+flu <- rbind(flu, prof_qc1)
+```
+
+```{r}
+write.csv(flu, here("outputs", "kc10_fzh01_dfo2_pruth_profs_qc1_2025-01-07.csv"))
+```
+

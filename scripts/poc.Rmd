@@ -1,0 +1,29 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+```{r}
+#Upload packages
+library(tidyverse)
+library(here)
+library(patchwork)
+```
+
+```{r}
+#Import data
+poc <- read_csv(here("files", "2024-12-06_HakaiData_poms.csv"))
+```
+
+```{r}
+poc_less <- poc %>% 
+  filter(line_out_depth == 5, acidified == TRUE) %>% 
+  select(date, ug_c)
+```
+
+```{r}
+poc_less %>% 
+  ggplot(aes(x = date, y = ug_c)) +
+  geom_line() +
+  geom_point()
+```
+

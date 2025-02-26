@@ -1,0 +1,454 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+```{r}
+#Upload packages
+library(tidyverse)
+library(here)
+library(readxl)
+library(patchwork)
+library(lubridate)
+library(MBA)
+library(mgcv)
+library(FNN)
+library(zoo)
+library(reshape2)
+library(rioja)
+
+```
+
+```{r}
+# 2024 corrected buoy data
+b24 <- read.csv(here("outputs", "buoy_corr_dm_2024.csv"))
+
+#Corrected CTD data
+ctd <- read_csv(here("outputs", "kc10_fzh01_dfo2_pruth_profs_qcs_qcs7_qc1_2025-01-14.csv"))
+
+#Downloading discrete chlorophyll samples
+cd <- read_csv(here("files", "2024-12-05_HakaiData_chlorophyll.csv"))
+
+sat <- read_csv(here("outputs", "sentinel_8day_kc10_avg.csv"))
+
+chl <- read_csv(here("files_big", "2025-02-13_HakaiData_chlorophyll.csv"))
+
+par <- read_xlsx(here("files_big", "8_binAvg-1739570403592.xlsx"), sheet = "Data")
+```
+
+```{r}
+#Pulling out KC10 data
+ctd <- ctd %>% 
+  filter(station == "KC10") %>% 
+  mutate(month = lubridate::month(date))
+
+#Applying sensor wide slope correction.
+ctd <- ctd %>% 
+  mutate(slope = case_when(ctdNum == 18032 & date < "2015-09-01" ~ 1.2,
+                           ctdNum == 18032 & date > "2015-09-01" ~ 1.4,
+                           ctdNum == 18066 & year < 2017 ~ 0.85,
+                           ctdNum == 18066 & year >= 2017 ~ 1.2,
+                           ctdNum == 80217 ~ 3,
+                           ctdNum == 211567 ~ 1.3,
+                           ctdNum == 1907467 ~ 0.86)) %>% 
+  mutate(flu_sc = flu_cor*slope) %>% 
+  mutate(flu_sc = round(flu_sc, 2))
+
+#Cleaning up par data for easier manipulation
+par <- par %>% 
+  select(castpk = `Cast PK`, pres = `Pressure (dbar)`,
+         par = `PAR (umol m-2 s-1)`)
+
+#Joining PAR data with rest of CTD data - Here, I only have 2024 PAR data
+ctd <- ctd %>% 
+  left_join(par)
+```
+
+```{r}
+#Pulling out bulk data with appropriate flags and running a daily mean in case there are duplicates
+
+chl_qc <- chl %>% 
+  select(date, line_out_depth, filter_type, chla, chla_flag) %>% 
+  filter(filter_type == "Bulk GF/F") %>% 
+  filter(chla_flag == "AV" | chla_flag == "SVC" | chla_flag == "ADL" | is.na(chla_flag)) 
+
+chl_dm <- chl_qc %>% 
+  group_by(date, line_out_depth) %>% 
+  summarise(chl_dm = mean(chla)) %>% 
+  ungroup() %>% 
+  mutate(pres = round(line_out_depth)) %>%
+  drop_na() %>% 
+  group_by(date) %>% 
+  mutate(n_dep = n()) %>% 
+  ungroup() %>% 
+  filter(n_dep >= 5) %>% 
+  mutate(year = year(date)) %>% 
+  mutate(pres = case_when(pres == 0 ~ 1,
+                          TRUE ~ as.numeric(pres)))
+```
+
+
+```{r}
+chl_sf <- chl %>% 
+  select(date, line_out_depth, filter_type, chla, chla_flag) %>% 
+  filter(!filter_type == "Bulk GF/F") %>% 
+  filter(chla_flag == "AV" | chla_flag == "SVC" | chla_flag == "ADL" | is.na(chla_flag))
+
+chl_sf_dm <- chl_sf %>% 
+  filter(!is.na(chla)) %>%
+  filter(chla > 0) %>% 
+  group_by(date, line_out_depth, filter_type) %>% 
+  summarise(avg_chla = mean(chla)) %>%
+  ungroup() %>% 
+  group_by(date, line_out_depth) %>% 
+  mutate(n_filt = n()) %>% 
+  ungroup() %>% 
+  group_by(date, line_out_depth, filter_type) %>% 
+  mutate(n_type = n()) %>% 
+  ungroup() %>% 
+  filter(n_filt == 3 & n_type == 1) %>% 
+  group_by(date, line_out_depth) %>% 
+  mutate(sum = sum(avg_chla)) %>% 
+  ungroup() %>% 
+  mutate(perc = avg_chla/sum) %>% 
+  select(date, pres = line_out_depth, filter_type, avg_chla, sum, perc) %>% 
+  mutate(filter_type2 = case_when(filter_type == "2um" ~ "3um",
+                                  TRUE ~ as.character(filter_type)))
+```
+
+```{r}
+#Joining the CTD fluorescence data with the bottle data
+ctd <- ctd %>% 
+  left_join(chl_dm)
+
+#Filtering out 2024 as this is my focus for right now.
+ctd_24 <- ctd %>% 
+  filter(year == 2024)
+```
+
+```{r}
+#Plotting cast by cast linear correlations between fluorometer and discrete chlorophyll - Used for comparison with the correlations I derive below.
+ctd_24 %>% 
+  filter(year == 2024 & pres > 1) %>% 
+  ggplot(aes(y = chl_dm, x = flu_cor)) +
+  geom_point() +
+  geom_abline(slope = 1) +
+  geom_smooth(method = "lm", color = "black") +
+  # geom_smooth(data = filter(flu_join, depth > 1),
+  #             method = "lm", color = "blue") + 
+  ggpubr::stat_cor(aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")),
+                   p.accuracy = 0.001, size = 9, label.y.npc = 0.9) +
+  ggpubr::stat_regline_equation(size = 9, label.y.npc = 0.96) +
+  facet_wrap(~month, scales = "free")
+
+ggsave(here("figures", "quench_correlation_test_2024.png"),
+        width = 16, height = 16, dpi = 300)
+
+```
+
+
+```{r}
+#For each profile, determining the linear model between chlorophyll and fluorescence data.
+
+#For here, not using the surface value as where the bottle chlorophyll is most quenched. This will need to be adjusted potentially.
+
+#This determines the slope and intercept of the linear model between chlorophyll and CTD fluorescence. 
+fitted_models <- ctd_24 %>% 
+  filter(!is.na(chl_dm) & !is.na(flu_cor)) %>%
+  filter(!pres == 1) %>% 
+  group_by(date) %>% 
+  do(broom::tidy(lm(chl_dm ~ flu_cor, data = .))) %>% 
+  ungroup() %>% 
+  arrange(date)
+
+#Pulling out the slope rows
+slope <- fitted_models %>% 
+  filter(term == "flu_cor") %>% 
+  select(date, slope = estimate, std.error:p.value)
+
+#Pulling out the intercept value
+intercept <- fitted_models %>% 
+  filter(term == "(Intercept)") %>% 
+  select(date, intercept = estimate)
+
+#Joining intercept and slope
+fit_mod_wide <- slope %>% 
+  left_join(intercept) %>% 
+  relocate(intercept, .before = slope)
+
+#Determining r2
+fitted_models_r2 <- ctd_24 %>% 
+  filter(!is.na(chl_dm) & !is.na(flu_cor)) %>%
+  filter(!pres == 1) %>% 
+  group_by(date) %>%  
+  do(broom::glance(lm(chl_dm ~ flu_cor, data = .))) %>% 
+  ungroup() %>% 
+  arrange(date) %>% 
+  select(date, r2 = adj.r.squared, nobs) %>% 
+  mutate_at(vars(r2), funs(round(., 2))) 
+
+
+#final dataset.
+fit_mod_wide <- fit_mod_wide %>% 
+  left_join(fitted_models_r2) %>% 
+  mutate_at(vars(p.value), funs(round(., 5))) %>% 
+  mutate_at(vars(slope), funs(round(., 2))) %>%
+  select(date, intercept, slope, r2, p.value, nobs)
+```
+```{r}
+#Now I want a dataset where I have raw fluorescence, instrument slope corrected, cast slope corrected, bottle concentrations and loess fit through bottle concentrations.
+
+#Filtering down my working sheet
+ctd_slope <- ctd_24 %>% 
+  select(ctdNum, date, year, pres, flu_cor, flu_sc, par, chl_dm)
+
+#Joining fit statistics to the data
+ctd_slope <- ctd_slope %>% 
+  left_join(fit_mod_wide) %>% 
+  mutate(flu_cast_cor = flu_cor*slope) 
+```
+```{r}
+chl_24 <- chl_dm %>% 
+  filter(year == 2024)
+
+chl_24_wide <- chl_24 %>% 
+  select(date, pres, chl_dm) %>% 
+  pivot_wider(names_from = "date", values_from = "chl_dm")
+  
+
+spec <- chl_24_wide %>% 
+  select(2:9)
+
+# spec <- as.data.frame(chl_mm_wide$chl_dm)
+depth <- chl_24_wide$pres
+
+# interpolate new dataset to every 0.5 cm
+# using default method (linear)
+x.new <- seq(1, 326, by = 1)
+sp.interp_24 <- interp.dataset(y = spec, x = depth, xout = x.new,
+                               method = "loess", span = 0.5)
+
+interp_24 <- as.data.frame(sp.interp_24)
+
+interp_24 <- interp_24 %>% 
+  mutate(pres = x.new) %>% 
+  pivot_longer(cols = (1:8), names_to = "date", values_to = "chl_loess") %>% 
+  mutate(date = date(date)) %>% 
+  mutate_at(vars(chl_loess), funs(round(., 2)))
+```
+
+```{r}
+ctd_slope <- ctd_slope %>% 
+  left_join(interp_24)
+```
+```{r}
+ctd_slope %>% 
+  ggplot() +
+  # annotate("rect", xmin = -Inf, xmax = Inf, ymin = 0, ymax = -6, fill = 'gray') +
+  geom_line(aes(x = flu_cor, y = pres*-1),
+            orientation = "y",
+            color = "black",
+            size = 1.5) +
+  geom_line(aes(x = flu_sc, y = pres*-1),
+            orientation = "y",
+            color = "blue",
+            size = 1.5) +
+  geom_line(aes(x = flu_cor*slope, y = pres*-1),
+            orientation = "y",
+            color = "green",
+            size = 1.5) +
+  geom_line(aes(x = chl_loess, y = pres*-1),
+            orientation = "y",
+            color = "red",
+            size = 1.5) +
+  geom_point(aes(x = chl_dm, y = pres*-1),
+             pch = 21,
+             color = "black",
+             fill = "white",
+             size = 3,
+             stroke = 1.5) +
+  ylim(-101, 0) +
+  facet_wrap(~date, scales = "free_x") +
+  labs(x = "Fluorescence",
+       y = "Depth") +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black")) 
+
+ggsave(here("figures", "quench_compare_2024_loess.png"),
+        width = 16, height = 18, dpi = 300)
+```
+
+```{r}
+sb_correct <- ctd_slope %>% 
+  filter(date == "2024-04-12") %>% 
+  mutate(flu_cast_cor = flu_cor*slope) %>% 
+  mutate(qc = case_when(pres <= 5 ~ chl_loess,
+                        pres > 5 ~ flu_cast_cor))
+
+sb_correct %>% 
+  ggplot() +
+  annotate("rect", xmin = -Inf, xmax = Inf, ymin = 0, ymax = -6, fill = 'gray') +
+  geom_line(aes(x = flu_cor, y = pres*-1),
+            orientation = "y",
+            color = "black",
+            size = 1.5) +
+  geom_line(aes(x = qc, y = pres*-1),
+            orientation = "y",
+            color = "red",
+            size = 2.5) +
+  geom_point(aes(x = chl_dm, y = pres*-1),
+             pch = 21,
+             color = "black",
+             fill = "white",
+             size = 3,
+             stroke = 1.5) +
+  ylim(-101, 0) +
+  facet_wrap(~date, scales = "free_x") +
+  labs(x = "Fluorescence",
+       y = "Depth") +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black")) 
+
+ggsave(here("figures", "quench_sb_correct.png"),
+        width = 10, height = 12, dpi = 300)
+```
+
+```{r}
+sb2_correct <- ctd_slope %>% 
+  filter(date == "2024-05-12") %>% 
+  mutate(flu_cast_cor = flu_cor*slope) %>% 
+  mutate(qc = case_when(pres <= 2 ~ chl_loess,
+                        pres > 2 ~ flu_cast_cor))
+
+sb2_correct %>% 
+  ggplot() +
+  annotate("rect", xmin = -Inf, xmax = Inf, ymin = 0, ymax = -2, fill = 'gray') +
+  geom_line(aes(x = flu_cor, y = pres*-1),
+            orientation = "y",
+            color = "black",
+            size = 1.5) +
+  geom_line(aes(x = qc, y = pres*-1),
+            orientation = "y",
+            color = "red",
+            size = 2.5) +
+  geom_point(aes(x = chl_dm, y = pres*-1),
+             pch = 21,
+             color = "black",
+             fill = "white",
+             size = 3,
+             stroke = 1.5) +
+  ylim(-101, 0) +
+  facet_wrap(~date, scales = "free_x") +
+  labs(x = "Fluorescence",
+       y = "Depth") +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black")) 
+
+ggsave(here("figures", "quench_sb2_correct.png"),
+        width = 10, height = 12, dpi = 300)
+```
+
+```{r}
+ctd_slope %>% 
+  filter(pres < 11) %>% 
+  ggplot() +
+  # annotate("rect", xmin = -Inf, xmax = Inf, ymin = 0, ymax = -6, fill = 'gray') +
+  geom_line(aes(x = par, y = pres),
+            orientation = "y",
+            color = "black",
+            size = 1.5) +
+  geom_vline(xintercept = 200) +
+  scale_y_reverse(breaks = seq(0, 10, by = 1)) +
+  facet_wrap(~date, scales = "free_x") +
+  labs(x = "Fluorescence",
+       y = "Depth") +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black")) 
+
+ggsave(here("figures", "quench_PAR_2024.png"),
+        width = 16, height = 18, dpi = 300)
+```
+
+```{r}
+export <- ctd_slope %>% 
+  mutate(qc = case_when(date == "2024-05-12" & pres <= 5 ~ chl_loess,
+                        date == "2024-05-12" & pres > 5 ~ flu_cast_cor,
+                        date == "2024-05-12" & pres <= 2 ~ chl_loess,
+                        date == "2024-05-12" & pres > 2 ~ flu_cast_cor,
+                        TRUE ~ as.numeric(flu_cast_cor))) %>% 
+  mutate_at(vars(flu_cast_cor, qc), funs(round(., 2))) %>% 
+  select(date, year, pres, flu_cast_cor, qc)
+```
+```{r}
+write.csv(export, here("outputs", "flu_full_correct_2024.csv"))
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+chl_mm <- chl_dm %>% 
+  mutate(month = month(date)) %>% 
+  group_by(month, line_out_depth) %>% 
+  summarise(chl_mm = mean(chl_dm, na.rm = T),
+            chl_mmed = median(chl_dm, na.rm = T)) %>% 
+  ungroup() 
+
+chl_mm_wide <- chl_mm %>% 
+  select(line_out_depth, month, chl_mmed) %>% 
+  pivot_wider(names_from = "month", values_from = "chl_mmed") %>% 
+  filter(line_out_depth < 31 | line_out_depth == 100)
+  
+
+spec <- chl_mm_wide %>% 
+  select(2:12)
+
+
+# spec <- as.data.frame(chl_mm_wide$chl_dm)
+depth <- chl_mm_wide$line_out_depth
+
+# interpolate new dataset to every 0.5 cm
+# using default method (linear)
+x.new <- seq(0, 101, by = 1)
+sp.interp_all <- interp.dataset(y = spec, x = depth, xout = x.new, method = "loess",
+                            span = 0.5)
+
+mm_interp <- as.data.frame(sp.interp_all)
+
+mm_interp <- mm_interp %>% 
+  mutate(pres = x.new) %>% 
+  pivot_longer(cols = (1:11), names_to = "month", values_to = "chl_mm_loess") %>% 
+  mutate(month = as.double(month))
+
+```
+

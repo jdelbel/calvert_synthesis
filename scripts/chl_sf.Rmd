@@ -16,6 +16,8 @@ library(patchwork)
 chl <- read_csv(here("files", "chl_all_station_2024-10-25.csv"))
 
 ctd <- read_csv(here("files", "kc10_profs_qc1.csv"))
+
+ctd_r1 <- read_csv(here("outputs", "rvrs01_profs_qc1.csv"))
 ```
 
 ```{r}
@@ -218,6 +220,16 @@ int_chl <- ctd %>%
   group_by(date) %>% 
   summarise(avg_int = mean(int_30)) 
 
+int_chl_r1 <- ctd_r1 %>% 
+  select(castpk, date, pres, flu) %>%
+  filter(pres < 31) %>% 
+  group_by(castpk, date) %>% 
+  mutate(int_30 = sum(flu, na.rm = T)) %>% 
+  ungroup() %>%
+  distinct(castpk, int_30, .keep_all = T) %>% 
+  group_by(date) %>% 
+  summarise(avg_int = mean(int_30)) 
+
 int_m <- int_chl %>% 
   mutate(year = lubridate::year(date),
          month = lubridate::month(date)) %>% 
@@ -247,6 +259,29 @@ ggsave(here("figures", "timeseries_integrated_ctd_fluorescence2.png"),
         width = 16, height = 7, dpi = 300)
 ```
 ```{r}
+int_chl_r1 %>% 
+  ggplot(aes(x = date, y = avg_int)) +
+  geom_line() +
+  geom_point() +
+  scale_x_date(breaks = seq(as.Date("2014-01-01"), as.Date("2025-01-01"),
+                            by = "1 year"), date_minor_breaks = "1 month",
+               expand = c(0, 0),
+               date_labels = "%b%y",
+               limits = c(as.Date("2013-01-01"), as.Date("2025-01-01"))) +
+  theme_bw() +
+  labs(y = bquote(CTD[FLU]~"(mg" ~ m^-2*")")) +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+
+ggsave(here("figures", "timeseries_integrated_ctd_fluorescence_rvrs1.png"),
+        width = 16, height = 7, dpi = 300)
+```
+
+
+
+
+```{r}
 int_box <- int_chl %>% 
   mutate(month = lubridate::month(date),
          year = lubridate::year(date)) %>% 
@@ -265,6 +300,55 @@ int_box <- int_chl %>%
 ggsave(here("figures", "timeseries_integrated_monthly_climatology.png"),
         width = 16, height = 7, dpi = 300)
 ```
+
+```{r}
+int_chl_r1 %>% 
+  mutate(month = lubridate::month(date),
+         year = lubridate::year(date)) %>% 
+  ggplot(aes(x = as.factor(month), y = avg_int)) +
+  geom_boxplot() +
+  geom_point(aes(fill = as.factor(year)), pch = 21, size = 5) +
+  scale_fill_viridis_d() +
+  labs(fill = NULL) +
+  theme_bw() +
+  labs(y = bquote(CTD[FLU]~"(mg" ~ m^-2*")")) +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = c(0.95, 0.6))
+
+ggsave(here("figures", "timeseries_integrated_monthly_climatology_rvrs1.png"),
+        width = 16, height = 7, dpi = 300)
+```
+```{r}
+int_chl_merge <- int_chl %>% 
+  mutate(station = "KC10")
+
+int_chl_r1_merge <- int_chl_r1 %>% 
+  mutate(station = "RVRS01")
+
+int_merge <- rbind(int_chl_merge, int_chl_r1_merge)
+```
+
+```{r}
+int_chl_merge <- int_merge %>% 
+  mutate(month = lubridate::month(date),
+         year = lubridate::year(date)) %>% 
+  ggplot(aes(x = as.factor(month), y = avg_int, fill = station)) +
+  geom_boxplot() +
+  labs(fill = NULL) +
+  ggsci::scale_fill_npg() +
+  theme_bw() +
+  labs(y = bquote(CTD[FLU]~"(mg" ~ m^-2*")")) +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = c(0.93, 0.9))
+
+ggsave(here("figures", "timeseries_integrated_monthly_climatology_kc10_rvrs1.png"),
+        width = 16, height = 7, dpi = 300)
+```
+
 
 
 ```{r}
@@ -328,6 +412,89 @@ ctd_dm %>%
 ggsave(here("figures", "ctd_profiles_2.png"),
         width = 16, height = 13, dpi = 300)
 ```
+
+```{r}
+dino_prof <- ctd %>% 
+  filter(date == "2022-07-28" | date == "2021-08-05") %>% 
+  filter(pres < 50) %>% 
+  select(date, pres, flu, sal, temp) %>% 
+  pivot_longer(c(flu:temp), names_to = "par", values_to = "val") %>% 
+  group_by(date, par, pres) %>% 
+  summarise(val_avg = mean(val)) %>% 
+  ungroup() 
+  
+dino_prof %>% 
+  filter(date == "2022-07-28") %>%
+  ggplot(aes(y = pres, x = val_avg)) +
+  geom_line(aes(group = date),
+            orientation = "y", size = 2) +
+  facet_grid(. ~ par, scales = "free") +
+  scale_y_reverse() +
+  ylim(50, 0) +
+  labs(
+    # x = bquote("CTD Fluorescence (mg"~m^-3*")"),
+       y = "Depth (m)") +
+  theme_bw() +
+  scale_color_viridis_d() +
+  scale_x_continuous(
+    # limits = c(0, NA), expand = c(0, 0),
+                     labels = formatter(nsmall = 1)) +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 25),
+        axis.text = element_text(colour = "black"),
+        legend.title = element_blank(),
+        # legend.position = c(0.07, 0.95),
+        panel.spacing.x = unit(2, "lines"))  
+
+ggsave(here("figures", "ctd_profiles_dino.png"),
+        width = 12, height = 10, dpi = 300)
+```
+
+
+
+
+```{r}
+ctd_dm_r1 <- ctd_r1 %>% 
+  filter(pres >= 0 & pres <= 50) %>% 
+  group_by(date, pres) %>% 
+  summarise(flu = mean(flu)) %>% 
+  ungroup()
+
+ctd_dm_r1 %>% 
+  mutate(month = lubridate::month(date),
+         year = lubridate::year(date)) %>% 
+  filter(month > 2 & month < 9) %>% 
+  ggplot(aes(y = pres, x = flu)) +
+  geom_line(aes(group = date, color = as.factor(year)),
+            orientation = "y", size = 2) +
+  facet_grid(. ~ month, scales = "free_x") +
+  scale_y_reverse() +
+  ylim(50, 0) +
+  labs(x = bquote("CTD Fluorescence (mg"~m^-3*")"),
+       y = "Depth (m)") +
+  theme_bw() +
+  scale_color_viridis_d() +
+  scale_x_continuous(limits = c(0, NA), expand = c(0, 0), 
+                     labels = formatter(nsmall = 1)) +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 25),
+        axis.text = element_text(colour = "black"),
+        legend.title = element_blank(),
+        # legend.position = c(0.07, 0.95),
+        panel.spacing.x = unit(2, "lines"))
+
+ggsave(here("figures", "ctd_profiles_rvrs01.png"),
+        width = 16, height = 13, dpi = 300)
+```
+
+
+
+
+
+
+
 ```{r}
 ctd %>% 
   filter(pres >= 0 & pres <= 50) %>%
@@ -448,7 +615,21 @@ ctd_max <- ctd %>%
   group_by(date) %>% 
   summarise(med_max = median(pres)) %>% 
   ungroup() %>% 
-  mutate(month = lubridate::month(date))
+  mutate(month = lubridate::month(date),
+         station = "KC10")
+
+ctd_max_r1 <- ctd_r1 %>% 
+  filter(pres <= 30) %>% 
+  group_by(castpk) %>% 
+  filter(flu == max(flu)) %>% 
+  ungroup() %>% 
+  group_by(date) %>% 
+  summarise(med_max = median(pres)) %>% 
+  ungroup() %>% 
+  mutate(month = lubridate::month(date),
+         station = "RVRS01")
+
+ctd_max_merge <- rbind(ctd_max, ctd_max_r1)
 ```
 
 ```{r}
@@ -467,9 +648,31 @@ ggsave(here("figures", "timeseries_chla_max_depth.png"),
 ```
 
 ```{r}
+max_box_merge <- ctd_max_merge %>% 
+  ggplot(aes(x = as.factor(month), y = med_max, fill = station)) +
+  geom_boxplot() +
+  scale_y_reverse() +
+  ggsci::scale_fill_npg() +
+  theme_bw() +
+  labs(y = bquote(Max[FLU]~"(Depth" ~ m^-1*")")) +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = "none")
+
+ggsave(here("figures", "timeseries_chla_max_depth_kc10_rvrs01.png"),
+        width = 16, height = 7, dpi = 300)
+```
+
+```{r}
 int_dep <- int_box / max_box
 
-ggsave(here("figures", "box_monthly_int_max_clim.png"),
+int_dep_merge <- int_chl_merge/max_box_merge
+
+ggsave(here("figures", "box_monthly_int_max_clim.png"), int_dep,
+        width = 16, height = 12, dpi = 300)
+
+ggsave(here("figures", "box_monthly_int_max_clim_kc10_rvrs01.png"), int_dep_merge,
         width = 16, height = 12, dpi = 300)
 ```
 
@@ -558,8 +761,8 @@ clim_m %>%
   ggplot() +
   geom_bar(aes(x = as.factor(month), y = med_sf, fill = filter_type2),
            position = "stack", stat = "identity") +
-  ggsci::scale_fill_d3() +
-  facet_grid(depth ~ ., scales = "free_y") +
+  ggsci::scale_fill_npg() +
+  facet_grid(depth ~ .) +
   theme_bw() +
   labs(y = bquote("Size Fractionated Chla (mg" ~ m^-3*")"),
        fill = "Group") +
@@ -574,6 +777,9 @@ clim_m %>%
 ggsave(here("figures", "climatology_monthly.png"),
         width = 16, height = 14, dpi = 300)
 ```
+
+
+
 ```{r}
 #Looking at annual medians by depth, but I don't think this really shows much.
 clim_y %>%

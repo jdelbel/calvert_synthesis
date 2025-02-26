@@ -1,0 +1,289 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Some new interpolation tutorials to consider:
+https://search.r-project.org/CRAN/refmans/rioja/html/interp.dataset.html
+https://github.com/hdugan/NTLlakeloads
+
+```{r}
+#Upload packages
+library(tidyverse)
+library(here)
+library(readxl)
+library(patchwork)
+library(lubridate)
+library(MBA)
+library(mgcv)
+library(FNN)
+library(zoo)
+library(reshape2)
+library(rioja)
+library(egg)
+
+```
+
+```{r}
+# 2024 corrected buoy data
+b24 <- read.csv(here("outputs", "buoy_corr_dm_2024.csv"))
+
+bsal <- read.csv(here("files", "buoy_salinity.csv"))
+
+#Corrected CTD data
+f <- read_csv(here("outputs", "kc10_npq_test.csv"))
+
+env <- read_csv(here("outputs", "enviro_5m_2025-04-25_kc10.csv"))
+
+env_anom <- read_csv(here("outputs", "ctd_anom_week_2025-04-25_kc10.csv"))
+
+#Downloading discrete chlorophyll samples
+cd <- read_csv(here("files", "2024-12-05_HakaiData_chlorophyll.csv"))
+
+wind <- read_csv(here("files", "wind_all.csv"))
+
+wind_anom <- read.csv(here("outputs", "wind_anom_day_2025-04-25.csv"))
+
+```
+
+```{r}
+b24 <- b24 %>% 
+  select(date_corr, fl_med_day, group) %>% 
+  distinct()
+
+bsal <- bsal %>% 
+  mutate(date = mdy(date)) %>% 
+  filter(WaterSalinity_UQL == 2 & year == 2024) %>% 
+  filter(!date == "2024-02-12")
+
+f24 <- f %>% 
+  filter(date > "2024-01-01")
+
+wind <- wind %>% 
+  mutate(date = mdy(date))
+
+wind24 <- wind %>% 
+  filter(year == 2024)
+  
+```
+
+```{r}
+cd <- cd %>% 
+  filter(filter_type == "Bulk GF/F" & line_out_depth == 0) %>% 
+  select(date, chla)
+```
+
+```{r}
+b24 <- b24 %>% 
+  mutate(date = lubridate::ymd(date_corr),
+         year = lubridate::year(date),
+         yday = lubridate::yday(date)) 
+
+b24 <- b24 %>% 
+  left_join(cd) %>% 
+  left_join(bsal)
+```
+
+```{r}
+# f1 <- wind24 %>% 
+#   ggplot(aes(x = date, y = WindSpd_Med^3, color = as.factor(year))) +
+#   geom_line(size = 2) +
+#   ggsci::scale_color_futurama() +
+#   scale_x_date(limits = as_date(c("2024-01-01", "2024-12-31")),
+#                expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+#   labs(y = bquote(Wind~"("*m^-3*")")) +
+#   theme_bw() +
+#   theme(legend.position = "none",
+#         text = element_text(size = 35), #35
+#         axis.text = element_text(color = "black"),
+#         axis.title.x = element_blank(),
+#         axis.text.x = element_blank())
+```
+
+```{r}
+wind_anom <- wind_anom %>% 
+  mutate(date = parse_date_time(x = paste(year, yday), orders = "yj"),
+         date = ymd(date)) %>% 
+  mutate(pos = anom >= 0) %>% 
+  filter(year == "2024")
+
+wind24 <- wind24 %>% 
+  mutate(date = ymd(date))
+```
+
+
+```{r}
+f1 <- ggplot() + 
+  # geom_area(data = wind_24, aes(x = date, speed_dm^3),
+  #           fill = "grey", alpha = 0.7) +
+  geom_col(data = wind_anom, aes(x = date, y = anom, fill = pos)) +
+  geom_vline(xintercept = as_date("2024-03-18"),
+             linetype = "dashed", size = 1, color = "black") +
+  geom_line(data = wind24, aes(x = date, y = WindSpd_Med^3),
+            size = 2) +
+  scale_fill_manual(values = c("blue", "red"), guide = FALSE) +
+  ggsci::scale_color_futurama() +
+  labs(y = bquote(Wind~"("*m^-3*")")) +
+  scale_x_date(limits = as_date(c("2024-01-01", "2024-12-31")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank())
+```
+
+
+
+
+
+
+```{r}
+anom_dr <- env_anom %>% 
+  filter(par == "dr" & year == 2024) %>% 
+  mutate(pos = anom >= 0) 
+
+anom_fwc <- env_anom %>% 
+  filter(par == "fwc" & year == 2024) %>% 
+  mutate(pos = anom >= 0) 
+
+env <- env %>% 
+  filter(date >= "2024-01-01")
+```
+
+
+```{r}
+f2 <- env %>% 
+  ggplot() + 
+  # geom_area(data = anom_fwc, aes(x = year_month, y = anom*coeff),
+  #           # linetype = "dotdash",
+  #           fill = "grey",
+  #           # color = "black",
+  #           alpha = 1) +
+  geom_point(aes(x = date, y = dr), 
+             pch = 21,
+             size = 4,
+             fill = "white",
+             stroke = 3) +
+  geom_col(data = anom_dr, aes(x = year_month, y = anom, fill = pos)) +
+  geom_vline(xintercept = as_date("2024-03-18"),
+             linetype = "dashed", size = 1, color = "black") +
+  # scale_y_continuous(name = bquote(Delta*rho~"("~kg~m^-3*")"),
+  #                    sec.axis = sec_axis(~.*coeff,
+  #                                        name = "Sal")) +
+  scale_fill_manual(values = c("blue", "red"), guide = FALSE) +
+  # lims(y = c(-4, 5)) 
+  labs(y = bquote(Delta*rho~"("~kg~m^-3*")")) +
+  scale_x_date(limits = as_date(c("2024-01-01", "2024-12-31")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.title.y.right = element_text(color = "#474F58"))
+```
+
+
+```{r}
+
+f3 <-
+  b24 %>% 
+  ggplot(aes(x = date, y = fl_med_day, color = as.factor(year))) +
+  geom_line(data = filter(b24, year == 2024 & group == 1),
+            size = 2) +
+  geom_line(data = filter(b24, year == 2024 & group == 2),
+            size = 2) +
+  geom_line(data = b24, aes(x = date, y = WaterSalinity_Avg),
+            size = 2, color = "darkblue") +
+  geom_point(aes(x = date, y = chla, color = as.factor(year)),
+             size = 4, pch = 8, color = "black", stroke = 2) +
+  geom_vline(xintercept = as_date("2024-03-18"),
+             linetype = "dashed", size = 1, color = "black") +
+  ggsci::scale_color_futurama() +
+  scale_x_date(limits = as_date(c("2024-01-01", "2024-12-31")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  ylab(expression(atop(Buoy[FLU]~"(mg" ~ m^-3*")",
+                       paste("Salinity")))) +
+  
+  # labs(y = bquote(Buoy[FLU]~"(mg" ~ m^-3*")"),
+  #      x  = NULL,
+  #      color = NULL) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank())
+
+# ggsave(here("figures", "buoy_corrected_year_2024.png"),
+#         width = 16, height = 12, dpi = 300)
+
+#Convert to a datetime so I can plot months.
+```
+
+
+
+```{r}
+#Now plot 2024 CTD profiles
+# f2 <- 
+  
+f4 <- f24 %>% 
+  mutate(day = 15,
+         year = year(date),
+         month = month(date)) %>% 
+  unite(date_2, c(year, month, day), sep = "-", remove = F) %>% 
+  mutate(date_2 = date(date_2)) %>% 
+  ggplot(aes(x = date)) +
+  geom_tile(aes(y = pres, fill = f_npq)) +
+  geom_vline(xintercept = as_date("2024-03-18"),
+             linetype = "dashed", size = 1, color = "black") +
+  geom_hline(yintercept = 5,
+             linetype = "dashed", size = 1, color = "white") +
+  scale_y_reverse(breaks = seq(0, 50, by = 10)) +
+  cmocean::scale_fill_cmocean(name = "delta",
+                              limits = c(0, 20),
+                              oob = scales::squish) +
+  labs(fill = bquote(CTD[FLU]~"(mg" ~ m^-3*")"),
+       y = "Depth") +
+  scale_x_date(limits = as_date(c("2024-01-01", "2024-12-31")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  theme_bw() +
+  theme(text = element_text(size = 38), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        # axis.text.x = element_blank(),
+        legend.position = "right",
+        legend.key.height = unit(1.8, "cm"),
+        legend.title = element_text(size = 30, angle = 270),
+        legend.title.align = 0.5,
+        legend.direction = "vertical") +
+    guides(fill = guide_colourbar(title.position = "right"))
+
+  # theme(text = element_text(size = 35), #35
+  #       axis.text = element_text(color = "black"),
+  #       axis.title.x = element_blank(),
+  #       legend.position = "top",
+  #       legend.box = "horizontal") +
+  # guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5,
+  #                               barwidth = 50, barheight = 1,
+  #                               frame.colour = "black", ticks.colour = "black"))
+```
+
+```{r}
+fig <- (f1 / f2 / f3 / f4) 
+
+test <- ggarrange(f1, f2, f3, f4, ncol = 1)
+
+  
+
+ggsave(here("figures", "panel_qu39_2024.png"), test,
+        width = 16, height = 16, dpi = 300)
+```
+
+
+
+
+
+
+

@@ -1,0 +1,1712 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+#Upload packages
+library(tidyverse)
+library(here)
+library(patchwork)
+library(scales)
+library(pracma)
+library(magrittr)
+library(zoo)
+library(lubridate)
+library(gsw)
+```
+
+```{r}
+# ctd <- read_csv(here("files", "kc10_profs_qc1.csv"))
+
+ctd <- read_csv(here("outputs", "kc10_fzh01_dfo2_pruth_profs_qcs_qcs7_qc1_2025-01-14.csv"))
+
+#import discrete chlorophyll data
+chl <- read_csv(here("files", "chl_all_station_2024-10-25.csv"))
+
+#Download CTD data - entire KC10 FZH01, DFO2 dataset (I really could expand to look at dark count consistency, but these are all deep stations)
+ctd_phys <- read.csv(here("files_big", "8_binAvg-1738185849284.csv"))
+
+#For some reason the portal cut out the ctd serial number column from the main csv, so porting it in here.
+meta <- read.csv(here("files_big", "ctd-meta-1738185903439.csv"))
+
+nuts <- read.csv(here("files_big", "2025-01-29_HakaiData_nutrients.csv"))
+```
+
+```{r}
+ctd <- ctd %>% 
+  mutate(slope = case_when(ctdNum == 18032 & date < "2015-09-01" ~ 0.68,
+                           ctdNum == 18032 & date > "2015-09-01" ~ 0.65,
+                           ctdNum == 18066 & year < 2017 ~ 0.81,
+                           ctdNum == 18066 & year >= 2017 ~ 0.67,
+                           ctdNum == 80217 ~ 0.30,
+                           ctdNum == 211567 ~ 0.78,
+                           ctdNum == 1907467 ~ 0.96)) %>% 
+  mutate(flu_sc = flu_cor*slope)
+```
+
+```{r}
+#For now, just bringing in the CTD serial number, but I may need to pull more
+
+#Isolating the castpk and serial number.
+meta <- meta %>% 
+  select(Cast.PK, ctdNum = CTD.serial.number, ctdFirm = CTD.firmware.version)
+
+#Joining the CTD information to the dataset.
+ctd_phys <- ctd_phys %>% 
+  left_join(meta)
+
+#Wrangling CTD profiles, setting date column and renaming columns 
+prof <- ctd_phys %>%
+  filter(Cast.Direction.Flag == "d") %>% #downcast data
+  mutate(date = lubridate::date(Measurement.time)) %>%
+  mutate(year = lubridate::year(Measurement.time)) %>%
+  select(castpk = Cast.PK,
+         Cruise,
+         ctdNum,
+         ctdFirm,
+         station = Station,
+         lat = Latitude,
+         long = Longitude,
+         time = Measurement.time,
+         date,
+         year,
+         dep = Depth..m.,
+         pres = Pressure..dbar.,
+         sal = Salinity..PSU.,
+         temp = Temperature..deg.C.)
+
+prof <- prof %>% 
+  filter(station == "DFO2" | station == "KC10" | station == "QCS01" |
+           station == "QCS07") %>% 
+    mutate(station2 = case_when(station == "QCS07" ~ "QCS01",
+                              TRUE ~ as.character(station)))  %>% 
+  mutate(lat = as.numeric(lat),
+         long = as.numeric(long))
+```
+
+```{r}
+#Some CTD casts are missing coordinates that are required for GSW calculations. Fill the coordinates in using those from the Hakai Station Master - Latitude
+prof <- prof %>% 
+  mutate(lat = case_when(station2 == "QCS01" & is.na(lat) ~ 51.70493,
+                              station2 == "KC10" & is.na(lat) ~ 51.65064,
+                              station2 == "DFO2" & is.na(lat) ~ 51.52111,
+         TRUE ~ as.numeric(as.character(lat))))
+
+#Filling in missing Longitude
+prof <- prof %>% 
+  mutate(long = case_when(station2 == "QCS01" & is.na(long) ~ -128.2388,
+                              station2 == "KC10" & is.na(long) ~ -127.9513,
+                              station2 == "DFO2" & is.na(long) ~ -127.5590,
+         TRUE ~ as.numeric(as.character(long))))
+```
+
+```{r}
+#Performing GSW calculations
+
+#Calculating absolute salinity
+SA <- gsw_SA_from_SP(prof$sal, prof$pres, prof$long, prof$lat)
+
+#Converting absolute salinity output to a dataframe
+SA <- as.data.frame(SA)
+
+#Calculating conservative temperature
+CT <- gsw_CT_from_t(SA$SA, prof$temp, prof$pres)
+
+#Converting conservative temperature output to a dataframe
+CT <- as.data.frame(CT)
+
+#Calculating Density
+rho = gsw_rho(SA$SA, CT$CT, prof$pres)
+
+#Converting Density to a dataframe
+rho <- as.data.frame(rho)
+
+#Calculating Brunt-Vaisala frequency
+bv <- gsw_Nsquared(SA$SA, CT$CT, prof$pres)
+
+#Converting Brunt-Vaisala frequency to a dataframe
+bv <- bind_rows(bv)
+
+#Adding a row at the bottom of the Brunt-Vaisala dataframe to make the vector length equal to the other calculations
+bv <- bv %>% 
+  add_row(N2 = NA, p_mid = NA)
+
+#Binding calculations to ctd dataframe
+prof <- cbind(prof, SA, CT, rho, bv)
+```
+```{r}
+#Performing calculations for delta_rho 
+
+
+#The next few steps are used to determine the density difference as a measure of stratification. Using 2 and 30m
+
+#Filter 2m data from the CTD datasheet
+prof_2 <- prof %>% 
+  filter(pres == 2) %>% 
+  select(castpk, station2, lat, long, date, rho)
+
+#filter 30m data
+prof_30 <- prof %>% 
+  filter(pres == 30) %>% 
+  select(castpk, rho)
+
+#joining 2m data to 3m data
+prof_dd <- prof_2 %>% 
+  left_join(prof_30, by = "castpk") %>% 
+  rename(rho_2 = rho.x, 
+         rho_30 = rho.y)
+
+#Calculating difference in density
+prof_dd <- prof_dd %>% 
+  mutate(delta_rho = rho_30 - rho_2)
+
+#Preparing delta_rho calculation sheet for merging back into ctd datasheet
+prof_dd <- prof_dd %>% 
+  select(castpk, delta_rho)
+```
+
+```{r}
+prof_dd <- prof %>% 
+  select(castpk, date, station2) %>%
+  distinct() %>% 
+  left_join(prof_dd) %>% 
+  mutate(month = lubridate::month(date))
+
+prof_bv_max <- prof %>% 
+  select(castpk, date, station2, pres, N2) %>%
+  group_by(castpk) %>% 
+  filter(pres > 2 & pres < 31) %>% 
+  slice_max(N2) %>% 
+  mutate(month = lubridate::month(date))
+```
+
+```{r}
+nuts_10 <- nuts %>% 
+  filter(line_out_depth < 11) %>% 
+  select(date, station = site_id, depth = line_out_depth,
+        din = no2_no3_um, po4, sio2) %>% 
+  drop_na() %>% 
+  mutate(station2 = case_when(station == "QCS07" ~ "QCS01",
+                              TRUE ~ as.character(station)),
+         depth = case_when(depth == 0 ~ 1,
+                           TRUE ~ as.numeric(depth))) %>% 
+  mutate(month = lubridate::month(date))
+```
+
+
+```{r}
+ggpubr::ggboxplot(prof_dd, x = "month", y = "delta_rho",
+          color = "black", fill = "station2", palette = "jco", size = 1) +
+  facet_grid(station2 ~ .) +
+  ggpubr::stat_compare_means(label.y.npc = 0.95, size = 7) +
+  ggpubr::stat_compare_means(label = "p.signif",
+                     ref.group = ".all.", hide.ns = TRUE,
+                     label.y.npc = 0.82, size = 13, 
+                     color = "blue") +
+  theme_bw() +
+  labs(y = bquote(Delta*rho~"("~kg~m^-3*")")) +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = "none")
+
+ggsave(here("figures", "timeseries_dr_monthly_climatology_stat_mash_qc7.png"),
+        width = 16, height = 14, dpi = 300)
+```
+
+```{r}
+ggpubr::ggboxplot(prof_bv_max, x = "month", y = "pres",
+          color = "black", fill = "station2", palette = "jco", size = 1) +
+  facet_grid(station2 ~ .) +
+  ggpubr::stat_compare_means(label.y.npc = 0.95, size = 7) +
+  ggpubr::stat_compare_means(label = "p.signif",
+                     ref.group = ".all.", hide.ns = TRUE,
+                     label.y.npc = 0.82, size = 13, 
+                     color = "blue") +
+  theme_bw() +
+  labs(y = bquote(Delta*rho~"("~kg~m^-3*")")) +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = "none")
+
+ggsave(here("figures", "timeseries_dr_monthly_climatology_stat_mash_qc7.png"),
+        width = 16, height = 14, dpi = 300)
+```
+```{r}
+nuts_10 %>% 
+  ggplot() +
+  geom_boxplot(aes(x = as.factor(month), y = din, fill = as.factor(depth))) +
+  facet_grid(station2 ~ .) +
+  theme_bw() +
+  labs(y = "DIN\u0020\u0028\u00B5mol\u0020L\u207B\u00B9\u0029",
+       fill = NULL) +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = c(0.95, 0.08))
+
+ggsave(here("figures", "timeseries_din_monthly_climatology_stat_mash_qc7.png"),
+        width = 16, height = 14, dpi = 300)
+```
+
+
+
+```{r}
+#calculating 50m integrated value for each station
+int_chl <- ctd %>% 
+  select(castpk, station, date, pres, flu_sc) %>%
+  filter(pres < 31) %>% 
+  group_by(castpk, date) %>% 
+  mutate(int_30 = sum(flu_sc, na.rm = T)) %>% 
+  ungroup() %>%
+  distinct(castpk, station, int_30, .keep_all = T) %>% 
+  group_by(date, station) %>% 
+  summarise(avg_int = mean(int_30)) %>% 
+  ungroup()
+
+test_int <- ctd %>%
+  select(castpk, station, date, pres, flu_sc) %>%
+  filter(pres < 31) %>%
+  group_by(castpk, date) %>%
+  mutate(int_30 = trapz(pres, flu_sc)) %>%
+  ungroup() %>%
+  distinct(castpk, station, int_30, .keep_all = T) %>%
+  group_by(date, station) %>%
+  summarise(avg_int = mean(int_30)) %>%
+  ungroup()
+```
+
+
+```{r}
+# int_chl %>% 
+#   filter(station == "DFO2" | station == "KC10" | station == "QCS01" |
+#            station == "QCS07") %>% 
+#   ggplot(aes(x = date, y = avg_int, color = station)) +
+#   geom_line(size = 2) +
+#   geom_point(size = 3) +
+#   scale_x_date(breaks = seq(as.Date("2013-01-01"), as.Date("2025-01-01"),
+#                             by = "1 year"), date_minor_breaks = "1 month",
+#                expand = c(0, 0),
+#                date_labels = "%b%y",
+#                limits = c(as.Date("2013-01-01"), as.Date("2025-01-01"))) +
+#   facet_grid(station ~ .) +
+#   ggsci::scale_colour_npg() +
+#   theme_bw() +
+#   labs(y = bquote(CTD[FLU]~"(mg" ~ m^-2*")")) +
+#   theme(text = element_text(size = 35), #35
+#         axis.text = element_text(color = "black"),
+#         axis.title.x = element_blank(),
+#         legend.position = "none")
+
+# ggsave(here("figures", "timeseries_integrated_ctd_fluorescence2_station_slope_correct.png"),
+#         width = 20, height = 14, dpi = 300)
+```
+
+```{r}
+# int_chl %>% 
+#   filter(station == "QCS01" |
+#            station == "QCS07") %>% 
+#   ggplot(aes(x = date, y = avg_int, color = station)) +
+#   geom_line(size = 2) +
+#   geom_point(size = 3) +
+#   scale_x_date(breaks = seq(as.Date("2013-01-01"), as.Date("2025-01-01"),
+#                             by = "1 year"), date_minor_breaks = "1 month",
+#                expand = c(0, 0),
+#                date_labels = "%b%y",
+#                limits = c(as.Date("2013-01-01"), as.Date("2025-01-01"))) +
+#   # facet_grid(station ~ .) +
+#   ggsci::scale_colour_npg() +
+#   theme_bw() +
+#   labs(y = bquote(CTD[FLU]~"(mg" ~ m^-2*")")) +
+#   theme(text = element_text(size = 35), #35
+#         axis.text = element_text(color = "black"),
+#         axis.title.x = element_blank(),
+#         legend.position = "none")
+# 
+# ggsave(here("figures", "timeseries_integrated_ctd_qcs_compare.png"),
+#         width = 20, height = 6, dpi = 300)
+```
+
+```{r}
+# #Looking at QSC07 versus QCS01 scatter of fluorescence
+# comp2 <- int_chl %>% 
+#   filter(station == "QCS01" |
+#            station == "QCS07") %>%
+#   pivot_wider(names_from = "station", values_from = "avg_int") %>% 
+#   drop_na()
+# 
+# #So very few comparison days, but where they exist, not great.
+# comp %>% 
+#   pivot_longer(cols = c(QCS01, QCS07), names_to = "station", values_to = "flu_dm") %>% 
+#   ggplot(aes(x = flu_dm, y = pres, color = station)) +
+#   geom_line(orientation = "y", size = 2) +
+#   facet_wrap(~date) +
+#   scale_y_reverse() +
+#   theme_bw()
+```
+
+
+
+```{r}
+# test_int %>% 
+#   filter(station == "DFO2" | station == "KC10" | station == "QCS01") %>% 
+#   ggplot(aes(x = date, y = avg_int, color = station)) +
+#   geom_line(size = 2) +
+#   geom_point(size = 3) +
+#   scale_x_date(breaks = seq(as.Date("2013-01-01"), as.Date("2025-01-01"),
+#                             by = "1 year"), date_minor_breaks = "1 month",
+#                expand = c(0, 0),
+#                date_labels = "%b%y",
+#                limits = c(as.Date("2013-01-01"), as.Date("2025-01-01"))) +
+#   facet_grid(station ~ .) +
+#   ggsci::scale_colour_npg() +
+#   theme_bw() +
+#   labs(y = bquote(CTD[FLU]~"(mg" ~ m^-2*")")) +
+#   theme(text = element_text(size = 35), #35
+#         axis.text = element_text(color = "black"),
+#         axis.title.x = element_blank(),
+#         legend.position = "none")
+# 
+# ggsave(here("figures", "timeseries_integrated_ctd_fluorescence2_TRAP.png"),
+#         width = 20, height = 14, dpi = 300)
+```
+
+#Calculating monthly climatology
+```{r}
+#Pulling out KC10 for calculations
+int_kc10 <- test_int %>% 
+  mutate(year = lubridate::year(date),
+         month = lubridate::month(date)) %>%
+  filter(station == "KC10") %>% 
+  mutate(month_adj = case_when(date == "2022-07-28" ~ 8,
+                               date == "2017-08-31" ~ 9,
+                               date == "2017-04-28" ~ 5,
+                               T ~ as.numeric(month)))
+
+#calculate the climatological mean, standard deviation and number of samples in each bin
+int_ts_mm <- int_kc10 %>%
+  group_by(month_adj) %>% 
+  summarise(mm_ts_int = mean(avg_int, na.rm = T),
+            sd_ts_int = sd(avg_int, na.rm = T),
+            n_ts = n()) %>% 
+  ungroup()
+
+#creating a monthly mean for each year - some years have more than 1 observation - I think. I should maybe correct for where there are two observations per month.
+int_year_mm <- int_kc10 %>%
+  select(year, month_adj, avg_int) %>% 
+  group_by(year, month_adj) %>% 
+  summarise(mm_year_int = mean(avg_int, na.rm = T),
+            n_year = n()) %>% 
+  ungroup() 
+
+#calculate the standardized anomaly and create a center of the month date for plotting
+int_anomaly_month <- int_year_mm %>% 
+  left_join(int_ts_mm) %>% 
+  mutate(anom = mm_year_int - mm_ts_int,
+         anom_std = anom/sd_ts_int,
+         day = 15) %>% 
+  unite("date", year, month_adj, day, sep = "-", remove = F) %>% 
+  mutate(date2 = lubridate::ymd(date)) %>% 
+  mutate(pos = anom >= 0) #allows me to plot red/blue colors
+```
+
+```{r}
+int_anomaly_month %>% 
+  ggplot() +
+  geom_area(data = int_kc10, aes(x = date, y = avg_int), alpha = 0.3) +
+  geom_col(data = int_anomaly_month, aes(x = date2, y = anom, fill = pos),
+           position = "identity", colour = "black") +
+  scale_fill_manual(values = c("blue", "red"), guide = FALSE) +
+  # geom_hline(yintercept = 1) +
+  # geom_hline(yintercept = -1) +
+  # geom_hline(yintercept = 2, linetype = "dashed") +
+  # geom_hline(yintercept = -2, linetype = "dashed") +
+  # lims(y = c(-0.5, 0.5)) +
+  scale_x_date(limits = as.Date(c("2012-01-01", "2025-01-01")),
+               expand = c(0, 0),
+               date_breaks = "years", date_labels = "%b%y") +
+  labs(y = bquote(Monthly~Anomaly~"(mg" ~ m^-2*")")) +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        panel.grid.major.x =  element_line(color = "black", size = 0.5),
+        panel.grid.minor.x =  element_line(color = "darkgrey", size = 0.5),
+        # strip.text.x = element_blank(),
+        # panel.spacing = unit(2, "lines"),
+        text = element_text(size = 40),
+        axis.text = element_text(colour = "black"),
+        axis.title.x = element_blank())
+
+ggsave(here("figures", "anomaly_test.png"),
+        width = 20, height = 8, dpi = 300)
+```
+```{r}
+export_int_kc10 <- int_kc10 %>% 
+  select(date, year, month, month_adj, int_chl = avg_int)
+
+export_anom_kc10 <- int_anomaly_month %>% 
+  select(date, year, month_adj, anom)
+```
+
+```{r}
+write.csv(export_int_kc10, here("outputs", "kc10_integrated_chl_2025-01-23.csv"))
+write.csv(export_anom_kc10, here("outputs", "kc10_anom_chl_2025-01-23.csv"))
+```
+
+```{r}
+int_qcs07 <- int_chl %>% 
+  filter(station == "DFO2" | station == "KC10" | station == "QCS01" |
+           station == "QCS07") %>% 
+  mutate(station2 = case_when(station == "QCS07" ~ "QCS01",
+                              TRUE ~ as.character(station))) %>% 
+  mutate(month = lubridate::month(date),
+         year = lubridate::year(date))
+```
+
+```{r}
+ggpubr::ggboxplot(int_qcs07, x = "month", y = "avg_int",
+          color = "black", fill = "station2", palette = "jco", size = 1) +
+  facet_grid(station2 ~ .) +
+  ggpubr::stat_compare_means(label.y.npc = 0.95, size = 7) +
+  ggpubr::stat_compare_means(label = "p.signif",
+                     ref.group = ".all.", hide.ns = TRUE,
+                     label.y.npc = 0.82, size = 13, 
+                     color = "blue") +
+  theme_bw() +
+  labs(y = bquote(CTD-Flu["0-30m"]~"(mg" ~ m^-2*")")) +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = "none")
+
+ggsave(here("figures", "timeseries_integrated_monthly_climatology_stat_mash_qc7.png"),
+        width = 16, height = 14, dpi = 300)
+```
+
+```{r}
+scm_max <- ctd %>%
+  filter(station == "KC10" | station == "QCS01" | station == "DFO2" | 
+           station == "QCS07") %>%
+  filter(pres < 31) %>% 
+  group_by(castpk) %>% 
+  top_n(flu_sc, n = 1) %>% 
+  select(castpk, date, station, max_flu_dep = pres, max_flu = flu_sc) %>% 
+  mutate(station2 = case_when(station == "QCS07" ~ "QCS01",
+                              TRUE ~ as.character(station))) 
+
+int_qcs07 <- int_qcs07 %>% 
+  left_join(scm_max) %>% 
+  mutate(scm_rat = avg_int/max_flu,
+         month = lubridate::month(date)) 
+```
+
+```{r}
+ggpubr::ggboxplot(int_qcs07, x = "month", y = "scm_rat",
+          color = "black", fill = "station2", palette = "jco", size = 1) +
+  facet_grid(station2 ~ .) +
+  ggpubr::stat_compare_means(label.y.npc = 0.95, size = 7) +
+  ggpubr::stat_compare_means(label = "p.signif",
+                     ref.group = ".all.", hide.ns = TRUE,
+                     label.y.npc = 0.82, size = 13,
+                     color = "blue") +
+  theme_bw() +
+  labs(y = bquote(SCM[RATIO])) +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = "none")
+
+ggsave(here("figures", "timeseries_scm-ratio_monthly_climatology.png"),
+        width = 16, height = 14, dpi = 300)
+```
+```{r}
+ggpubr::ggboxplot(int_qcs07, x = "month", y = "max_flu_dep",
+          color = "black", fill = "station2", palette = "jco", size = 1) +
+  facet_grid(station2 ~ .) +
+  ggpubr::stat_compare_means(label.y.npc = 0.95, size = 7) +
+  ggpubr::stat_compare_means(label = "p.signif",
+                     ref.group = ".all.", hide.ns = TRUE,
+                     label.y.npc = 0.82, size = 13,
+                     color = "blue") +
+  theme_bw() +
+  labs(y = bquote(SCM[DEPTH])) +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = "none")
+
+ggsave(here("figures", "timeseries_scm-dep_monthly_climatology.png"),
+        width = 16, height = 14, dpi = 300)
+```
+```{r}
+ggpubr::ggboxplot(int_qcs07, x = "month", y = "max_flu",
+          color = "black", fill = "station2", palette = "jco", size = 1) +
+  facet_grid(station2 ~ .) +
+  ggpubr::stat_compare_means(label.y.npc = 0.95, size = 7) +
+  ggpubr::stat_compare_means(label = "p.signif",
+                     ref.group = ".all.", hide.ns = TRUE,
+                     label.y.npc = 0.82, size = 13,
+                     color = "blue") +
+  theme_bw() +
+  labs(y = bquote(SCM[MAX-FLU])) +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = "none")
+
+ggsave(here("figures", "timeseries_scm-max-flu_monthly_climatology.png"),
+        width = 16, height = 14, dpi = 300)
+```
+
+
+
+
+
+
+
+
+
+```{r}
+# ggpubr::ggboxplot(int_kc10, x = "month", y = "avg_int",
+#           color = "black", fill = "station", palette = "jco", size = 1) +
+#   # facet_grid(station ~ .) +
+#   ggpubr::stat_compare_means(aes(group = station), label = "p.signif",
+#                              hide.ns = TRUE,
+#                              label.y.npc = 0.95, 
+#                              size = 10, 
+#                              color = "blue") +
+#   # ggpubr::stat_compare_means(aes(group = station), label = "p.signif",
+#   #                    ref.group = ".all.", hide.ns = TRUE,
+#   #                    label.y.npc = 0.82, size = 13, 
+#   #                    color = "blue") +
+#   theme_bw() +
+#   labs(y = bquote(CTD[FLU]~"(mg" ~ m^-2*")")) +
+#   theme(text = element_text(size = 35), #35
+#         axis.text = element_text(color = "black"),
+#         axis.title.x = element_blank(),
+#         legend.position = "none")
+# 
+# ggsave(here("figures", "timeseries_integrated_monthly_climatology_station_stat.png"),
+#         width = 16, height = 6, dpi = 300)
+```
+
+
+
+
+
+
+```{r}
+int_chl %>% 
+  filter(station == "DFO2" | station == "KC10" | station == "QCS01") %>% 
+  mutate(month = lubridate::month(date),
+         year = lubridate::year(date)) %>% 
+  ggplot(aes(x = as.factor(month), y = avg_int, fill = station)) +
+  geom_boxplot() +
+  # geom_point(aes(fill = as.factor(year)), pch = 21, size = 5) +
+  # scale_fill_viridis_d() +
+  labs(fill = NULL) +
+  ggsci::scale_fill_npg() +
+  theme_bw() +
+  labs(y = bquote(CTD[FLU]~"(mg" ~ m^-2*")")) +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = c(0.9, 0.85))
+
+ggsave(here("figures", "timeseries_integrated_monthly_climatology_single.png"),
+        width = 16, height = 6, dpi = 300)
+```
+
+
+```{r}
+ctd_dm <- ctd %>% 
+  filter(pres >= 0 & pres <= 50) %>% 
+  group_by(date, station, pres) %>% 
+  summarise(flu_sc_dm = mean(flu_sc)) %>% 
+  ungroup()
+
+formatter <- function(...){
+  function(x) format(round(x, 1), ...)
+}
+
+ctd_dm %>% 
+  mutate(month = lubridate::month(date),
+         year = lubridate::year(date)) %>% 
+  filter(month > 2 & month < 11) %>% 
+  filter(station == "DFO2" | station == "KC10" | station == "QCS01") %>% 
+  ggplot(aes(y = pres, x = flu_sc_dm)) +
+  geom_line(aes(group = date, color = as.factor(year)),
+            orientation = "y", size = 2) +
+  geom_vline(xintercept = 5) +
+  facet_grid(station ~ month, scales = "free_x") +
+  scale_y_reverse() +
+  # ylim(50, 0) +
+  labs(x = bquote("CTD Fluorescence (mg"~m^-3*")"),
+       y = "Depth (m)") +
+  theme_bw() +
+  scale_color_viridis_d() +
+  scale_x_continuous(limits = c(0, NA), expand = c(0, 0), 
+                     labels = formatter(nsmall = 1)) +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 25),
+        axis.text = element_text(colour = "black"),
+        legend.title = element_blank(),
+        # legend.position = c(0.07, 0.95),
+        panel.spacing.x = unit(2, "lines"))
+
+ggsave(here("figures", "ctd_profiles_all.png"),
+        width = 27, height = 14, dpi = 300)
+```
+```{r}
+ctd %>% 
+  mutate(month = lubridate::month(date),
+         year = lubridate::year(date)) %>% 
+  filter(month > 2 & month < 11) %>% 
+  filter(station == "DFO2" | station == "KC10" | station == "QCS01") %>%
+  filter(pres >= 0 & pres <= 50) %>%
+  group_by(month, station, pres) %>%
+  mutate(flu_med = median(flu_sc, na.rm = T)) %>% 
+  ungroup() %>% 
+  ggplot() +
+  geom_line(aes(y = pres, x = flu_med), orientation = "y", size = 2,
+            color = "black") +
+  geom_vline(xintercept = 5) +
+  facet_grid(station ~ month) +
+  scale_y_reverse() +
+  # ylim(50, 0) +
+  labs(x = bquote("CTD Fluorescence (mg"~m^-3*")"),
+       y = "Depth (m)") +
+  theme_bw() +
+  scale_color_viridis_c() +
+  scale_x_continuous(limits = c(0, NA), expand = c(0, NA), 
+                     labels = formatter(nsmall = 1)) +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 30),
+        axis.text = element_text(colour = "black"),
+        legend.title = element_blank(),
+        # legend.position = c(0.07, 0.95),
+        panel.spacing.x = unit(2, "lines"))
+
+ggsave(here("figures", "ctd_profiles_median_season.png"),
+        width = 27, height = 14, dpi = 300)
+```
+
+```{r}
+test2 <- ctd %>% 
+  mutate(month = lubridate::month(date),
+         year = lubridate::year(date)) %>% 
+  filter(station == "DFO2" | station == "KC10" | station == "QCS01" | 
+           station == "QCS07") %>%
+  mutate(station2 = case_when(station == "QCS07" ~ "QCS01",
+                              TRUE ~ as.character(station))) %>% 
+  filter(pres >= 0 & pres <= 51) %>%
+  group_by(month, station2, pres) %>%
+  mutate(flu_med = median(flu_sc, na.rm = T),
+         flu_mean = mean(flu_sc, na.rm = T),
+         var_flu = var(flu_sc, na.rm = T)) %>% 
+  ungroup() %>% 
+  group_by(month, station2) %>%
+  mutate(n_prof = n_distinct(castpk)) %>% 
+  ungroup()
+
+test_sal <- prof %>% 
+  mutate(month = lubridate::month(date),
+         year = lubridate::year(date)) %>% 
+  filter(station == "KC10") %>%
+  filter(pres >= 0 & pres <= 51) %>%
+  group_by(month, station, pres) %>%
+  mutate(sal_med = median(sal, na.rm = T),
+         var_sal = var(sal, na.rm = T)) %>% 
+  ungroup() %>% 
+  group_by(month, station) %>%
+  mutate(n_prof = n_distinct(castpk)) %>% 
+  ungroup()
+
+test3 <- ctd %>%
+  mutate(month = lubridate::month(date),
+         year = lubridate::year(date)) %>% 
+  distinct(castpk, .keep_all = T) %>% 
+  group_by(month, station) %>%
+  summarise(n_prof = n()) %>% 
+  ungroup()
+```
+
+```{r}
+test2 %>% 
+  ggplot() +
+  geom_tile(aes(x = as.factor(month), y = pres, fill = flu_med)) +
+  geom_text(aes(x = as.factor(month), y = 28, label = n_prof),
+            color = "white", size  = 8) +
+  # geom_hline(yintercept = 5, color = "white", linetype = "dotted") +
+  # geom_hline(yintercept = 10, color = "white", linetype = "dotted") +
+  # geom_hline(yintercept = 20, color = "white", linetype = "dotted") +
+  # geom_hline(yintercept = 30, color = "white", linetype = "dotted") +
+  scale_y_reverse() +
+  facet_grid(station2 ~ .) +
+  scale_fill_viridis_c(option = "H") +
+  theme_bw() +
+  labs(fill = bquote(CTD[FLU]~"(mg" ~ m^-3*")"),
+       y = "Depth") +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = "top",
+        legend.box = "horizontal") +
+  guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5,
+                                barwidth = 50, barheight = 1,
+                                frame.colour = "black", ticks.colour = "black"))
+
+ggsave(here("figures", "timeseries_monthly_profile_mash_qc7.png"),
+        width = 16, height = 12, dpi = 300)
+```
+```{r}
+test2 %>% 
+  filter(station2 == "KC10") %>% 
+  ggplot() +
+  geom_tile(aes(x = as.factor(month), y = pres, fill = flu_m)) +
+  geom_text(aes(x = as.factor(month), y = 48, label = n_prof),
+            color = "white", size  = 8) +
+  # geom_hline(yintercept = 5, color = "white", linetype = "dotted") +
+  # geom_hline(yintercept = 10, color = "white", linetype = "dotted") +
+  # geom_hline(yintercept = 20, color = "white", linetype = "dotted") +
+  # geom_hline(yintercept = 30, color = "white", linetype = "dotted") +
+  # scale_y_reverse() +
+  # facet_grid(station2 ~ .) +
+  # scale_fill_viridis_c(option = "H") +
+  scale_y_reverse(breaks = seq(0,50,by = 10)) +
+  cmocean::scale_fill_cmocean(name = "delta",
+                              limits = c(0, 5),
+                              oob = scales::squish) +
+  theme_bw() +
+  labs(fill = bquote(CTD[FLU]~"(mg" ~ m^-3*")"),
+       y = "Depth") +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = "top",
+        legend.box = "horizontal") +
+  guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5,
+                                barwidth = 50, barheight = 1,
+                                frame.colour = "black", ticks.colour = "black"))
+
+ggsave(here("figures", "monthly_climatology_flu_KC10_median.png"),
+        width = 16, height = 6, dpi = 300)
+```
+
+
+
+
+```{r}
+test2 <- test2 %>% 
+  left_join(prof_dd)
+```
+
+
+
+```{r}
+# Perhaps the easiest way to achieve this is to "fake" the primary axis in the same way that you fake the secondary axis. That way, you don't need the added complication of scale_y_reverse:
+
+# library(tidyverse)
+# library(scales)
+# library(lemon)
+# 
+
+
+test2 %>% 
+    mutate(delta_rho_rescaled = delta_rho/0.5 ,
+         pres_rescaled = -pres + 30) %>%
+    ggplot() +
+    geom_tile(aes(x = as.factor(month), y = pres_rescaled, fill = flu_med)) +
+    geom_text(aes(x = as.factor(month), y = 28, label = n_prof),
+            color = "white", size  = 8) +
+    geom_boxplot(aes(x = as.factor(month), y = delta_rho_rescaled),
+                 alpha = 0.4, width = 0.15) +
+    scale_y_continuous(labels = function(x) -(x - 30), limits = c(0, 30),
+                  sec.axis = sec_axis(~.*0.5,
+                                      name = bquote(Delta*rho~"("~kg~m^-3*")"))) +
+  facet_wrap(~station2, ncol = 1) +
+  scale_fill_viridis_c(option = "H") +
+  theme_bw() +
+  labs(fill = bquote(CTD[FLU]~"(mg" ~ m^-3*")"),
+       y = "Depth") +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = "top",
+        legend.box = "horizontal") +
+  guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5,
+                                barwidth = 50, barheight = 1,
+                                frame.colour = "black", ticks.colour = "black"))
+
+ggsave(here("figures", "timeseries_monthly_profile_mash_qc7_strat_test.png"),
+        width = 16, height = 12, dpi = 300)  
+```
+
+
+
+
+
+
+```{r}
+f1 <- test2 %>% 
+  filter(station == "KC10") %>% 
+  ggplot() +
+  geom_tile(aes(x = as.factor(month), y = pres, fill = flu_med)) +
+  geom_text(aes(x = as.factor(month), y = 28, label = n_prof),
+            color = "white", size  = 8) +
+  # geom_hline(yintercept = 5, color = "white", linetype = "dotted") +
+  # geom_hline(yintercept = 10, color = "white", linetype = "dotted") +
+  # geom_hline(yintercept = 20, color = "white", linetype = "dotted") +
+  # geom_hline(yintercept = 30, color = "white", linetype = "dotted") +
+  scale_y_reverse() +
+  # facet_grid(station2 ~ .) +
+  scale_fill_viridis_c(option = "H") +
+  theme_bw() +
+  labs(fill = bquote(CTD[FLU]~"(mg" ~ m^-3*")"),
+       y = "Depth") +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = "top",
+        legend.box = "horizontal") +
+  guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5,
+                                barwidth = 50, barheight = 1,
+                                frame.colour = "black", ticks.colour = "black"))
+
+ggsave(here("figures", "timeseries_monthly_profile_mash_qc7.png"),
+        width = 16, height = 12, dpi = 300)
+```
+
+
+
+
+
+
+
+```{r}
+f2 <- test_sal %>% 
+  ggplot() +
+  geom_tile(aes(x = as.factor(month), y = pres, fill = sal_med)) +
+  geom_text(aes(x = as.factor(month), y = 28, label = n_prof),
+            color = "white", size  = 8) +
+  # geom_hline(yintercept = 5, color = "white", linetype = "dotted") +
+  # geom_hline(yintercept = 10, color = "white", linetype = "dotted") +
+  # geom_hline(yintercept = 20, color = "white", linetype = "dotted") +
+  # geom_hline(yintercept = 30, color = "white", linetype = "dotted") +
+  scale_y_reverse() +
+  # facet_grid(station2 ~ .) +
+  scale_fill_viridis_c(option = "H", limits = c(25, 32)) +
+  theme_bw() +
+  labs(fill = "Salinity",
+       y = "Depth") +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = "bottom",
+        legend.box = "horizontal") +
+  guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5,
+                                barwidth = 50, barheight = 1,
+                                frame.colour = "black", ticks.colour = "black"))
+
+ggsave(here("figures", "timeseries_monthly_profile_salinity_KC10.png"),
+        width = 16, height = 12, dpi = 300)
+```
+
+```{r}
+fig <- f1 / f2
+
+ggsave(here("figures", "timeseries_monthly_profile_salinity_flu_KC10.png"), fig,
+        width = 16, height = 12, dpi = 300)
+```
+
+
+```{r}
+test2 %>% 
+  ggplot() +
+  geom_tile(aes(x = as.factor(month), y = pres, fill = var_flu)) +
+  # geom_hline(yintercept = 5, color = "white", linetype = "dotted") +
+  # geom_hline(yintercept = 10, color = "white", linetype = "dotted") +
+  # geom_hline(yintercept = 20, color = "white", linetype = "dotted") +
+  # geom_hline(yintercept = 30, color = "white", linetype = "dotted") +
+  scale_y_reverse() +
+  facet_grid(station2 ~ .) +
+  scale_fill_viridis_c(option = "H") +
+  theme_bw() +
+  labs(fill = "Variance",
+       y = "Depth") +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = "top",
+        legend.box = "horizontal") +
+  guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5,
+                                barwidth = 50, barheight = 1,
+                                frame.colour = "black", ticks.colour = "black"))
+
+ggsave(here("figures", "timeseries_monthly_profile_sample_depth_variance_mash_qc7.png"),
+        width = 16, height = 12, dpi = 300)
+```
+```{r}
+ctd_kc10 <- ctd %>% 
+  mutate(month = lubridate::month(date),
+         year = lubridate::year(date)) %>% 
+  filter(station == "KC10") %>%
+  filter(pres >= 0 & pres <= 30) %>%
+  ungroup() 
+
+ctd_kc10_phys <- prof %>% 
+  mutate(month = lubridate::month(date),
+         year = lubridate::year(date)) %>% 
+  filter(station == "KC10") %>%
+  filter(pres >= 0 & pres <= 30) %>%
+  ungroup() 
+  
+ctd_kc10_max <- ctd_kc10 %>% 
+  group_by(castpk) %>% 
+  top_n(flu_sc, n = 1) %>% 
+  select(castpk, date, station, max_flu_dep = pres, max_flu = flu_sc)
+
+int_kc10 <- int_kc10 %>% 
+  left_join(ctd_kc10_max) %>% 
+  mutate(scm_rat = avg_int/max_flu)
+
+ctd_kc10 <- ctd_kc10 %>% 
+  left_join(ctd_kc10_max) %>% 
+  group_by(year, month, pres) %>%
+  summarise(flu_sc = median(flu_sc),
+            max_flu = median(max_flu)) %>% 
+  ungroup() 
+```
+
+```{r}
+ggpubr::ggboxplot(int_kc10, x = "month", y = "scm_rat",
+          color = "black", fill = "station", palette = "jco", size = 1) 
+  ggpubr::stat_compare_means(label.y.npc = 0.95, size = 7) +
+  ggpubr::stat_compare_means(label = "p.signif",
+                     ref.group = ".all.", hide.ns = TRUE,
+                     label.y.npc = 0.82, size = 13, 
+                     color = "blue") +
+  theme_bw() +
+  labs(y = bquote(CTD[FLU]~"(mg" ~ m^-2*")")) +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = "none")
+```
+
+
+
+
+
+```{r}
+ctd_kc10 %>% 
+  ggplot(aes(x = as.factor(month))) +
+  geom_tile(aes(y = pres, fill = flu_sc)) +
+  geom_point(aes(y = max_flu), pch = 21, size = 2, fill = "white") +
+  # geom_text(aes(x = as.factor(month), y = 28, label = n_prof),
+  #           color = "white", size  = 8) +
+  # geom_hline(yintercept = 5, color = "white", linetype = "dotted") +
+  # geom_hline(yintercept = 10, color = "white", linetype = "dotted") +
+  # geom_hline(yintercept = 20, color = "white", linetype = "dotted") +
+  # geom_hline(yintercept = 30, color = "white", linetype = "dotted") +
+  scale_y_reverse() +
+  facet_wrap(~year) +
+  scale_fill_viridis_c(option = "H") +
+  theme_bw() +
+  labs(fill = bquote(CTD[FLU]~"(mg" ~ m^-3*")"),
+       y = "Depth") +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = "top",
+        legend.box = "horizontal") +
+  guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5,
+                                barwidth = 50, barheight = 1,
+                                frame.colour = "black", ticks.colour = "black"))
+
+ggsave(here("figures", "timeseries_yearly_profile.png"),
+        width = 20, height = 20, dpi = 300)
+```
+```{r}
+ctd_kc10_phys %>% 
+  ggplot(aes(x = as.factor(month))) +
+  geom_tile(aes(y = pres, fill = sal)) +
+
+  # geom_text(aes(x = as.factor(month), y = 28, label = n_prof),
+  #           color = "white", size  = 8) +
+  # geom_hline(yintercept = 5, color = "white", linetype = "dotted") +
+  # geom_hline(yintercept = 10, color = "white", linetype = "dotted") +
+  # geom_hline(yintercept = 20, color = "white", linetype = "dotted") +
+  # geom_hline(yintercept = 30, color = "white", linetype = "dotted") +
+  scale_y_reverse() +
+  facet_wrap(~year) +
+  scale_fill_viridis_c(option = "H", limits = c(20, 32)) +
+  theme_bw() +
+  labs(fill = "Salinity",
+       y = "Depth") +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = "top",
+        legend.box = "horizontal") +
+  guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5,
+                                barwidth = 50, barheight = 1,
+                                frame.colour = "black", ticks.colour = "black"))
+
+ggsave(here("figures", "timeseries_yearly_profile_SAL.png"),
+        width = 20, height = 20, dpi = 300)
+```
+
+
+
+
+```{r}
+ctd_kc10 %>% 
+  ggplot(aes(x = as.factor(month))) +
+  geom_tile(aes(y = pres, fill = flu_sc)) +
+  geom_point(aes(y = max_flu), pch = 21, size = 2, fill = "white") +
+  # geom_text(aes(x = as.factor(month), y = 28, label = n_prof),
+  #           color = "white", size  = 8) +
+  # geom_hline(yintercept = 5, color = "white", linetype = "dotted") +
+  # geom_hline(yintercept = 10, color = "white", linetype = "dotted") +
+  # geom_hline(yintercept = 20, color = "white", linetype = "dotted") +
+  # geom_hline(yintercept = 30, color = "white", linetype = "dotted") +
+  scale_y_reverse() +
+  facet_wrap(~year) +
+  scale_fill_viridis_c(option = "H") +
+  theme_bw() +
+  labs(fill = bquote(CTD[FLU]~"(mg" ~ m^-3*")"),
+       y = "Depth") +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = "top",
+        legend.box = "horizontal") +
+  guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5,
+                                barwidth = 50, barheight = 1,
+                                frame.colour = "black", ticks.colour = "black"))
+
+ggsave(here("figures", "timeseries_yearly_profile.png"),
+        width = 20, height = 20, dpi = 300)
+```
+
+
+```{r}
+# test2 %>% 
+#   mutate(precip_rescaled = precip/200 ,
+#          nivel_rescaled = -nivel + 2.5) %>%
+#   ggplot() +
+#   geom_tile(aes(x = as.factor(month), y = pres, fill = flu_med)) +
+#   geom_hline(yintercept = 5, color = "white", linetype = "dotted") +
+#   geom_hline(yintercept = 10, color = "white", linetype = "dotted") +
+#   geom_hline(yintercept = 20, color = "white", linetype = "dotted") +
+#   geom_hline(yintercept = 30, color = "white", linetype = "dotted") +
+#   scale_y_reverse() +
+#   facet_grid(station ~ .) +
+#   scale_fill_viridis_c(option = "H") +
+#   theme_bw() +
+#   labs(fill = bquote(CTD[FLU]~"(mg" ~ m^-3*")"),
+#        y = "Depth") +
+#   theme(text = element_text(size = 35), #35
+#         axis.text = element_text(color = "black"),
+#         axis.title.x = element_blank(),
+#         legend.position = "top",
+#         legend.box = "horizontal") +
+#   guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5,
+#                                 barwidth = 50, barheight = 1,
+#                                 frame.colour = "black", ticks.colour = "black"))
+# 
+# ggsave(here("figures", "timeseries_monthly_profile_sample_depth.png"),
+#         width = 16, height = 12, dpi = 300)
+```
+
+
+
+
+```{r}
+
+
+# Perhaps the easiest way to achieve this is to "fake" the primary axis in the same way that you fake the secondary axis. That way, you don't need the added complication of scale_y_reverse:
+
+# library(tidyverse)
+# library(scales)
+# library(lemon)
+# 
+# base_nivelprecip %>%
+#   mutate(nivel = as.double(nivel),
+#          precip = as.double(precip),
+#          data = as.POSIXct(data, format = "%m/%d/%Y")) %>% 
+#   mutate(precip_rescaled = precip/200 ,
+#          nivel_rescaled = -nivel + 2.5) %>% 
+#   ggplot(aes(x = data, y = nivel_rescaled,
+#              xmin = as.POSIXct("2012-05-01", "%Y-%m-%d"), 
+#              xmax = as.POSIXct("2020-04-30",  "%Y-%m-%d"))) +
+# 
+#   geom_col(aes(x = data, y = precip_rescaled), 
+#            colour = '#8D8DAA', size = 1) +
+#   geom_line(color = '#041562', size = 0.3) +
+#   labs(x = "", y = "Groundwater level (m)") +
+#   scale_y_continuous(labels = function(x) -(x - 2.5), limits = c(0, 2.5),
+#                   sec.axis = sec_axis(~.*200, 
+#                                       name = "Precipitation (mm)")) +
+#   lemon::facet_rep_wrap(~poco, nrow = 3, repeat.tick.labels = TRUE) +
+#   theme_bw() +
+#   theme(text=element_text(size=12),
+#         axis.text.x = element_text(size = 8))
+```
+
+
+```{r}
+#How could I look at years with high subsurface maxima at KC10.
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+int_chl_merge <- int_chl %>% 
+  mutate(station = "KC10")
+
+int_chl_r1_merge <- int_chl_r1 %>% 
+  mutate(station = "RVRS01")
+
+int_merge <- rbind(int_chl_merge, int_chl_r1_merge)
+```
+
+```{r}
+int_chl_merge <- int_merge %>% 
+  mutate(month = lubridate::month(date),
+         year = lubridate::year(date)) %>% 
+  ggplot(aes(x = as.factor(month), y = avg_int, fill = station)) +
+  geom_boxplot() +
+  labs(fill = NULL) +
+  ggsci::scale_fill_npg() +
+  theme_bw() +
+  labs(y = bquote(CTD[FLU]~"(mg" ~ m^-2*")")) +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = c(0.93, 0.9))
+
+ggsave(here("figures", "timeseries_integrated_monthly_climatology_kc10_rvrs1.png"),
+        width = 16, height = 7, dpi = 300)
+```
+
+
+
+```{r}
+ctd <- ctd %>%
+  mutate(month = lubridate::month(date),
+         year = lubridate::year(date)) %>% 
+  mutate(season = case_when(month == 12 | month == 1 | month == 2 ~ "Winter",
+                            month >= 3 & month <= 5 ~ "Spring",
+                            month >= 6 & month <= 8 ~ "Summer",
+                            month >= 9 & month <= 12 ~ "Autumn",)) %>%
+  relocate(season, .after = month)    
+  
+#I want to push December from each year to winter of the next year
+ctd <- ctd %>%
+  mutate(year = case_when(season == "Winter" & month == 12 ~ year+1,
+                           TRUE ~ as.numeric(year)))
+
+#Order locations from fjord to shelf
+order_loc_seas <- c("Winter", "Spring", "Summer", "Autumn")
+
+#Chemtax - Specify order of phyto groups for figures
+ctd <- arrange(mutate(ctd,
+                         season = factor(season, levels = order_loc_seas)))
+```
+
+```{r}
+formatter <- function(...){
+  function(x) format(round(x, 1), ...)
+}
+
+ctd_dm <- ctd %>% 
+  filter(pres >= 0 & pres <= 50) %>% 
+  group_by(date, pres) %>% 
+  summarise(flu = mean(flu)) %>% 
+  ungroup()
+
+ctd_dm %>% 
+  mutate(month = lubridate::month(date),
+         year = lubridate::year(date)) %>% 
+  filter(month > 4 & month < 9) %>% 
+  ggplot(aes(y = pres, x = flu)) +
+  geom_line(aes(group = date, color = as.factor(year)),
+            orientation = "y", size = 2) +
+  facet_grid(. ~ month, scales = "free_x") +
+  scale_y_reverse() +
+  ylim(50, 0) +
+  labs(x = bquote("CTD Fluorescence (mg"~m^-3*")"),
+       y = "Depth (m)") +
+  theme_bw() +
+  scale_color_viridis_d() +
+  scale_x_continuous(limits = c(0, NA), expand = c(0, 0), 
+                     labels = formatter(nsmall = 1)) +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 25),
+        axis.text = element_text(colour = "black"),
+        legend.title = element_blank(),
+        # legend.position = c(0.07, 0.95),
+        panel.spacing.x = unit(2, "lines"))
+
+ggsave(here("figures", "ctd_profiles_2.png"),
+        width = 16, height = 13, dpi = 300)
+```
+
+```{r}
+dino_prof <- ctd %>% 
+  filter(date == "2022-07-28" | date == "2021-08-05") %>% 
+  filter(pres < 50) %>% 
+  select(date, pres, flu, sal, temp) %>% 
+  pivot_longer(c(flu:temp), names_to = "par", values_to = "val") %>% 
+  group_by(date, par, pres) %>% 
+  summarise(val_avg = mean(val)) %>% 
+  ungroup() 
+  
+dino_prof %>% 
+  filter(date == "2022-07-28") %>%
+  ggplot(aes(y = pres, x = val_avg)) +
+  geom_line(aes(group = date),
+            orientation = "y", size = 2) +
+  facet_grid(. ~ par, scales = "free") +
+  scale_y_reverse() +
+  ylim(50, 0) +
+  labs(
+    # x = bquote("CTD Fluorescence (mg"~m^-3*")"),
+       y = "Depth (m)") +
+  theme_bw() +
+  scale_color_viridis_d() +
+  scale_x_continuous(
+    # limits = c(0, NA), expand = c(0, 0),
+                     labels = formatter(nsmall = 1)) +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 25),
+        axis.text = element_text(colour = "black"),
+        legend.title = element_blank(),
+        # legend.position = c(0.07, 0.95),
+        panel.spacing.x = unit(2, "lines"))  
+
+ggsave(here("figures", "ctd_profiles_dino.png"),
+        width = 12, height = 10, dpi = 300)
+```
+
+
+
+
+```{r}
+ctd_dm_r1 <- ctd_r1 %>% 
+  filter(pres >= 0 & pres <= 50) %>% 
+  group_by(date, pres) %>% 
+  summarise(flu = mean(flu)) %>% 
+  ungroup()
+
+ctd_dm_r1 %>% 
+  mutate(month = lubridate::month(date),
+         year = lubridate::year(date)) %>% 
+  filter(month > 2 & month < 9) %>% 
+  ggplot(aes(y = pres, x = flu)) +
+  geom_line(aes(group = date, color = as.factor(year)),
+            orientation = "y", size = 2) +
+  facet_grid(. ~ month, scales = "free_x") +
+  scale_y_reverse() +
+  ylim(50, 0) +
+  labs(x = bquote("CTD Fluorescence (mg"~m^-3*")"),
+       y = "Depth (m)") +
+  theme_bw() +
+  scale_color_viridis_d() +
+  scale_x_continuous(limits = c(0, NA), expand = c(0, 0), 
+                     labels = formatter(nsmall = 1)) +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 25),
+        axis.text = element_text(colour = "black"),
+        legend.title = element_blank(),
+        # legend.position = c(0.07, 0.95),
+        panel.spacing.x = unit(2, "lines"))
+
+ggsave(here("figures", "ctd_profiles_rvrs01.png"),
+        width = 16, height = 13, dpi = 300)
+```
+
+
+
+
+
+
+
+```{r}
+ctd %>% 
+  filter(pres >= 0 & pres <= 50) %>%
+  mutate(lubridate::month(date)) %>% 
+  group_by(season, pres) %>%
+  mutate(flu_med = median(flu, na.rm = T)) %>% 
+  ungroup() %>% 
+  ggplot() +
+  geom_line(aes(y = pres, x = log1p(flu), group = castpk, color = year),
+            orientation = "y", size = 0.5,
+            color = "grey"
+            ) +
+  geom_line(aes(y = pres, x = flu_med), orientation = "y", size = 2,
+            color = "black") +
+  facet_grid(. ~ season) +
+  scale_y_reverse() +
+  ylim(50, 0) +
+  labs(x = bquote("CTD Fluorescence (mg"~m^-3*")"),
+       y = "Depth (m)") +
+  theme_bw() +
+  scale_color_viridis_c() +
+  scale_x_continuous(limits = c(0, NA), expand = c(0, NA), 
+                     labels = formatter(nsmall = 1)) +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 35),
+        axis.text = element_text(colour = "black"),
+        legend.title = element_blank(),
+        # legend.position = c(0.07, 0.95),
+        panel.spacing.x = unit(2, "lines"))
+
+ggsave(here("figures", "ctd_profiles_median_season.png"),
+        width = 16, height = 13, dpi = 300)
+```
+
+```{r}
+ctd %>% 
+  filter(pres >= 0 & pres <= 50) %>%
+  mutate(lubridate::month(date)) %>%
+  filter(season == "Spring" | season == "Summer") %>% 
+  group_by(month, pres) %>%
+  mutate(flu_med = median(flu, na.rm = T)) %>% 
+  ungroup() %>% 
+  ggplot() +
+  geom_line(aes(y = pres, x = log1p(flu), group = castpk, color = year),
+            orientation = "y", size = 0.5,
+            color = "grey"
+            ) +
+  geom_line(aes(y = pres, x = flu_med), orientation = "y", size = 2,
+            color = "black") +
+  facet_grid(. ~ month) +
+  scale_y_reverse() +
+  ylim(50, 0) +
+  labs(x = bquote("CTD Fluorescence (mg"~m^-3*")"),
+       y = "Depth (m)") +
+  theme_bw() +
+  scale_color_viridis_c() +
+  scale_x_continuous(limits = c(0, NA), expand = c(0, NA), 
+                     labels = formatter(nsmall = 1)) +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 35),
+        axis.text = element_text(colour = "black"),
+        legend.title = element_blank(),
+        # legend.position = c(0.07, 0.95),
+        panel.spacing.x = unit(2, "lines"))
+
+ggsave(here("figures", "ctd_profiles_median_month_spring_summer.png"),
+        width = 16, height = 13, dpi = 300)
+```
+
+
+
+
+
+
+```{r}
+ctd %>% 
+  filter(pres >= 0 & pres <= 50 & year == 2013) %>% 
+  ggplot(aes(y = pres, x = flu)) +
+  geom_line(aes(group = castpk, color = year),
+            orientation = "y", size = 1) +
+  facet_grid(. ~ season, scales = "free_x") +
+  scale_y_reverse() +
+  ylim(50, 0) +
+  labs(x = bquote("CTD Fluorescence (mg"~m^-3*")"),
+       y = "Depth (m)") +
+  theme_bw() +
+  scale_color_viridis_c() +
+  scale_x_continuous(limits = c(0, NA), 
+                     labels = formatter(nsmall = 1)) +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 25),
+        axis.text = element_text(colour = "black"),
+        legend.title = element_blank(),
+        # legend.position = c(0.07, 0.95),
+        panel.spacing.x = unit(2, "lines"))
+
+ggsave(here("figures", "ctd_profiles_2013.png"),
+        width = 16, height = 13, dpi = 300)
+```
+
+```{r}
+ctd_2023 <- ctd %>% 
+  filter(pres >= 0 & pres <= 50 & year == 2023)  
+```
+
+
+
+
+```{r}
+ctd_max <- ctd %>% 
+  filter(pres <= 30) %>% 
+  group_by(castpk) %>% 
+  filter(flu == max(flu)) %>% 
+  ungroup() %>% 
+  group_by(date) %>% 
+  summarise(med_max = median(pres)) %>% 
+  ungroup() %>% 
+  mutate(month = lubridate::month(date),
+         station = "KC10")
+
+ctd_max_r1 <- ctd_r1 %>% 
+  filter(pres <= 30) %>% 
+  group_by(castpk) %>% 
+  filter(flu == max(flu)) %>% 
+  ungroup() %>% 
+  group_by(date) %>% 
+  summarise(med_max = median(pres)) %>% 
+  ungroup() %>% 
+  mutate(month = lubridate::month(date),
+         station = "RVRS01")
+
+ctd_max_merge <- rbind(ctd_max, ctd_max_r1)
+```
+
+```{r}
+max_box <- ctd_max %>% 
+  ggplot(aes(x = as.factor(month), y = med_max)) +
+  geom_boxplot() +
+  scale_y_reverse() +
+  theme_bw() +
+  labs(y = bquote(Max[FLU]~"(Depth" ~ m^-1*")")) +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+
+ggsave(here("figures", "timeseries_chla_max_depth.png"),
+        width = 16, height = 7, dpi = 300)
+```
+
+```{r}
+max_box_merge <- ctd_max_merge %>% 
+  ggplot(aes(x = as.factor(month), y = med_max, fill = station)) +
+  geom_boxplot() +
+  scale_y_reverse() +
+  ggsci::scale_fill_npg() +
+  theme_bw() +
+  labs(y = bquote(Max[FLU]~"(Depth" ~ m^-1*")")) +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = "none")
+
+ggsave(here("figures", "timeseries_chla_max_depth_kc10_rvrs01.png"),
+        width = 16, height = 7, dpi = 300)
+```
+
+```{r}
+int_dep <- int_box / max_box
+
+int_dep_merge <- int_chl_merge/max_box_merge
+
+ggsave(here("figures", "box_monthly_int_max_clim.png"), int_dep,
+        width = 16, height = 12, dpi = 300)
+
+ggsave(here("figures", "box_monthly_int_max_clim_kc10_rvrs01.png"), int_dep_merge,
+        width = 16, height = 12, dpi = 300)
+```
+
+
+
+```{r}
+ctd_2016 <- ctd %>% 
+  filter(year == 2016 & season == "Summer")
+
+ctd_2016_ex <- ctd_2016 %>% 
+  filter(date == "2016-06-30")
+
+ctd_2016_ex %>% 
+  ggplot() +
+  geom_line(aes(y = pres, x = sal, group = castpk), orientation = "y", size = 2,
+            color = "black") +
+  scale_y_reverse() +
+  ylim(50, 0) +
+  labs(x = bquote("CTD Fluorescence (mg"~m^-3*")"),
+       y = "Depth (m)") +
+  theme_bw() +
+  scale_color_viridis_c() +
+  # scale_x_continuous(limits = c(0, NA), expand = c(0, NA), 
+  #                    labels = formatter(nsmall = 1)) +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 35),
+        axis.text = element_text(colour = "black"),
+        legend.title = element_blank(),
+        # legend.position = c(0.07, 0.95),
+        panel.spacing.x = unit(2, "lines"))
+```
+
+
+
+
+
+```{r}
+#Can I compare KC10 and FZH01 to complete the time-series?
+comp_kc <- kc_qc %>% 
+  filter(site_id == "KC10") %>% 
+  select(date, depth, filter_type2, avg_chla_k = avg_chla, sum_k = sum)
+
+comp_fh <- kc_qc %>% 
+  filter(site_id == "FZH01") %>% 
+  select(date, depth, filter_type2, avg_chla_f = avg_chla, sum_f = sum)
+
+comp <- comp_kc %>% 
+  full_join(comp_fh)
+```
+```{r}
+comp %>% 
+  filter(!is.na(avg_chla_k)) %>% 
+  filter(!is.na(avg_chla_f)) %>%
+  ggplot(aes(x = avg_chla_k, y = avg_chla_f)) +
+  geom_point(size = 2) +
+  ggpubr::stat_cor(aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")),
+                   p.accuracy = 0.001, size = 9) +
+  labs(x = bquote(Chla[KC10] ~ "("*mg~m^-3*")"),
+       y = bquote(Chla[FZH01] ~ "("*mg~m^-3*")")) +
+  facet_wrap(~filter_type2, scales = "free") +
+  theme_bw() +
+  theme(text = element_text(size = 30), #35
+        axis.text = element_text(color = "black"))
+
+ggsave(here("figures", "comparison.png"),
+        width = 14, height = 6, dpi = 300)
+```
+
+```{r}
+clim_m <- kc_qc %>% 
+  group_by(month, depth, filter_type2) %>%
+  summarise(med_sf = median(avg_chla),
+            n = n()) %>% 
+  ungroup()
+
+clim_y <- kc_qc %>% 
+  group_by(year, depth, filter_type2) %>%
+  summarise(med_sf = median(avg_chla),
+            n = n()) %>% 
+  ungroup() 
+```
+```{r}
+#Looking at monthly medians by filter type and depth
+clim_m %>%
+  ggplot() +
+  geom_bar(aes(x = as.factor(month), y = med_sf, fill = filter_type2),
+           position = "stack", stat = "identity") +
+  ggsci::scale_fill_d3() +
+  facet_grid(depth ~ ., scales = "free_y") +
+  theme_bw() +
+  labs(y = bquote("Size Fractionated Chla (mg" ~ m^-3*")"),
+       fill = "Group") +
+  theme(legend.position = "top",
+        legend.direction = "horizontal",
+        legend.title = element_blank(),
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank()) +
+  guides(fill = guide_legend(nrow = 1, reverse = TRUE))
+
+ggsave(here("figures", "climatology_monthly.png"),
+        width = 16, height = 14, dpi = 300)
+```
+```{r}
+#Looking at annual medians by depth, but I don't think this really shows much.
+clim_y %>%
+  ggplot() +
+  # geom_area() +
+  geom_bar(aes(x = as.factor(year), y = med_sf, fill = filter_type2),
+           position = "stack", stat = "identity") +
+  # geom_smooth(aes(x = date, y = sum, color = as.factor(year)),
+  #             method = "loess", span = 0.05) +
+  ggsci::scale_fill_d3() +
+  facet_grid(depth ~ ., scales = "free_y") +
+  # scale_x_date(breaks = seq(as.Date("2014-01-01"), as.Date("2025-01-01"),
+  #                           by = "1 year"), date_minor_breaks = "1 month",
+  #              expand = c(0, 0),
+  #              date_labels = "%b%y",
+  #              limits = c(as.Date("2014-01-01"), as.Date("2025-01-01"))) +
+  theme_bw() +
+  labs(y = bquote("Size Fractionated Chla (mg" ~ m^-3*")"),
+       fill = "Group") +
+  theme(legend.position = "top",
+        legend.direction = "horizontal",
+        legend.title = element_blank(),
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank()) +
+  guides(fill = guide_legend(nrow = 1, reverse = TRUE))
+
+ggsave(here("figures", "climatology_yearly.png"),
+        width = 16, height = 14, dpi = 300)
+```
+
+```{r}
+kc_bulk %>% 
+  filter(depth < 31) %>% 
+  ggplot(aes(x = date, y = bulk, color = site_id)) +
+  # geom_area() +
+  geom_line(size = 2) +
+  geom_point(pch = 21, fill = "white", size = 2) +
+  ggsci::scale_fill_d3() +
+  facet_grid(depth ~ ., scales = "free_y") +
+  scale_x_date(breaks = seq(as.Date("2014-01-01"), as.Date("2025-01-01"),
+                            by = "1 year"), date_minor_breaks = "1 month",
+               expand = c(0, 0),
+               date_labels = "%b%y",
+               limits = c(as.Date("2014-01-01"), as.Date("2025-01-01"))) +
+  theme_bw() +
+  labs(y = bquote("Size Fractionated Chla (mg" ~ m^-3*")"),
+       fill = "Group") +
+  theme(legend.position = c(0.5, 0.95),
+        legend.direction = "horizontal",
+        legend.title = element_blank(),
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank()) +
+  guides(fill = guide_legend(nrow = 1, reverse = TRUE))
+
+ggsave(here("figures", "timeseries_bulk.png"), 
+        width = 16, height = 14, dpi = 300)
+```
+
+
+
+
+Ideas
+
+I think the idea is to try to find large-scale linkages with things like ENSO etc.
+
+How many in-situ samples can I leverage across space and time. Maybe this isn't relevent as there is so much inconsistency. Wiley's idea is to use satellite.
+
+If I focus on KC10, can the size-fractionated data highlight some differences in years and depths, potentially through clustering or ordinations. Is it possible that heatwave years had more smaller species or less biomass?
+
+What about fluorescence profiles and integrated chlorophyll? This would give the depth aspect not covered by satellite imagery.
+
+Clean up the KC10 buoy fluorescence records to get a good idea on temporal variability with freshwater, temperature and PAR links? I think 2021, 2022 and 2024 are salvageable, although 2022 needs major spike removal. Is there a point in this though, with Wiley being able to pick up a lot of this information using the CO2 data?
+
+
+

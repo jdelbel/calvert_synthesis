@@ -1,0 +1,368 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+#Upload packages
+library(tidyverse)
+library(here)
+library(patchwork)
+```
+
+```{r}
+#Import data
+chl <- read_csv(here("files", "chl_all_station_2024-10-25.csv"))
+
+```
+
+```{r}
+distinct_sites <- chl %>% 
+  group_by(site_id) %>% 
+  summarise(n_samp = n(),
+            min_dep = min(line_out_depth),
+            max_dep = max(line_out_depth),
+            min_date = min(date),
+            max_date = max(date))
+```
+
+```{r}
+#selecting KC10 and FZH01
+kc <- chl %>% 
+  filter(site_id == "KC10" | site_id == "FZH01")
+
+fz <- chl %>% 
+  filter(site_id == "FZH01")
+```
+
+```{r}
+kc_qc <- kc %>% 
+  filter(!is.na(chla)) %>%
+  filter(chla > 0) %>% 
+  filter(chla_flag == "AV" | chla_flag == "SVC" | is.na(chla_flag)) %>%
+  filter(!filter_type == "Bulk GF/F") %>% 
+  group_by(site_id, date, line_out_depth) %>% 
+  mutate(n_filt = n()) %>% 
+  ungroup() %>% 
+  group_by(site_id, date, line_out_depth, filter_type) %>% 
+  mutate(n_type = n()) %>% 
+  ungroup() %>% 
+  filter(n_filt == 3 & n_type == 1) %>% 
+  group_by(site_id, date, line_out_depth, filter_type) %>% 
+  summarise(avg_chla = mean(chla)) %>% 
+  ungroup() %>% 
+  group_by(site_id, date, line_out_depth) %>% 
+  mutate(sum = sum(avg_chla)) %>% 
+  ungroup() %>% 
+  mutate(perc = avg_chla/sum) %>% 
+  select(date, site_id, depth = line_out_depth, filter_type, avg_chla, sum, perc) %>% 
+  mutate(filter_type2 = case_when(filter_type == "2um" ~ "3um",
+                                  TRUE ~ as.character(filter_type)))
+
+kc_bulk <- kc %>% 
+  filter(!is.na(chla)) %>% 
+  filter(chla_flag == "AV" | chla_flag == "SVC" | is.na(chla_flag)) %>%
+  filter(filter_type == "Bulk GF/F") %>% 
+  group_by(site_id, date, line_out_depth, filter_type) %>% 
+  summarise(avg_chla = mean(chla)) %>% 
+  select(date, depth = line_out_depth, bulk = avg_chla)
+
+kc_qc <- kc_qc %>% 
+  left_join(kc_bulk) %>% 
+  mutate(year = lubridate::year(date),
+         month = lubridate::month(date)) 
+```
+```{r}
+kc_qc %>% 
+  filter(depth == 5) %>% 
+  ggplot(aes(x = date, y = avg_chla, fill = filter_type2)) +
+  # geom_area() +
+  geom_bar(position = "stack", stat = "identity", width = 10) +
+  ggsci::scale_fill_d3() +
+  facet_grid(site_id ~ .) +
+  scale_x_date(breaks = seq(as.Date("2014-01-01"), as.Date("2025-01-01"),
+                            by = "1 year"), date_minor_breaks = "1 month",
+               expand = c(0, 0),
+               date_labels = "%b%y",
+               limits = c(as.Date("2014-01-01"), as.Date("2025-01-01"))) +
+  theme_bw() +
+  labs(y = bquote("Phyto. (mg" ~ m^-3*")"),
+       fill = "Group") +
+  theme(legend.position = "top",
+        legend.direction = "horizontal",
+        legend.title = element_blank(),
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank()) +
+  guides(fill = guide_legend(nrow = 1, reverse = TRUE))
+
+ggsave(here("figures", "timeseries_FZ01_KC10_5m.png"),
+        width = 16, height = 7, dpi = 300)
+```
+
+```{r}
+ts_1 <- kc_qc %>%
+  ggplot() +
+  # geom_area() +
+  geom_bar(aes(x = date, y = avg_chla, fill = filter_type2),
+           position = "stack", stat = "identity", width = 20) +
+  # geom_smooth(aes(x = date, y = sum, color = as.factor(year)),
+  #             method = "loess", span = 0.05) +
+  ggsci::scale_fill_d3() +
+  facet_grid(depth ~ ., scales = "free_y") +
+  scale_x_date(breaks = seq(as.Date("2014-01-01"), as.Date("2025-01-01"),
+                            by = "1 year"), date_minor_breaks = "1 month",
+               expand = c(0, 0),
+               date_labels = "%b%y",
+               limits = c(as.Date("2014-01-01"), as.Date("2025-01-01"))) +
+  theme_bw() +
+  labs(y = bquote("Size Fractionated Chla (mg" ~ m^-3*")"),
+       fill = "Group") +
+  theme(legend.position = c(0.5, 0.95),
+        legend.direction = "horizontal",
+        legend.title = element_blank(),
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank()) +
+  guides(fill = guide_legend(nrow = 1, reverse = TRUE))
+
+# ggsave(here("figures", "timeseries_FZ01_KC10_5m.png"),
+#         width = 16, height = 7, dpi = 300)
+```
+
+```{r}
+ts_2 <- kc_qc %>% 
+  ggplot(aes(x = date, y = site_id, fill = site_id)) +
+  geom_point(pch = 21, size = 8) +
+  ggsci::scale_fill_jco() +
+  scale_x_date(breaks = seq(as.Date("2014-01-01"), as.Date("2025-01-01"),
+                            by = "1 year"), date_minor_breaks = "1 month",
+               expand = c(0, 0),
+               date_labels = "%b%y",
+               limits = c(as.Date("2014-01-01"), as.Date("2025-01-01"))) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank())
+  
+```
+
+```{r}
+fig_cs <- ts_2 / ts_1 +
+  plot_layout(heights = c(1, 10))
+
+ggsave(here("figures", "timeseries_FZ01_KC10_5m.png"), fig_cs,
+        width = 16, height = 14, dpi = 300)
+```
+```{r}
+#Filtering for days when all 5 surface depths are available and then integrated them.
+int <- kc_qc %>% 
+  filter(depth < 31) %>% 
+  group_by(date, site_id, filter_type2) %>% 
+  mutate(n = n()) %>% 
+  ungroup() %>% 
+  filter(n == 5) %>% 
+  group_by(date, site_id, filter_type2) %>%
+  summarise(int = sum(avg_chla)) %>% 
+  ungroup()
+
+
+```
+```{r}
+int %>%
+  ggplot() +
+  # geom_area() +
+  geom_bar(aes(x = date, y = int, fill = filter_type2),
+           position = "stack", stat = "identity", width = 20) +
+  # geom_smooth(aes(x = date, y = sum, color = as.factor(year)),
+  #             method = "loess", span = 0.05) +
+  ggsci::scale_fill_d3() +
+  scale_x_date(breaks = seq(as.Date("2014-01-01"), as.Date("2025-01-01"),
+                            by = "1 year"), date_minor_breaks = "1 month",
+               expand = c(0, 0),
+               date_labels = "%b%y",
+               limits = c(as.Date("2014-01-01"), as.Date("2025-01-01"))) +
+  theme_bw() +
+  labs(y = bquote("SF-Chla (mg" ~ m^-2*")"),
+       fill = "Group") +
+  theme(legend.position = c(0.5, 0.95),
+        legend.direction = "horizontal",
+        legend.title = element_blank(),
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank()) +
+  guides(fill = guide_legend(nrow = 1, reverse = TRUE))
+
+ggsave(here("figures", "timeseries_integrated.png"),
+        width = 16, height = 7, dpi = 300)
+```
+
+```{r}
+#Can I compare KC10 and FZH01 to complete the time-series?
+comp_kc <- kc_qc %>% 
+  filter(site_id == "KC10") %>% 
+  select(date, depth, filter_type2, avg_chla_k = avg_chla, sum_k = sum)
+
+comp_fh <- kc_qc %>% 
+  filter(site_id == "FZH01") %>% 
+  select(date, depth, filter_type2, avg_chla_f = avg_chla, sum_f = sum)
+
+comp <- comp_kc %>% 
+  full_join(comp_fh)
+```
+```{r}
+comp %>% 
+  filter(!is.na(avg_chla_k)) %>% 
+  filter(!is.na(avg_chla_f)) %>%
+  ggplot(aes(x = avg_chla_k, y = avg_chla_f)) +
+  geom_point(size = 2) +
+  ggpubr::stat_cor(aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")),
+                   p.accuracy = 0.001, size = 9) +
+  labs(x = bquote(Chla[KC10] ~ "("*mg~m^-3*")"),
+       y = bquote(Chla[FZH01] ~ "("*mg~m^-3*")")) +
+  facet_wrap(~filter_type2, scales = "free") +
+  theme_bw() +
+  theme(text = element_text(size = 30), #35
+        axis.text = element_text(color = "black"))
+
+ggsave(here("figures", "comparison.png"),
+        width = 14, height = 6, dpi = 300)
+```
+
+```{r}
+clim_m <- kc_qc %>% 
+  filter(depth < 31) %>% 
+  group_by(date, filter_type2) %>% 
+  mutate(n_dep = n_distinct(depth)) %>% 
+  ungroup() %>% 
+  filter(n_dep == 5) %>% 
+  group_by(month, depth, filter_type2) %>%
+  summarise(med_sf = median(avg_chla),
+            n = n()) %>% 
+  ungroup()
+
+```
+
+```{r}
+#Looking at monthly medians by filter type and depth
+clim_m %>%
+  ggplot() +
+  geom_bar(aes(x = as.factor(month), y = med_sf, fill = filter_type2),
+           position = "stack", stat = "identity", color = "black") +
+  ggsci::scale_fill_jama() +
+  facet_grid(depth ~ .) +
+  theme_bw() +
+  labs(y = bquote("Size Fractionated Chla (mg" ~ m^-3*")"),
+       fill = "Group") +
+  theme(legend.position = "top",
+        legend.direction = "horizontal",
+        legend.title = element_blank(),
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank()) +
+  guides(fill = guide_legend(nrow = 1, reverse = TRUE))
+
+ggsave(here("figures", "climatology_monthly_only5.png"),
+        width = 16, height = 16, dpi = 300)
+```
+
+```{r}
+chl_qc <- chl %>% 
+  filter(site_id == "DFO2" | site_id == "KC10" | site_id == "QCS01" |
+           site_id == "FZH01") %>% 
+  filter(!is.na(chla)) %>%
+  filter(chla > 0) %>% 
+  filter(chla_flag == "AV" | chla_flag == "SVC" | is.na(chla_flag)) %>%
+  filter(!filter_type == "Bulk GF/F") %>% 
+  group_by(site_id, date, line_out_depth) %>% 
+  mutate(n_filt = n()) %>% 
+  ungroup() %>% 
+  group_by(site_id, date, line_out_depth, filter_type) %>% 
+  mutate(n_type = n()) %>% 
+  ungroup() %>% 
+  filter(n_filt == 3 & n_type == 1) %>% 
+  group_by(site_id, date, line_out_depth, filter_type) %>% 
+  summarise(avg_chla = mean(chla)) %>% 
+  ungroup() %>% 
+  group_by(site_id, date, line_out_depth) %>% 
+  mutate(sum = sum(avg_chla)) %>% 
+  ungroup() %>% 
+  mutate(perc = avg_chla/sum) %>% 
+  select(date, site_id, depth = line_out_depth, filter_type, avg_chla, sum, perc) %>% 
+  mutate(filter_type2 = case_when(filter_type == "2um" ~ "3um",
+                                  TRUE ~ as.character(filter_type))) %>% 
+  mutate(depth = case_when(depth == 0 ~ 1,
+                           T ~ as.numeric(depth))) 
+
+clim_stat <- chl_qc %>% 
+  mutate(month = lubridate::month(date)) %>% 
+  filter(depth < 11) %>% 
+  # group_by(date, site_id, filter_type2) %>% 
+  # mutate(n_dep = n_distinct(depth)) %>% 
+  # ungroup() %>% 
+  # filter(n_dep == 3) %>% 
+  mutate(site_id2 = case_when(site_id == "FZH01" ~ "KC10",
+                             T ~ as.character(site_id))) %>%  
+  group_by(site_id2, month, depth, filter_type2) %>%
+  summarise(med_sf = median(avg_chla),
+            n = n()) %>% 
+  ungroup()
+```
+```{r}
+#Looking at monthly medians by filter type and depth
+clim_stat %>%
+  ggplot() +
+  geom_bar(aes(x = as.factor(month), y = med_sf, fill = filter_type2),
+           position = "stack", stat = "identity", color = "black") +
+  ggsci::scale_fill_jama() +
+  facet_grid(depth ~ site_id2) +
+  theme_bw() +
+  labs(y = bquote("Size Fractionated Chla (mg" ~ m^-3*")"),
+       fill = "Group") +
+  theme(legend.position = "top",
+        legend.direction = "horizontal",
+        legend.title = element_blank(),
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank()) +
+  guides(fill = guide_legend(nrow = 1, reverse = TRUE))
+
+ggsave(here("figures", "climatology_monthly_station.png"),
+        width = 16, height = 16, dpi = 300)
+```
+```{r}
+chl_qc %>% 
+  ggplot(aes(x = date, y = avg_chla, fill = filter_type2)) +
+  geom_bar(position = "stack", stat = "identity", color = "black") +
+  ggsci::scale_fill_jama() +
+  facet_grid(depth ~ site_id) +
+  theme_bw() +
+  labs(y = bquote("Size Fractionated Chla (mg" ~ m^-3*")"),
+       fill = "Group") +
+  theme(legend.position = "top",
+        legend.direction = "horizontal",
+        legend.title = element_blank(),
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank()) +
+  guides(fill = guide_legend(nrow = 1, reverse = TRUE))
+
+ggsave(here("figures", "time-series_station_sf.png"),
+        width = 20, height = 20, dpi = 300)
+```
+
+```{r}
+test <- chl_qc %>% 
+  mutate(month = lubridate::month(date)) %>% 
+  filter((site_id == "QCS01" & depth == 10 & month == 7)) %>% 
+  group_by(month) %>% 
+  mutate(median = median(sum)) %>% 
+  ungroup()
+```
+
+
+

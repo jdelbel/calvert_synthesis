@@ -1,0 +1,150 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+
+```{r}
+#Upload packages
+library(tidyverse)
+library(here)
+library(patchwork)
+```
+
+```{r}
+b21 <- read.csv(here("outputs", "buoy_corr_dm_2021.csv"))
+b22 <- read.csv(here("outputs", "buoy_corr_dm_2022.csv"))
+b24 <- read.csv(here("outputs", "buoy_corr_dm_2024.csv"))
+
+#Downloading discrete chlorophyll samples
+cd <- read_csv(here("files", "2024-12-05_HakaiData_chlorophyll.csv"))
+
+sat <- read_csv(here("outputs", "sentinel_8day_kc10_avg.csv"))
+
+
+```
+
+```{r}
+b21 <- b21 %>% 
+  select(date_corr, fl_med_day, group) %>% 
+  distinct()
+
+b22 <- b22 %>% 
+  select(date_corr, fl_med_day) %>%
+  mutate(group = NA) %>% 
+  distinct()
+
+b24 <- b24 %>% 
+  select(date_corr, fl_med_day, group) %>% 
+  distinct()
+```
+
+```{r}
+cd <- cd %>% 
+  filter(filter_type == "Bulk GF/F" & line_out_depth == 0) %>% 
+  select(date, chla)
+```
+
+```{r}
+bc <- rbind(b21, b22, b24)
+
+bc2 <- bc %>% 
+  mutate(date = lubridate::ymd(date_corr),
+         year = lubridate::year(date),
+         yday = lubridate::yday(date)) 
+
+bc2 <- bc2 %>% 
+  left_join(cd)
+```
+
+```{r}
+bc2 %>% 
+  filter(year == 2021 | year == 2022 | year == 2024) %>% 
+  ggplot(aes(x = yday, y = fl_med_day, color = as.factor(year))) +
+  geom_line(data = filter(bc2, year == 2021 & group == 1),
+            size = 2) +
+  geom_point(aes(x = yday, y = chla, color = as.factor(year)),
+             fill = "white", size = 4, pch = 21, stroke = 1.5) +
+  geom_line(data = filter(bc2, year == 2021 & group == 2),
+            size = 2) +
+  geom_line(data = filter(bc2, year == 2022),
+            size = 2) +
+  geom_line(data = filter(bc2, year == 2024 & group == 1),
+            size = 2) +
+  geom_line(data = filter(bc2, year == 2024 & group == 2),
+            size = 2) +
+  facet_grid(year ~ .) +
+  ggsci::scale_color_futurama() +
+  labs(y = "Daily Median Fluorescence",
+       x  = NULL,
+       color = NULL) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+
+ggsave(here("figures", "buoy_corrected_year.png"),
+        width = 16, height = 12, dpi = 300)
+```
+
+```{r}
+b24_join <- b24 %>% 
+  mutate(date = lubridate::ymd(date_corr))
+
+sat_join <- sat %>% 
+  distinct(chl_dm, .keep_all = T) %>% 
+  select(date, sat_chl = chl_dm)
+
+b24_join <- b24_join %>% 
+  left_join(sat_join) 
+
+b24_long <- b24_join %>%
+  select(date, group, fl_med_day, sat_chl) %>%
+  pivot_longer(c(fl_med_day, sat_chl), names_to = "type", values_to = "chl")
+
+b24_join %>% 
+  ggplot(aes(x = date, y = chl, color = type)) +
+  geom_line(data = filter(b24_long, group == 1),
+            size = 2) +
+  geom_line(data = filter(b24_long, group == 2),
+            size = 2) +
+  ggsci::scale_color_futurama() +
+  scale_x_date(date_breaks = "months", date_labels = "%b") +
+  labs(y = "Daily Median Fluorescence",
+       x  = NULL,
+       color = NULL) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+```
+```{r}
+ggplot() +
+  geom_line(data = filter(b24_join, group == 1),
+            aes(x = date, y = fl_med_day),
+            size = 2) +
+  geom_line(data = filter(b24_join, group == 2),
+            aes(x = date, y = fl_med_day),
+            size = 2) +
+  geom_line(data = sat_join, aes(x = date, y = sat_chl),
+            size = 2, color = "darkgreen") + 
+  geom_point(data = sat_join, aes(x = date, y = sat_chl),
+            pch = 21, size = 3, fill = "white", color = "darkgreen", stroke = 0.5) +
+  ggsci::scale_color_futurama() +
+  scale_x_date(date_breaks = "months", date_labels = "%b") +
+  labs(y = "Daily Median Fluorescence",
+       x  = NULL,
+       color = NULL) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+
+ggsave(here("figures", "buoy_sentinel_2024.png"),
+        width = 16, height = 6, dpi = 300)
+```
+
