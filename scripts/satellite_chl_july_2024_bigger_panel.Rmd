@@ -1,0 +1,280 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+
+```{r}
+#Upload packages
+library(tidyverse)
+library(here)
+library(readxl)
+library(patchwork)
+library(lubridate)
+library(MBA)
+library(mgcv)
+library(FNN)
+library(zoo)
+library(reshape2)
+library(rioja)
+library(egg)
+library(mapdata)
+
+library(raster)
+library(maps) 
+library(maptools)
+library(rgeos)
+library(rgdal)
+
+library(oce)
+library(ocedata)
+
+library(gsw)
+```
+
+```{r}
+# https://semba-blog.netlify.app/12/01/2019/plotting-the-spatial-distribution-of-chlorophyll-from-modis/
+```
+
+```{r}
+# 2024 corrected buoy data
+s <- read.csv(here("outputs", "sentinel_2024-07-19_bigger.csv"))
+
+BC.shp <- readOGR(here("data","2_Shapefile", "COAST_TEST2.shp"))
+
+ctd <- read.csv(here("files", "ctd_2024-07_Calvert.csv"))
+
+f_cf <- read.csv(here("outputs", "flu_full_correct_2024.csv"))
+
+```
+
+
+
+
+
+```{r}
+#Wrangling the CTD data - renaming some of the key columns/variables that I will be working with
+
+ctd <- ctd %>% 
+  rename(cast_pk = Cast.PK,
+         date_time = Measurement.time,
+         station = Station,
+         lat = Station.Latitude,
+         long = Station.Longitude,
+         pres = Pressure..dbar.,
+         sal = Salinity..PSU.,
+         temp = Temperature..deg.C.,
+         f = Fluorometry.Chlorophyll..ug.L.)
+
+#Adding a date column
+ctd <- ctd %>% 
+  mutate(date = lubridate::date(date_time)) %>% 
+  relocate(date, .after = date_time) %>% 
+  group_by(station) %>% 
+  mutate(dep_max = max(pres)) %>% 
+  ungroup() %>% 
+  filter(dep_max > 100) %>% 
+  filter(!station == "QSD01") %>%  
+  filter(!station == "BUR1") %>% 
+  filter(!station == "PRUTH") 
+# %>% 
+#   filter(!station == "FC1")
+
+#Looking at coordinates for the CTD dataset - are there any missing? Mssing values need to be filled for later calculations
+ctd_coord <- ctd %>% 
+  distinct(station, lat, long) %>% 
+  mutate(lat = as.double(lat),
+         long = as.double(long))
+
+
+#Performing GSW calculations to derive density 
+
+#Calculating absolute salinity
+SA <- gsw_SA_from_SP(ctd$sal, ctd$pres, ctd$long, ctd$lat)
+
+#Converting absolute salinity output to a dataframe
+SA <- as.data.frame(SA)
+
+#Calculating conservative temperature
+CT <- gsw_CT_from_t(SA$SA, ctd$temp, ctd$pres)
+
+#Converting conservative temperature output to a dataframe
+CT <- as.data.frame(CT)
+
+#Calculating Density
+rho = gsw_rho(SA$SA, CT$CT, ctd$pres)
+
+#Converting Density to a dataframe
+rho <- as.data.frame(rho)
+
+#Calculating Brunt-Vaisala frequency
+bv <- gsw_Nsquared(SA$SA, CT$CT, ctd$pres)
+
+#Converting Brunt-Vaisala frequency to a dataframe
+bv <- bind_rows(bv)
+
+#Adding a row at the bottom of the Brunt-Vaisala dataframe to make the vector length equal to the other calculations -  not sure why this does this, but I think the calculation takes two consequative depths into consideration and throws an NA at the last cell because there - does this mess up calculations between profiles then? Maybe - not using this for now.
+bv <- bv %>% 
+  add_row(N2 = NA, p_mid = NA)
+
+#Binding calculations to ctd dataframe
+ctd <- cbind(ctd, SA, CT, rho, bv)
+```
+
+
+
+
+
+
+```{r}
+### chose the lat/long extent you want to show
+Ncalvert <- extent(-128.29298, -127.54648, 51.32760, 52.07418)
+
+### crop your shapefile polygons to the extent defined
+# takes a moment to run (patience grasshopper)
+BC.shp2 <- crop(BC.shp,Ncalvert)
+
+### project and fortify (i.e. turn into a dataframe)
+BC.df <- fortify(BC.shp2)
+
+# (IF DESIRED) Load .csv file with your specific study site lat/longs
+# this file is a dataframe with 4 columns: site_name, otterOcc(Y or N), lat, long  
+# EXPTsites <- read.csv("/Users/jennb/Dropbox/Simple_BC_map/EXPTsites.csv", header = T)
+```
+
+```{r}
+s_na <- s %>% 
+  drop_na()
+
+#Interpolated surface QU39
+sat_mba <- mba.surf(s_na[c("lat", "long", "chl")], no.X = 400, no.Y = 400, extend = T)
+dimnames(sat_mba$xyz.est$z) <- list(sat_mba$xyz.est$x, sat_mba$xyz.est$y)
+sat_mba <- melt(sat_mba$xyz.est$z,
+                varnames = c('lat', 'long'),
+                value.name = 'chl') 
+```
+
+```{r}
+#Station order
+order_stat <- c("FC1",
+                "FZH04",
+                "FZH08",
+                "KC10",
+                "FZH01",
+                "FZH13",
+                "UBC7",
+                "RVRS01",
+                "QCS07")
+
+#Chemtax full data - Specify order of phyto groups for figures
+ctd_coord <- arrange(mutate(ctd_coord,
+                                group = factor(station,
+                                levels = order_stat)))
+
+ctd <- arrange(mutate(ctd,
+                      group = factor(station,
+                                     levels = order_stat)))
+```
+
+
+
+
+```{r}
+f1 <- ggplot() +
+  geom_raster(data = sat_mba, aes(x = long, y = lat, fill = chl), alpha = 0.8) +
+  geom_polygon(data = BC.df, aes(x = long, y = lat, group = group),
+      colour = "black", size = 0.1, fill = 'grey') +
+  geom_point(data = ctd_coord, aes(x = long, y = lat, color = station),
+             size = 7) +
+  geom_point(data = ctd_coord, aes(x = long, y = lat),
+             size = 7, pch = 21, fill = "transparent", color = "black",
+             stroke = 3) +
+  cmocean::scale_fill_cmocean(name = "delta",
+                              limits = c(0, 5),
+                              oob = scales::squish) +
+  ggsci::scale_color_npg() +
+  coord_cartesian(xlim = c(-128.29298, -127.54648), ylim = c(51.32760, 52.07418)) +
+  coord_fixed() +
+  labs(fill = bquote(Chla[SENTINEL]~"(mg" ~ m^-3*")")) +
+  theme_bw() +
+  theme(panel.grid.minor = element_line(colour = NA),
+        panel.grid.major = element_line(colour = NA),
+        axis.title.y = element_blank(),
+        axis.title.x = element_blank(),
+        text = element_text(size = 45), #35
+        axis.text = element_text(color = "black"),
+        legend.position = "top",
+        legend.box = "horizontal",
+        plot.margin = unit(c(0.1, 0.1, 0.1, 0.1), "cm")) +
+  guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5,
+                                barwidth = 50, barheight = 1,
+                                frame.colour = "black", ticks.colour = "black"),
+         color = "none")
+
+
+
+ggsave(here("figures", "map_test_single_fc1.png"),
+        width = 16, height = 16, dpi = 300)
+```
+
+```{r}
+ctd %>% 
+  filter(pres < 31) %>% 
+  ggplot() +
+  geom_line(aes(x = f, y = pres, color = station), orientation = "y", size = 4) +
+  scale_y_reverse() +
+  ggsci::scale_color_npg() +
+  facet_wrap(~factor(station, levels = c("FC1",
+                "FZH04",
+                "FZH08",
+                "KC10",
+                "FZH01",
+                "FZH13",
+                "UBC7",
+                "RVRS01",
+                "QCS07"))) +
+  labs(x = bquote(CTD[FLU]~"(mg" ~ m^-3*")"),
+       y = "Depth") +
+  theme_bw() +
+  theme(legend.position = "none") +
+  theme(strip.background = element_blank(),
+        text = element_text(size = 45),
+        axis.text = element_text(colour = "black"),
+        legend.title = element_blank(),
+        # legend.position = c(0.07, 0.95),
+        panel.spacing.x = unit(2, "lines"))
+
+ggsave(here("figures", "map_test_single_ctd_fc1.png"),
+        width = 16, height = 16, dpi = 300)
+```
+
+```{r}
+fig <- f1 + f2 + theme(plot.margin = unit(c(1,1,1,1), "cm"))
+
+ggsave(here("figures", "map_test_fc1.png"), fig,
+        width = 16, height = 16, dpi = 300)
+```
+```{r}
+ctd %>% 
+  filter(pres < 31) %>% 
+  ggplot(aes(x = f, y = rho)) +
+  geom_point()
+```
+```{r}
+ctd_num <- ctd %>% 
+  distinct(CTD.serial.number)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+

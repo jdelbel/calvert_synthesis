@@ -194,6 +194,8 @@ fit_mod_wide <- fit_mod_wide %>%
   mutate_at(vars(slope), funs(round(., 2))) %>%
   select(date, intercept, slope, r2, p.value, nobs)
 ```
+
+
 ```{r}
 #Now I want a dataset where I have raw fluorescence, instrument slope corrected, cast slope corrected, bottle concentrations and loess fit through bottle concentrations.
 

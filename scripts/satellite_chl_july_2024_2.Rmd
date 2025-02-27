@@ -1,0 +1,194 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+https://coastwatch.gitbook.io/satellite-course/tutorials/r-tutorial/1.-how-to-work-with-satellite-data-in-r
+
+https://towardsdatascience.com/how-to-crack-open-netcdf-files-in-r-and-extract-data-as-time-series-24107b70dcd/
+
+```{r}
+library(ncdf4)
+library(httr)
+library(tidyverse)
+library(here)
+```
+
+```{r}
+junk <- GET('https://catalogue.hakai.org/erddap/griddap/sentinel_3A_POLYMER.nc?chl_conc%5B(2024-07-19T00:00:00Z):1:(2024-07-19T00:00:00Z)%5D%5B(51.327609481637374):1:(52.07418357526005)%5D%5B(-128.29298012857942):1:(-127.54648012747612)%5D', write_disk("chl.nc", overwrite = TRUE))
+
+```
+
+```{r}
+nc = nc_open('chl.nc')
+names(nc$var)
+```
+```{r}
+print(nc)
+```
+
+```{r}
+attributes(nc$var)
+```
+
+```{r}
+attributes(nc$dim)
+```
+
+```{r}
+lat <- ncvar_get(nc, "latitude")
+nlat <- dim(lat) #to check it matches the metadata: 23
+```
+
+
+```{r}
+lon <- ncvar_get(nc, "longitude")
+nlon <- dim(lon) #to check, should be 24
+```
+
+```{r}
+print(c(nlon, nlat))
+```
+```{r}
+time <- ncvar_get(nc, "time")
+head(time) # just to have a look at the numbers
+tunits <- ncatt_get(nc, "time", "units") #check units
+nt <- dim(time) #should be 2622
+```
+
+```{r}
+#get the variable in "matrix slices"
+lswt_array <- ncvar_get(nc, "chl_conc") 
+
+fillvalue <- ncatt_get(nc, "chl_conc", "_FillValue")
+dim(lswt_array) #to check; this should give you 24 23 2622
+#right away let's replace the nc FillValues with NAs
+```
+
+
+```{r}
+lswt_array[lswt_array==fillvalue$value] <- NA
+lswt_array
+```
+
+```{r}
+time_obs <- as.POSIXct(time, origin = '1970-01-01', tz = 'UTC')
+dim(time_obs)
+range(time_obs)
+```
+```{r}
+# lswt_slice <- lswt_array[ , , 201] 
+
+```
+
+```{r}
+#Create 2D matrix of long, lat and time
+lonlattime <- as.matrix(expand.grid(lon, lat, time_obs)) # this might take several seconds
+```
+
+```{r}
+#reshape whole lswt_array
+lswt_vec_long <- as.vector(lswt_array)
+length(lswt_vec_long) # by now it should be 1447344
+```
+
+```{r}
+#Create data.frame
+lswt_obs <- data.frame(cbind(lonlattime, lswt_vec_long))
+colnames(lswt_obs) <- c("Long","Lat","Date","chl_conc")
+head(lswt_obs)
+```
+
+```{r}
+lwst_obs2 <- lswt_obs %>% 
+  mutate(date = lubridate::date(Date),
+         chl = as.double(chl_conc),
+         Lat = as.double(Lat),
+         Long = as.double(Long)) %>% 
+  select(date, lat = Lat, long = Long, chl)
+```
+
+```{r}
+lwst_obs2 %>% 
+  ggplot(aes(y = lat, x = long, fill = chl)) +
+  geom_raster() +
+  scale_fill_viridis_c(option = "H") 
+```
+
+
+
+```{r}
+write.csv(lwst_obs2, here("outputs", "sentinel_2024-07-19_bigger.csv"))
+```
+
+
+
+```{r}
+# %>% 
+#   mutate_all(~ifelse(is.nan(.), NA, .))
+# 
+# lwst_obs2$chl <- as.numeric(lwst_obs2$chl_conc_mean)
+# 
+# 
+# %>% 
+#   mutate_all(~ifelse(is.nan(.), NA, .))
+
+# lwst_obs2 <- lwst_obs2 %>% 
+#   filter(!is.nan(chl)) %>% 
+#   group_by(date) %>% 
+#   mutate(n = n(),
+#             tot = 15*16,
+#             perc = (n/tot)*100) %>% 
+#   ungroup() %>% 
+#   filter(perc > 90)
+```
+
+```{r}
+chl_final <- lwst_obs2 %>% 
+  select(date, chl) %>% 
+  group_by(date) %>% 
+  summarise(chl_dm = mean(chl),
+            chl_sd = sd(chl)) %>% 
+  ungroup()
+```
+
+```{r}
+chl_final %>% 
+  mutate(month = lubridate::month(date)) %>% 
+  filter(month > 2 & month < 10) %>% 
+  ggplot(aes(x = date, y = chl_dm)) +
+  geom_point() +
+  geom_line() +
+  geom_errorbar(aes(ymin = chl_dm - chl_sd, ymax = chl_dm + chl_sd)) +
+  scale_x_date(date_breaks = "months", date_labels = "%b") 
+```
+```{r}
+lwst_obs2 %>% 
+  ggplot(aes(y = Lat, x = Long, fill = chl)) +
+  geom_raster() +
+  scale_fill_viridis_c(option = "H") 
+```
+
+```{r}
+write.csv(chl_final, here("outputs", "sentinel_8day_kc10_avg.csv"))
+```
+
+
+
+
+```{r}
+# Bold move time: remove all rows with NA in LSWT_Kelvin:
+# lwst_obs2 <- na.omit(lwst_obs2)
+# dim(lwst_obs2)
+# dim(lswt_final)
+```
+
+
+
+
+
+
+
+
+
+
