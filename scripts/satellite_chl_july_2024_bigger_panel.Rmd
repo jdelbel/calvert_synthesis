@@ -27,6 +27,7 @@ library(maptools)
 library(rgeos)
 library(rgdal)
 
+
 library(oce)
 library(ocedata)
 
@@ -181,7 +182,7 @@ ctd <- arrange(mutate(ctd,
 
 
 ```{r}
-f1 <- ggplot() +
+ggplot() +
   geom_raster(data = sat_mba, aes(x = long, y = lat, fill = chl), alpha = 0.8) +
   geom_polygon(data = BC.df, aes(x = long, y = lat, group = group),
       colour = "black", size = 0.1, fill = 'grey') +
@@ -190,12 +191,16 @@ f1 <- ggplot() +
   geom_point(data = ctd_coord, aes(x = long, y = lat),
              size = 7, pch = 21, fill = "transparent", color = "black",
              stroke = 3) +
-  cmocean::scale_fill_cmocean(name = "delta",
-                              limits = c(0, 5),
-                              oob = scales::squish) +
+  scale_fill_viridis_c(limits = c(0, 4),
+                       oob = scales::squish) +
+  # cmocean::scale_fill_cmocean(name = "delta",
+  #                             limits = c(0, 5),
+  #                             oob = scales::squish) +
   ggsci::scale_color_npg() +
   coord_cartesian(xlim = c(-128.29298, -127.54648), ylim = c(51.32760, 52.07418)) +
   coord_fixed() +
+  annotate("text", x = -128.15, y = 51.35, label = "July 19th, 2024",
+           color = "white", size  = 15) +
   labs(fill = bquote(Chla[SENTINEL]~"(mg" ~ m^-3*")")) +
   theme_bw() +
   theme(panel.grid.minor = element_line(colour = NA),
@@ -214,7 +219,7 @@ f1 <- ggplot() +
 
 
 
-ggsave(here("figures", "map_test_single_fc1.png"),
+ggsave(here("figures", "map_test_single_fc1_viridis_4.png"),
         width = 16, height = 16, dpi = 300)
 ```
 
