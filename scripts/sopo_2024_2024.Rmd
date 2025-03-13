@@ -169,6 +169,9 @@ f1 <- ggplot() +
   annotate("text", x = as.Date("2024-01-15"), y = 3500,
            label = "a)",
            size = 10) +
+  annotate("text", x = as.Date("2024-04-15"), y = 3500,
+           label = "2024 SB",
+           size = 10) +
   scale_fill_manual(values = c("blue", "red"), guide = FALSE) +
   ggsci::scale_color_futurama() +
   labs(y = bquote(Wind~"("*m^-3*s^-3*")")) +
@@ -424,6 +427,9 @@ f5 <- chem_tchla %>%
              linetype = "solid", size = 1, color = "black") +
   annotate("text", x = as.Date("2024-01-15"), y = 5.4,
            label = "d)",
+           size = 10) +
+  annotate("text", x = as.Date("2024-12-15"), y = 5.4,
+           label = "5m",
            size = 10) +
   ggsci::scale_fill_npg() +
   # lims(y = c(0, 5)) +
