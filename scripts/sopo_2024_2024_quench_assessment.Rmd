@@ -1,0 +1,205 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Some new interpolation tutorials to consider:
+https://search.r-project.org/CRAN/refmans/rioja/html/interp.dataset.html
+https://github.com/hdugan/NTLlakeloads
+
+```{r}
+#Upload packages
+library(tidyverse)
+library(here)
+library(readxl)
+library(patchwork)
+library(lubridate)
+library(MBA)
+library(mgcv)
+library(FNN)
+library(zoo)
+library(reshape2)
+library(rioja)
+library(egg)
+
+```
+
+```{r}
+# 2024 corrected buoy data
+b24 <- read.csv(here("outputs", "buoy_corr_dm_2024.csv"))
+
+#Corrected CTD data
+f <- read_csv(here("outputs", "kc10_npq_all_column.csv"))
+
+#Downloading discrete chlorophyll samples -  not sure if I need this.
+cd <- read_csv(here("files", "2024-12-05_HakaiData_chlorophyll.csv"))
+
+```
+
+```{r}
+#Selecting buoy columns I will use.
+b24 <- b24 %>% 
+  select(date_corr, fl_med_day, group) %>% 
+  distinct()
+
+#Selecting fluorescence profiles I will use.
+f24 <- f %>% 
+  filter(date > "2024-01-01")
+```
+
+```{r}
+#selecting surface chlorophyll data for plotting with buoy
+cd <- cd %>% 
+  filter(filter_type == "Bulk GF/F" & line_out_depth == 0) %>% 
+  select(date, chla)
+```
+
+```{r}
+#adding important date columns to buoy sheet 
+b24 <- b24 %>% 
+  mutate(date = lubridate::ymd(date_corr),
+         year = lubridate::year(date),
+         yday = lubridate::yday(date)) 
+
+#joining surface chlorophyll to buoy.
+b24 <- b24 %>% 
+  left_join(cd) 
+```
+
+```{r}
+#Pivoting buoy data longer for plotting
+b24_long <- b24 %>%
+  select(date_corr, group, chla, fl_med_day) %>% 
+  pivot_longer(c(chla, fl_med_day),
+              names_to = "par", values_to = "val") %>% 
+  mutate(date = date(date_corr))
+```
+
+```{r}
+b1 <- b24_long %>% 
+  ggplot(aes(x = date, y = val, color = par)) +
+  geom_line(data = filter(b24_long,
+                          par == "fl_med_day" & group == 1),
+            size = 2) +
+  geom_line(data = filter(b24_long,
+                          par == "fl_med_day" & group == 2),
+            size = 2) +
+  geom_point(data = filter(b24_long,
+                          par == "chla"),
+            size = 4, pch = 8, stroke = 2) +
+  ggsci::scale_color_aaas(labels = c(expression(Chl[Discrete]),
+                                         expression(Chl[BUOY]),
+                                         expression(Salinity[BUOY]))) +
+  scale_x_date(limits = as_date(c("2024-01-01", "2024-12-31")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  ylab(expression(Chl~"(mg" ~ m^-3*")")) +
+  labs(color = NULL) +
+  theme_bw() +
+  theme(legend.position = "right",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank())
+```
+
+```{r}
+f1 <- f24 %>% 
+  mutate(day = 15,
+         year = year(date),
+         month = month(date)) %>% 
+  unite(date_2, c(year, month, day), sep = "-", remove = F) %>% 
+  mutate(date_2 = date(date_2)) %>% 
+  ggplot(aes(x = date)) +
+  geom_tile(aes(y = pres, fill = flu_cor)) +
+  scale_y_reverse(breaks = seq(0, 50, by = 10)) +
+  scale_fill_viridis_c(limits = c(0, 20),
+                       oob = scales::squish) +
+  labs(fill = bquote(CTD[FLU-L1]~"(mg" ~ m^-3*")"),
+       y = "Depth") +
+  scale_x_date(limits = as_date(c("2024-01-01", "2024-12-31")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  theme_bw() +
+  theme(text = element_text(size = 38), #35
+        axis.text = element_text(color = "black"),
+        # axis.text.x = element_blank(),
+        legend.position = "right",
+        legend.key.height = unit(1.8, "cm"),
+        legend.title = element_text(size = 30, angle = 270),
+        legend.title.align = 0.5,
+        legend.direction = "vertical",
+        axis.text.x = element_blank(),
+        axis.title.x = element_blank(),
+        ) +
+    guides(fill = guide_colourbar(title.position = "right"))
+
+```
+```{r}
+f2 <- f24 %>% 
+  mutate(day = 15,
+         year = year(date),
+         month = month(date)) %>% 
+  unite(date_2, c(year, month, day), sep = "-", remove = F) %>% 
+  mutate(date_2 = date(date_2)) %>% 
+  ggplot(aes(x = date)) +
+  geom_tile(aes(y = pres, fill = chl_loess)) +
+  scale_y_reverse(breaks = seq(0, 50, by = 10)) +
+  scale_fill_viridis_c(limits = c(0, 20),
+                       oob = scales::squish) +
+  labs(fill = bquote(Leoss[FLU]~"(mg" ~ m^-3*")"),
+       y = "Depth") +
+  scale_x_date(limits = as_date(c("2024-01-01", "2024-12-31")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  theme_bw() +
+  theme(text = element_text(size = 38), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = "right",
+        legend.key.height = unit(1.8, "cm"),
+        legend.title = element_text(size = 30, angle = 270),
+        legend.title.align = 0.5,
+        legend.direction = "vertical",
+        axis.text.x = element_blank()
+        ) +
+    guides(fill = guide_colourbar(title.position = "right"))
+```
+```{r}
+f3 <- f24 %>% 
+  mutate(day = 15,
+         year = year(date),
+         month = month(date)) %>% 
+  unite(date_2, c(year, month, day), sep = "-", remove = F) %>% 
+  mutate(date_2 = date(date_2)) %>% 
+  ggplot(aes(x = date)) +
+  geom_tile(aes(y = pres, fill = f_npq)) +
+  scale_y_reverse(breaks = seq(0, 50, by = 10)) +
+  scale_fill_viridis_c(limits = c(0, 20),
+                       oob = scales::squish) +
+  labs(fill = bquote(CTD[FLU-NPQ]~"(mg" ~ m^-3*")"),
+       y = "Depth") +
+  scale_x_date(limits = as_date(c("2024-01-01", "2024-12-31")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  theme_bw() +
+  theme(text = element_text(size = 38), #35
+        axis.text = element_text(color = "black"),
+        # axis.title.x = element_blank(),
+        legend.position = "right",
+        legend.key.height = unit(1.8, "cm"),
+        legend.title = element_text(size = 30, angle = 270),
+        legend.title.align = 0.5,
+        legend.direction = "vertical"
+        ) +
+    guides(fill = guide_colourbar(title.position = "right"))
+
+```
+
+```{r}
+npq <- ggarrange(b1, f1, f2, f3, ncol = 1)
+
+ggsave(here("figures", "panel_kc10_quench_compare.png"), npq,
+        width = 16, height = 18, dpi = 300)
+```
+
+
+
+
+

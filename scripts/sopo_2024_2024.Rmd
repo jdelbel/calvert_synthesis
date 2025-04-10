@@ -309,7 +309,7 @@ b24 %>%
   geom_vline(xintercept = as_date("2024-04-06"),
              linetype = "dashed", size = 1, color = "black") +
   ggsci::scale_color_futurama() +
-  scale_x_date(limits = as_date(c("2024-01-01", "2024-12-31")),
+  scale_x_date(
                expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
   ylab(expression(atop(Buoy[FLU]~"(mg" ~ m^-3*")",
                        paste("Salinity")))) +

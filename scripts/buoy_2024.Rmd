@@ -108,6 +108,7 @@ chl_22_q1 <- chl_22 %>%
 ```
 
 
+
 ```{r}
 #Looking at dataset after first round of removals
 chl_22 %>% 
@@ -579,7 +580,6 @@ chl_22_qc2 <- chl_22_qc1 %>%
 
 #this I could figure out.
 ```
-
 
 
 
