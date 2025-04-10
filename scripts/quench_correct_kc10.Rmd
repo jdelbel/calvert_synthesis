@@ -40,7 +40,7 @@ c <- read_csv(here("files", "2025-03-25_HakaiData_chlorophyll.csv"))
 #Downloading PAR data from pruth and Koeye
 par <- read_csv(here("files", "par_pruth_koeye.csv"))
 
-par_c <- read_csv(here("files", "8_binAvg-1743715163197.csv")) 
+par_c <- read_csv(here("files_big", "8_binAvg-1743715163197.csv")) 
   
   
 ```
