@@ -44,6 +44,7 @@ par_c <- read_csv(here("files_big", "8_binAvg-1743715163197.csv"))
   
   
 ```
+
 ```{r}
 #Working with CTD fluorescence datasets
 
@@ -158,7 +159,9 @@ c_join <- c_dm %>%
   full_join(c_sum) %>% 
   mutate(chl_comb = case_when(is.na(chl_dm) ~ sum,
                               !is.na(chl_dm) ~ chl_dm)) %>% 
-  select(date, station, pres, chl_dm, chl_comb)
+ mutate(chl_comb = case_when(date == "2023-05-14" & pres == 20 ~ sum,
+                              TRUE ~ as.numeric(chl_comb))) %>%   
+ select(date, station, pres, chl_dm, chl_comb)
 
 #A comparison of the bulk and SF sum should be plotted and offset applied if needed.
 ```
@@ -182,7 +185,8 @@ f_fit <- f_dm %>%
   filter(!(id == "2017-08-14-KC10" & pres == 5)) %>% 
   filter(!(id == "2017-10-12-KC10" & (pres == 0 | pres == 5))) %>% 
   filter(!(id == "2019-02-14-KC10" & pres == 30)) %>%
-  filter(!(id == "2019-05-11-KC10" & pres < 6)) 
+  filter(!(id == "2019-05-11-KC10" & pres < 6)) %>% 
+  filter(!(id == "2023-05-14-KC10" & pres == 10)) 
          
 ```
 
@@ -390,7 +394,7 @@ f_insign %>%
   facet_wrap(~id, scales = "free") +
   theme_bw() 
 
-ggsave(here("figures", "insig_test_scatter_fix2.png"), 
+ggsave(here("figures", "insig_test_scatter_fix3.png"), 
         width = 16, height = 16, dpi = 300)
 
 
@@ -931,7 +935,7 @@ cor_npq_prof %>%
         text = element_text(size = 35), #35
         axis.text = element_text(color = "black"))
 
-ggsave(here("figures", "check_npq_prof.png"),
+ggsave(here("figures", "check_npq_prof_2023-05-14_20-fix.png"),
         width = 20, height = 24, dpi = 300)
 
 #2023-05-14 is quite interesting as greatly downscaling the raw profile - why?
@@ -944,7 +948,21 @@ ggsave(here("figures", "check_npq_prof.png"),
 #NPQ ??? PAR?
 
 ```{r}
+corrected <- f_slope_join %>% 
+  filter(!is.na(slope_best))
 
+kc_fz_dup <- corrected %>% 
+  select(date, station, id) %>% 
+  distinct() %>% 
+  group_by(date) %>% 
+  mutate(n = n()) %>% 
+  ungroup() %>% 
+  filter(n > 1)
+
+dup_list <- kc_fz_dup$id
 ```
 
+```{r}
+
+```
 
