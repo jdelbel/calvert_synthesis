@@ -35,7 +35,7 @@ library(data.table)
 ```
 
 ```{r}
-p <- read_csv(here("files", "8_binAvg-1743715163197.csv")) 
+p <- read_csv(here("files_big", "8_binAvg-1743715163197.csv")) 
 
 pa <- read_csv(here("files_big", "par_hour.csv"))
 ```
@@ -533,7 +533,7 @@ par_0_join %>%
         strip.background = element_blank(),
         panel.border = element_rect(colour = "black", fill = NA))
 
-ggsave(here("figures", "validate_par.png"), 
+ggsave(here("figures", "validate_par2.png"), 
         width = 20, height = 5, dpi = 300)
 ```
 
