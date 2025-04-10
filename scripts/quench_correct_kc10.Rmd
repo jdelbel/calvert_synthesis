@@ -964,5 +964,17 @@ dup_list <- kc_fz_dup$id
 
 ```{r}
 
+corrected %>% 
+  filter(id %in% dup_list) %>%
+  filter(pres < 51) %>% 
+  ggplot(aes(x = f_npq, y = pres, color = station)) +
+  geom_line(orientation = "y") +
+  scale_y_reverse() +
+  facet_wrap(~date, scales = "free_x")
+
+#Initial comparison shows that they can be different
+```
+```{r}
+write.csv(corrected, here("outputs", "corrected_flu_2025-04-10.csv"))
 ```
 
