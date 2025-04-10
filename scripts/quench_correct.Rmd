@@ -15,7 +15,6 @@ library(FNN)
 library(zoo)
 library(reshape2)
 library(rioja)
-
 ```
 
 ```{r}
@@ -288,33 +287,118 @@ sb_correct <- ctd_slope %>%
                         pres > 5 ~ flu_cast_cor))
 
 sb_correct %>% 
+  filter(pres < 50) %>% 
   ggplot() +
-  annotate("rect", xmin = -Inf, xmax = Inf, ymin = 0, ymax = -6, fill = 'gray') +
-  geom_line(aes(x = flu_cor, y = pres*-1),
+  annotate("rect", xmin = -Inf, xmax = Inf, ymin = 0, ymax = 6, fill = 'orange') +
+  # geom_line(aes(x = flu_cast_cor, y = pres),
+  #           orientation = "y",
+  #           color = "forestgreen",
+  #           size = 2) +
+  geom_line(aes(x = flu_cor, y = pres),
             orientation = "y",
             color = "black",
-            size = 1.5) +
-  geom_line(aes(x = qc, y = pres*-1),
+            size = 2) +
+  geom_line(aes(x = qc, y = pres),
+            orientation = "y",
+            color = "blue",
+            size = 3) +
+  geom_line(data = . %>%  filter(pres < 7), aes(x = flu_cast_cor, y = pres),
+            orientation = "y",
+            color = "blue",
+            size = 3,
+            linetype = "dotted") +
+  geom_line(aes(x = chl_loess, y = pres),
             orientation = "y",
             color = "red",
-            size = 2.5) +
-  geom_point(aes(x = chl_dm, y = pres*-1),
-             pch = 21,
-             color = "black",
-             fill = "white",
-             size = 3,
-             stroke = 1.5) +
-  ylim(-101, 0) +
+            size = 2) +
+  geom_point(aes(x = chl_dm, y = pres),
+             size = 6, 
+             pch = 8, color = "black", 
+             stroke = 2) +
+  scale_y_reverse(breaks = seq(0, 50, by = 10)) +
   facet_wrap(~date, scales = "free_x") +
-  labs(x = "Fluorescence",
+  labs(x = bquote(CTD[FLU]~"(mg" ~ m^-3*")"),
        y = "Depth") +
   theme_bw() +
-  theme(text = element_text(size = 35), #35
+  theme(text = element_text(size = 40), #35
         axis.text = element_text(color = "black")) 
 
-ggsave(here("figures", "quench_sb_correct.png"),
-        width = 10, height = 12, dpi = 300)
+ggsave(here("figures", "quench_sb_correct_4.png"),
+        width = 9, height = 12, dpi = 300)
 ```
+```{r}
+sb_correct %>% 
+  filter(pres < 50) %>% 
+  ggplot() +
+  annotate("rect", xmin = -Inf, xmax = Inf, ymin = 0, ymax = 6, fill = 'orange') +
+  geom_line(aes(x = par, y = pres),
+            orientation = "y",
+            color = "black",
+            size = 2) +
+  scale_y_reverse(breaks = seq(0, 50, by = 10)) +
+  facet_wrap(~date, scales = "free_x") +
+  labs(x = bquote(CTD[PAR]~"(μmol" ~ m^-2~m^-1*")"),
+       y = "Depth") +
+  theme_bw() +
+  theme(text = element_text(size = 40), #35
+        axis.text = element_text(color = "black"))
+
+ggsave(here("figures", "quench_sb_correct_par.png"),
+        width = 9, height = 12, dpi = 300)
+```
+
+
+
+```{r}
+scm_correct <- ctd_slope %>% 
+  filter(date == "2024-07-18") %>% 
+  mutate(flu_cast_cor = flu_cor*slope) %>% 
+  mutate(qc = case_when(pres <= 5 ~ chl_loess,
+                        pres > 5 ~ flu_cast_cor))
+
+scm_correct %>% 
+  filter(pres < 50) %>% 
+  ggplot() +
+  annotate("rect", xmin = -Inf, xmax = Inf, ymin = 0, ymax = 6, fill = 'orange') +
+  # geom_line(aes(x = flu_cast_cor, y = pres),
+  #           orientation = "y",
+  #           color = "forestgreen",
+  #           size = 2) +
+  geom_line(aes(x = flu_cor, y = pres),
+            orientation = "y",
+            color = "black",
+            size = 2) +
+  geom_line(aes(x = qc, y = pres),
+            orientation = "y",
+            color = "blue",
+            size = 3) +
+  # geom_line(data = . %>%  filter(pres < 7), aes(x = flu_cast_cor, y = pres),
+  #           orientation = "y",
+  #           color = "blue",
+  #           size = 3,
+  #           linetype = "dotted") +
+  geom_line(aes(x = chl_loess, y = pres),
+            orientation = "y",
+            color = "red",
+            size = 2) +
+  geom_point(aes(x = chl_dm, y = pres),
+             size = 6, 
+             pch = 8, color = "black", 
+             stroke = 2) +
+  scale_y_reverse(breaks = seq(0, 50, by = 10)) +
+  facet_wrap(~date, scales = "free_x") +
+  labs(x = bquote(CTD[FLU]~"(mg" ~ m^-3*")"),
+       y = "Depth") +
+  theme_bw() +
+  theme(text = element_text(size = 40), #35
+        axis.text = element_text(color = "black")) 
+
+ggsave(here("figures", "quench_scm_correct.png"),
+        width = 9, height = 12, dpi = 300)
+```
+
+
+
 
 ```{r}
 sb2_correct <- ctd_slope %>% 
@@ -384,8 +468,15 @@ export <- ctd_slope %>%
   mutate_at(vars(flu_cast_cor, qc), funs(round(., 2))) %>% 
   select(date, year, pres, flu_cast_cor, qc)
 ```
+
+
 ```{r}
 write.csv(export, here("outputs", "flu_full_correct_2024.csv"))
+```
+
+
+```{r}
+write.csv(ctd_slope, here("outputs", "quench_all_data_2024.csv"))
 ```
 
 

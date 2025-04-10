@@ -1,0 +1,372 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+```{r}
+#Upload packages
+library(tidyverse)
+library(here)
+library(readxl)
+library(patchwork)
+library(lubridate)
+library(MBA)
+library(mgcv)
+library(FNN)
+library(zoo)
+library(reshape2)
+library(rioja)
+
+library(geosphere)
+library(suncalc)
+```
+
+```{r}
+#Downloading 2024 - 5m raw buoy data over July SCM period (should extent to wider time frame)
+b24_raw <- read.csv(here("files", "2025-03-17.5minuteSamples.csv"))
+
+#downloading the buoy data where I have done some initial spike removal on the hourly data
+b24_qc1 <- read.csv(here("outputs", "buoy_2024_qc1.csv"))
+
+#Downloading discrete chlorophyll samples
+cd <- read_csv(here("files", "2024-12-05_HakaiData_chlorophyll.csv"))
+
+#Downloading PAR data from pruth and Koeye
+par <- read_csv(here("files", "par_pruth_koeye.csv"))
+
+#downloading tidal data from the pruth dock
+tide <- read_csv(here("files", "tide_2024.csv"))
+
+```
+
+```{r}
+#Trying to set the timezone so I have consistency between datasets
+b24_raw <- b24_raw %>% 
+  mutate(measurementTime = mdy_hm(measurementTime, tz = Sys.timezone())) %>% 
+  select(measurementTime, fl_raw = Chlorophyll_Avg)
+
+b24_qc1 <- b24_qc1 %>% 
+  mutate(measurementTime_2 = ymd_hms(measurementTime_2, tz = Sys.timezone())) %>% 
+  select(measurementTime = measurementTime_2, fl)
+
+par <- par %>% 
+  mutate(measurementTime = mdy_hm(measurementTime, tz = Sys.timezone())) %>% 
+  filter(`1hourPAR_UQL_Koeye` == 2) %>% 
+  mutate(par = ((PAR_Koeye/3600)*10^6)) %>% 
+  select(measurementTime, par)
+
+tide <- tide %>% 
+  mutate(measurementTime = mdy_hm(measurementTime, tz = Sys.timezone())) %>% 
+  filter(TideHeight_UQL == 2) %>% 
+  select(measurementTime, th = TideHeight)
+
+#Joining all of the datasets by measurement time using hourly data
+b24_join <- b24_qc1 %>% 
+  left_join(par) %>% 
+  left_join(tide)
+```
+```{r}
+#cutting out a period where the sensor data linkage failed
+b24_join <- b24_join %>% 
+  filter(measurementTime > "2024-03-26" |
+                           measurementTime < "2024-03-20")
+```
+
+```{r}
+#filtering out the appropriate discrete chlorophyll sample for what I am doing
+cd_join <- cd %>% 
+  filter(filter_type == "Bulk GF/F" & line_out_depth == 0) %>% 
+  select(date, measurementTime = collected, chla) %>% 
+  filter(date == "2024-07-18") %>% 
+  select(-date) %>% 
+  mutate(measurementTime = ymd_hms(measurementTime, tz = Sys.timezone()))
+
+#Joining the chlorophyll sample with the fluorometer data
+b24_join <- b24_join %>% 
+  left_join(cd_join)
+```
+
+```{r}
+#Creating a date dataframe to calculate solar times from
+b24_join <- b24_join %>% 
+  mutate(date = date(measurementTime)) 
+
+date <- b24_join %>% 
+  select(date) %>% 
+  distinct()
+  
+#Getting solar times
+sun <- getSunlightTimes(date = date$date, lat = 51.65,
+                         lon = -127.95, tz = Sys.timezone())
+
+#Making a dataframe with sunrise and set times for each day
+dateRanges <- data.frame(
+    s_rise = sun$sunrise, 
+    s_set = sun$sunset,
+    n_start = sun$night,
+    n_end = sun$nightEnd,
+    date = date)
+```
+
+```{r}
+#creating a long/tidy version so I can plot easily in ggplot
+f_long <- b24_join %>% 
+  pivot_longer(c(fl:chla), values_to = "val", names_to = "par")
+```
+
+
+```{r}
+f1 <- f_long %>% 
+  ggplot() +
+  geom_rect(data = dateRanges,
+            aes(xmin = s_rise - 1, xmax = s_set, ymin = -Inf, ymax = Inf),
+            alpha = 0.4, fill = "orange") +
+  geom_point(data = b24_raw,
+            aes(x = measurementTime, y = fl_raw),
+            color = "grey",
+            alpha = 0.7,
+            size = 2) +
+  geom_vline(data = sun,
+            aes(xintercept = solarNoon),
+            color = "Black") +
+  geom_line(data = filter(f_long,
+                          par == "fl"),
+            aes(x = measurementTime, y = val, color = par),
+            size = 1.5) +
+  geom_point(data = filter(f_long,
+                          par == "chla"),
+            aes(x = measurementTime, y = val, color = par), 
+            size = 4, pch = 8, stroke = 2) +
+  ylim(0, 30) +
+  ggsci::scale_color_npg(labels = c(expression(discrete[1*"m"]),
+                                         expression(Buoy[QC1]))) +
+  scale_x_datetime(limits = as_datetime(c("2024-07-13", "2024-07-26")),
+               expand = c(0, 0), date_labels = "%b%d") +
+  labs(y = bquote(Chl[FLU]~"(mg" ~ m^-3*")"),
+       x  = NULL,
+       color = NULL) +
+  theme_bw() +
+  theme(legend.position = "right",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+
+# ggsave(here("figures", "buoy_2024_july_qc1.png"),
+#         width = 20, height = 5, dpi = 300)
+```
+
+
+```{r}
+f2 <- f_long %>% 
+  ggplot() +
+  geom_rect(data = dateRanges,
+            aes(xmin = s_rise - 1, xmax = s_set, ymin = -Inf, ymax = Inf),
+            alpha = 0.4, fill = "orange") +
+  geom_vline(data = sun,
+            aes(xintercept = solarNoon),
+            color = "Black") +
+  geom_line(data = filter(f_long,
+                          par == "par"),
+            aes(x = measurementTime, y = val, color = par),
+            size = 1.5) +
+  ylim(0, 2000) +
+  ggsci::scale_color_jama(labels = c("Koeye")) +
+  # ggsci::scale_color_jama(labels = c(expression(Buoy[RAW]),
+  #                                        expression(Buoy[night-med]),
+  #                                        expression(discrete[1*"m"]))) +
+  scale_x_datetime(limits = as_datetime(c("2024-07-13", "2024-07-26")),
+               expand = c(0, 0), date_labels = "%b%d") +
+  labs(y = bquote(PAR ~"(μmol" ~ m^-2*s^-1*")"),
+       x  = NULL,
+       color = NULL) +
+  theme_bw() +
+  theme(legend.position = "right",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+```
+
+```{r}
+f3 <- f_long %>% 
+  ggplot() +
+  geom_rect(data = dateRanges,
+            aes(xmin = s_rise - 1, xmax = s_set, ymin = -Inf, ymax = Inf),
+            alpha = 0.4, fill = "orange") +
+  geom_vline(data = sun,
+            aes(xintercept = solarNoon),
+            color = "Black") +
+  geom_line(data = filter(f_long,
+                          par == "th"),
+            aes(x = measurementTime, y = val, color = par),
+            size = 1.5) +
+  ggsci::scale_color_npg(labels = c(expression(PRUTH[DOCK]))) +
+  scale_x_datetime(limits = as_datetime(c("2024-07-13", "2024-07-26")),
+               expand = c(0, 0), date_labels = "%b%d") +
+  labs(y = "Tide Height (m)",
+       x  = NULL,
+       color = NULL) +
+  theme_bw() +
+  theme(legend.position = "right",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+
+# ggsave(here("figures", "buoy_2024_july_qc1.png"),
+#         width = 20, height = 5, dpi = 300)
+```
+
+
+
+```{r}
+
+fig <-  f1 / f2
+
+fig2 <- f1 / f3
+
+ggsave(here("figures", "buoy_2024_july_qc1_par.png"), fig,
+        width = 20, height = 10, dpi = 300)
+
+ggsave(here("figures", "buoy_2024_july_qc1_tide.png"), fig2,
+        width = 20, height = 10, dpi = 300)
+```
+
+```{r}
+#Trying to look into some metrics for quantifying quenching
+
+#Joining the solar data to the buoy fluorometer data
+b24_join <- b24_join %>% 
+  left_join(dateRanges) 
+
+#Setting night data based on sunrise and sunset. Pushing evening data from previous day to next date so have a "night" period to derive a nightly max from (I'm assuming this is how the paper did this).
+b24_join <- b24_join %>% 
+  group_by(date) %>%
+  mutate(night = case_when(measurementTime <= s_rise |
+                             measurementTime >= s_set ~ "night")) %>% 
+  mutate(hour = hour(measurementTime)) %>% 
+  mutate(date_night = case_when(night == "night" & measurementTime >= s_set ~ (date+1),
+                              TRUE ~ as.Date(date))) 
+
+#pulling out the night data and for each night, determining the max value with no ties.
+max_night <- b24_join %>% 
+  filter(night == "night") %>% 
+  group_by(date_night) %>% 
+  slice_max(fl, n = 1, with_ties = F) %>% 
+  ungroup() %>% 
+  select(date_night, fl_max_night = fl)
+
+#Rather than using night data, I am using all data with PAR < 100, which is what the paper used (however, not sure how this works with my nightly derivation -  would I use date_night or just the date...)
+max_low_par <- b24_join %>% 
+  filter(par < 100) %>%
+  group_by(date_night) %>% 
+  slice_max(fl, n = 1, with_ties = F) %>% 
+  ungroup() %>% 
+  select(date_night, fl_max_par = fl)
+
+#calculating f_scaled - "hourly fluorescence scaled to the nightly max (or low par max) fluorescnce"    
+b24_join <- b24_join %>% 
+  filter(date >= "2024-03-01" & date < "2024-10-01") %>% 
+  left_join(max_night) %>% 
+  left_join(max_low_par) %>%
+  mutate(f_scaled_night = fl/fl_max_night,
+         f_scaled_par = fl/fl_max_par,
+         month = month(date),
+         hour = hour(measurementTime))
+
+#creating a median f_scaled (night max/hourly value) for 100 PAR bins - here for the entire dataset
+f_scaled_stat <- b24_join %>%
+  mutate(grp = cut(par, breaks = c(seq(0, 2000, by = 100)))) %>% 
+  group_by(grp) %>% 
+  summarise(med_night = median(f_scaled_night),
+            sd_night = sd(f_scaled_night),
+            med_par = median(f_scaled_par),
+            sd_par = sd(f_scaled_par)) %>% 
+  ungroup() %>% 
+  drop_na()
+
+#creating column with bin mid-range values for plotting
+f_scaled_stat$inter <- c(seq(50, 1850, by = 100))
+
+```
+
+```{r}
+#Why is there a step in the PAR 0-200 range peaking at 1. For some reason it's cutting data where PAR < 100 or does this make sense as under these situations F == Fmax.
+
+b24_join %>% 
+  filter(f_scaled_par <= 1.4) %>% 
+  ggplot() +
+  geom_point(aes(x = par, y = f_scaled_par, color = hour),
+             size = 3) +
+  geom_line(data = f_scaled_stat,
+            aes(x = inter, y = med_par),
+            size = 2) +
+  geom_line(data = f_scaled_stat,
+            aes(x = inter, y = med_night),
+            size = 2,
+            color = "red",
+            linetype = "dashed") +
+  geom_errorbar(data = f_scaled_stat,
+                aes(x = inter, ymin = med_par - sd_par,
+                    ymax = med_par + sd_par)) +
+  scale_color_viridis_c(option = "H") +
+  labs(y = bquote(Fl[RAW]*"/"*FL[MAX-NIGHT]),
+       x = bquote(PAR ~"(μmol" ~ m^-2*s^-1*")"),
+       color = "Hour of Day") +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        # axis.text.x = element_blank(),
+        legend.position = "right",
+        legend.key.height = unit(1.8, "cm"),
+        legend.title = element_text(size = 30, angle = 270),
+        legend.title.align = 0.5,
+        legend.direction = "vertical") +
+    guides(color = guide_colourbar(title.position = "right"))
+
+ggsave(here("figures", "buoy_npq_f-scaled_par.png"),
+        width = 12, height = 8, dpi = 300)
+```
+```{r}
+
+#Why is there a step in the PAR 0-200 range peaking at 1.
+
+b24_join %>% 
+  filter(f_scaled_night < 2 & f_scaled_night > 0) %>%
+  ggplot() +
+  geom_point(aes(x = par, y = f_scaled_night, color = hour)) +
+  geom_line(data = f_scaled_stat,
+            aes(x = inter, y = med_night),
+            size = 2) +
+  geom_line(data = f_scaled_stat,
+            aes(x = inter, y = med_par),
+            size = 2,
+            color = "red",
+            linetype = "dashed") +
+  geom_errorbar(data = f_scaled_stat,
+                aes(x = inter, ymin = med_night - sd_night,
+                    ymax = med_night + sd_night )) +
+  scale_color_viridis_c(option = "H") +
+  theme_bw()
+
+```
+
+
+
+
+```{r}
+b24_join %>% 
+  group_by(hour) %>% 
+  summarize(m_sp = mean(f_scaled_par, na.rm = T),
+            sd_sp = sd(f_scaled_par)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = hour, y = m_sp)) +
+  geom_col() 
+```
+```{r}
+b24_join %>% 
+  # filter(month == 8) %>% 
+  ggplot(aes(x = as.factor(hour), y = f_scaled_par)) +
+  geom_boxplot() +
+  facet_wrap(~as.factor(month))
+```
+
+
