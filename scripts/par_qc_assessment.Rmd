@@ -1,0 +1,549 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This worksheet works on created a corrected chlorophyll fluorometer time-series through comparison with discrete chlorophyll samples.
+
+```{r}
+#Upload packages
+library(tidyverse) #wrangling
+library(here) #file management
+library(readxl) #reading excel files
+library(lubridate) #working with dates and time
+
+#Plotting
+library(ggsci) #Nice color schemes
+library(patchwork) #plotting panels
+library(egg) # plotting panels - doesn't mess up right-y axis.
+
+#Interpolation
+library(rioja) # add fits to discrete data
+
+#Sun/night times and angles?
+# library(suncalc)
+library(oce) #Used to calculate sun angles
+
+# library(MBA)
+# library(mgcv)
+# library(FNN)
+# library(zoo)
+# library(reshape2)
+
+# library(egg)
+library(data.table)
+```
+
+```{r}
+p <- read_csv(here("files_big", "8_binAvg-1743715163197.csv")) 
+
+pa <- read_csv(here("files_big", "par_hour.csv"))
+```
+```{r}
+#Need to cut profiles where sun angle was <2 degrees
+#Need to figure out the normality test and cut each profile where the dark count starts.
+#Need to cut profiles 
+```
+
+```{r}
+#Subsetting and renaming columns, filtering out NA profiles and flagged data, setting dates, and creatinh summery statistics that help with QC
+p1 <- p %>% 
+  select(castpk = `Cast PK`,
+         station = Station,
+         time = `Measurement time`,
+         pres = `Pressure (dbar)`,
+         par = `PAR (umol m-2 s-1)`,
+         par_flag = `PAR flag`) %>% 
+  filter(!is.na(par)) %>%
+  filter(par_flag == "null") %>% 
+  select(-par_flag) %>% 
+  mutate(time = ymd_hms(time, tz = "America/Los_Angeles"),
+         date = date(time),
+         year = year(date),
+         par = round(as.numeric(par), 2)) %>% 
+  # filter(par > 0) %>% 
+  filter(station == "KC10") %>% 
+  group_by(castpk) %>% 
+  mutate(n = n(),
+         max_dep = max(pres),
+         min_dep = min(pres),
+         min_par = min(par),
+         max_par = max(par)) %>% 
+  ungroup()
+
+p1 <- p1 %>% 
+  filter(min_dep == 1)
+
+pa1 <- pa %>% 
+  filter(pruth_1hourPAR_UQL < 3) %>% 
+  mutate(time = mdy_hm(measurementTime, tz = "America/Los_Angeles"),
+         date = date(time),
+         year = year(date),
+         hour = hour(time), 
+         par_lo = ((lo_1hourPAR/3600)*10^6),
+         par_pruth = ((pruth_1hourPAR/3600)*10^6),
+         par_koeye = ((koe_1hourPAR/3600)*10^6),
+         par_lo = round(par_lo, 2),
+         par_pruth = round(par_pruth, 2),
+         par_koeye = round(par_koeye, 2)) %>% 
+  select(date, time, year, hour, par_lo:par_koeye)
+
+ctd_num <- p %>% 
+  select(castpk = `Cast PK`, ctdnum = `CTD serial number`)
+```
+
+```{r}
+#filtering out low sun angle profiles
+p1$time_utc <- as.POSIXct(as.numeric(p1$time),
+                          origin = "1970-01-01",
+                          tz = "UTC")
+
+#
+sun_angle <- sunAngle(t = p1$time_utc,
+                      latitude = 51.65,
+                      longitude = -127.95,
+                      useRefraction = TRUE)
+
+sun_angle_df <- data.frame(s_angle = sun_angle$altitude)
+
+p2 <- cbind(p1, sun_angle_df)
+
+```
+
+```{r}
+p2 <- p2 %>% 
+  filter(s_angle >= 2)
+```
+
+```{r}
+#subsetting to max depth and min/max par values for each profile. Can use this to quickly find bad profiles.
+qc1 <- p2 %>% 
+  select(castpk, date, station, min_dep, max_dep, min_par, max_par) %>% 
+  distinct()
+```
+
+```{r}
+dark <- p2 %>% 
+  filter(pres > 50) %>% 
+  group_by(castpk) %>% 
+  summarise(dark = round(mean(par), 2),
+            dark_sd = round(sd(par), 4)) %>% 
+  ungroup()
+
+qc1 <- qc1 %>%
+  left_join(dark) %>% 
+  mutate(perc_dark = round(dark/max_par, 2))
+
+qc2 <- qc1 %>% 
+  filter(dark_sd < 0.2) %>% #Arbitrary for now but above mostly bad - instrument issues.
+  filter(!castpk == 23165) #visual inspection - Clear instrument issue.
+
+qc2_list <- qc2$castpk
+```
+
+```{r}
+#this approach does not work for cutting the profile where it 
+
+p3 <- p2 %>% 
+  filter(castpk %in% qc2_list) %>% 
+  left_join(dark)
+
+p3 <- p3 %>% 
+  mutate(par_dr = par - dark)
+
+p3$par_dr[p3$par_dr < 0] <- 0
+
+dd <- p3 %>% 
+  group_by(castpk) %>%
+  mutate(z = (par_dr - dark)/dark_sd,
+         z = round(z, 2)) %>% 
+  filter(z < 2) %>%
+  slice_min(pres) %>%
+  ungroup() %>%
+  select(castpk, dep_dark = pres)
+
+  # group_by(castpk) %>% 
+  # filter(par_dr == 0) %>% 
+  # slice_min(pres) %>% 
+  # ungroup() %>% 
+  # select(castpk, dd = pres)
+
+p_light <- p3 %>% 
+  left_join(dd) %>% 
+  group_by(castpk) %>%
+  filter(pres < dep_dark) %>%
+  ungroup() %>%
+  rename(depth = pres)
+```
+
+
+```{r}
+# test <- p3 %>% 
+#   group_by(castpk) %>% 
+#   filter(par_dr < 0.5) %>% 
+#   slice_min(pres) %>% 
+#   ungroup() %>% 
+#   select(castpk, dep_dark = pres)
+# 
+# test2 <- p3 %>% 
+#   group_by(castpk) %>% 
+#   mutate(sd_5 = round(zoo::rollapply(par_dr, 5, sd, align = 'left', fill = NA), 3),
+#          mean_5 = round(zoo::rollapply(par_dr, 5, mean, align = 'left', fill = NA), 3)) %>% 
+#   filter(sd_5 < 0.1) %>% 
+#   slice_min(pres) %>% 
+#   ungroup() %>% 
+#   select(castpk, dep_dark2 = pres)
+# 
+# p4 <- p3 %>% 
+#   left_join(test) %>% 
+#   left_join(test2) %>% 
+#   filter(pres < dep_dark2)
+```
+```{r}
+# https://stackoverflow.com/questions/65877285/normality-test-in-a-dataframe-with-multiple-factors
+
+#Code example for this specific purpose
+# https://stackoverflow.com/questions/79546607/in-r-how-to-test-a-dataset-then-remove-a-point-and-repeat-the-process-for-gro
+```
+
+```{r}
+# fun <- function(val, dep, cutoff = 0.01) {
+#   ord <- order(dep)
+#   val <- val[ord]
+#   good <- FALSE
+#   while (length(val) > 3) {
+#     if (nortest::lillie.test(val)$p.value > cutoff) {
+#       good <- TRUE
+#       break
+#     }
+#     val <- val[-1]
+#   }
+#   if (good) {
+#     out <- rep("dark", length(dep))
+#     out[seq_len(length(dep) - length(val))] <- "light"
+#   } else {
+#     out <- rep("light", length(dep))
+#   }
+#   out[order(ord)] # yes, another order
+# }
+```
+
+```{r}
+#This method really isn't working.
+# lt <- p4 %>% 
+#   select(castpk, depth = pres, par_dr) %>% 
+#   mutate(.by = castpk, signal = fun(par_dr, depth))
+# 
+# lt_stat <- lt %>% 
+#   filter(signal == "light") %>% 
+#   group_by(castpk) %>% 
+#   summarise(max_dep = max(depth)) %>% 
+#   ungroup()
+# 
+# p_light <- lt %>% 
+#   filter(signal == "light") %>% 
+#   group_by(castpk) %>% 
+#   mutate(n = n(),
+#          max = max(par_dr)) %>% 
+#   ungroup() %>% 
+#   filter(n > 5)
+```
+
+
+
+
+
+```{r}
+# dd %>%
+#   filter(castpk == 18764) %>%
+#   ggplot(aes(x = par_dr, y = pres)) +
+#   geom_point(data = . %>% filter(z >= 2), color = "green") +
+#   geom_point(data = . %>% filter(z < 2), color = "red") +
+#   scale_y_reverse() +
+#   facet_wrap(~castpk, scales = "free_x")
+```
+
+
+```{r}
+fit <- p_light %>% 
+  group_by(castpk) %>% 
+  do(broom::tidy(lm(log(par_dr) ~ poly(depth, 4), data = .))) %>% 
+  ungroup()  
+
+#Determining r2
+fit_r2 <- p_light %>% 
+  group_by(castpk) %>% 
+  do(broom::glance(lm(log(par_dr) ~ poly(depth, 4), data = .))) %>% 
+  ungroup()  
+
+#22 of 101
+fit_r2 <- fit_r2 %>%
+  mutate(type = case_when(adj.r.squared <= 0.995 ~ "l4",
+                          adj.r.squared > 0.995 & adj.r.squared <= 0.996 ~ "l3",
+                          adj.r.squared > 0.996 & adj.r.squared <= 0.998 ~ "l2",
+                          adj.r.squared > 0.998 ~ "l1"))
+
+stat_type <- fit_r2 %>% 
+  group_by(type) %>% 
+  summarise(n = n()) %>% 
+  ungroup()
+```
+
+
+```{r}
+predicted <- p_light %>%
+  mutate(par_log = log(par_dr)) %>% 
+  nest(data = -castpk) %>% 
+  mutate(fit = map(data, ~ lm(par_log ~ poly(depth, 4), data = .x)),
+         fitted.values = map(fit, "fitted.values")) %>% 
+  unnest(cols = c(data, fitted.values)) %>% 
+  select(-fit) %>% 
+  mutate(residual = par_log - fitted.values) %>% 
+  group_by(castpk) %>% 
+  mutate(mean_res = mean(residual),
+         sd_res = sd(residual),
+         z_res = (residual - mean_res)/sd_res)
+
+num_prof <- predicted %>% 
+  distinct(castpk)
+```
+
+```{r}
+fit_r2_join <- fit_r2 %>% 
+  select(castpk, adj.r.squared, type)
+
+predicted <- predicted %>% 
+  left_join(fit_r2_join) %>% 
+  group_by(castpk) %>%
+  mutate(cast_num = cur_group_id()) %>% 
+  ungroup()
+```
+
+```{r}
+#Plotting profiles to check for bad data - doing it in 25 cast chunks
+predicted %>% 
+  filter(cast_num > 126) %>%
+  filter(cast_num < 150) %>%
+  ggplot(aes(x = par_dr, y = depth)) +
+  geom_line(orientation = "y", size = 1) +
+  geom_point(data = . %>% filter(z_res > 2),
+             color = "red",
+             size = 2) +
+  geom_point(data = . %>% filter(z_res < -2),
+             color = "red",
+             size = 2) +
+  geom_point(data = . %>% filter(z_res < 2 & z_res > -2),
+             color = "black",
+             size = 2) +
+  # geom_point(data = . %>% filter(z_res > -1),
+  #            color = "black",
+  #            size = 2) +
+  geom_text(data = . %>% filter(depth == 5),
+            aes(x = Inf, y = -Inf,
+            label = round(adj.r.squared, 4)),
+            size = 10,
+            vjust = 8.2,
+            hjust = 1.2) +
+  geom_text(data = . %>% filter(depth == 4),
+            aes(x = Inf, y = -Inf,
+            label = type),
+            size = 10,
+            vjust = 7.0,
+            hjust = 2.0) +
+  # geom_point(data = filter(prof, ctdNum == 80217 & year == 2015), color = "red") +
+  # geom_point(data = filter(prof, castpk == 3826), color = "purple") +
+  # geom_point(data = filter(prof, flu < 0), color = "pink") +
+  scale_y_reverse() +
+  facet_wrap(~castpk, scales = "free") +
+  theme_bw() +
+  theme(text = element_text(size = 25))
+
+#Printing for easier visualization - just make sure to re-name with appropriate numbers
+ggsave(here("figures", "par_prof_check_all_126-150.png"), 
+       width = 16, height = 18, dpi = 300)
+
+```
+
+Two main causes were identiﬁed. 1) Dark values were erroneously considered as good values by the normality test. In this
+case, the presence of the measurement in the dark range could actually affect the performances of the polynomial ﬁt, such that the identification of clouds and other perturbations could be seriously invalidated.
+
+I think this is my issue with false positives and false negatives - many of the "good" profiles classed as < L1 had very high surface values and then a dark cut-off that was deep. Inclusion of dark values. 
+
+Seems like visual inspection is probably just best for the time being.
+
+```{r}
+#casts to remove
+remove <- c("1307",
+            "1368",
+            "1381",
+            "1508",
+            "1546",
+            "2049",
+            "2467",
+            "2529",
+            "2646",
+            "2707",
+            "2767",
+            "2870",
+            "5764",
+            "5880",
+            "6462",
+            "10272",
+            "10755",
+            "11758",
+            "12607",
+            "13575",
+            "14695",
+            "16100",
+            "18682",
+            "27799")
+```
+
+```{r}
+p4 <- predicted %>% 
+  filter(!castpk %in% remove) 
+# %>% 
+#   filter(z_res < 2 & z_res > -2)
+```
+
+```{r}
+#Fit with second order polynomial to get surface value.
+p5 <- p4 %>%
+  select(castpk:depth, date, par_dr, par_log) %>%
+  group_by(castpk) %>% 
+  mutate(min_dep = min(depth),
+         max_par = max(par_dr)) %>% 
+  ungroup() %>% 
+  filter(min_dep == 1) %>% 
+  mutate(perc_max = par_dr/max_par*100,
+         perc_max = round(perc_max, 2)) %>% 
+  filter(perc_max >= 1)
+  
+  
+p6 <- p5 %>% 
+  nest(data = -castpk) %>% 
+  mutate(fit = map(data, ~ lm(par_log ~ poly(depth, 3), data = .x)),
+         fitted.values = map(fit, "fitted.values")) %>% 
+  unnest(cols = c(data, fitted.values)) %>% 
+  select(-fit) %>% 
+  mutate(fitted.values = round(fitted.values, 3))
+
+newdep <- data.frame(depth = c(0))
+
+dt <- as.data.table(p6)
+
+surf_fit <- dt[, .(pred = predict(lm(par_log ~ poly(depth, 2), data = .SD), newdata = newdep)), by = castpk]
+
+surf_fit <- surf_fit %>%
+  mutate(extrap_0 = exp(pred))
+
+p6 <- p6 %>% 
+  left_join(surf_fit) %>% 
+  mutate(par_surf = extrap_0 * 0.97)
+
+```
+```{r}
+test <- p6 %>% 
+  filter(castpk == 27176)
+
+p6 %>% 
+  filter(castpk == 27176) %>% 
+  ggplot(aes(y = depth)) +
+  geom_line(aes(x = exp(par_log)), color = "black") +
+  geom_line(aes(x = exp(fitted.values)), color = "blue") +
+  geom_line(aes(x = par_surf)) +
+  scale_y_reverse()
+```
+
+```{r}
+par_0 <- p6 %>% 
+  select(castpk:date, par_surf) %>% 
+  filter(depth == 1) %>% 
+  mutate(time_round_ctd = round_date(time, "hour"),
+         hour = hour(time_round_ctd))
+
+par_0_join <- par_0 %>% 
+  rename(time_ctd = time) %>% 
+  left_join(pa1) %>% 
+  left_join(ctd_num) %>% 
+  distinct()
+```
+
+```{r}
+pa1 %>% 
+  filter(date < "2023-07-01") %>% 
+  ggplot(aes(x = par_pruth, par_lo)) +
+  geom_point() +
+  geom_abline() +
+  lims(x = c(0, 2500),
+       y = c(0, 2500))
+```
+```{r}
+pa1 %>% 
+  filter(date < "2023-07-01") %>% 
+  ggplot(aes(x = par_pruth, par_koeye)) +
+  geom_point() +
+  geom_abline() +
+  lims(x = c(0, 2500),
+       y = c(0, 2500))
+```
+
+
+
+```{r}
+par_0_join %>% 
+  filter(date < "2023-07-01") %>% 
+  ggplot(aes(x = par_lo, par_pruth)) +
+  geom_point()
+```
+
+
+```{r}
+par_0_join %>% 
+  ggplot(aes(x = par_lo, y = par_surf, color = as.factor(year))) +
+  geom_point() +
+  geom_abline() +
+  lims(x = c(0, 2500),
+       y = c(0, 2500)) +
+  theme_bw()
+```
+
+
+```{r}
+par_0_join %>% 
+  filter(!is.na(year)) %>%
+  filter(!date == "2024-04-12") %>% 
+  ggplot(aes(x = par_lo, y = par_surf)) +
+  geom_point(aes(color = as.factor(year)), size = 3) +
+  geom_smooth(method = "lm", se = F, color = "black") +
+  geom_abline() +
+  ggpubr::stat_cor(aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")),
+                   p.accuracy = 0.001, size = 7, label.y.npc = 0.9) +
+  ggpubr::stat_regline_equation(size = 7, label.y.npc = 0.96) +
+  lims(x = c(0, 2500),
+       y = c(0, 2500)) +
+  facet_grid(~ctdnum) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(x = bquote(PAR[LOOKOUT] ~ "("*0^"+" ~ μmol ~ m^-2*s^-1*")"),
+       y = bquote(PAR[CTD] ~ "("*0^"+" ~ μmol ~ m^-2*s^-1*")"),
+       color = NULL) +
+  theme_bw() +
+  theme(text = element_text(size = 22), #35
+        axis.text = element_text(color = "black"),
+        strip.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill = NA))
+
+ggsave(here("figures", "validate_par2.png"), 
+        width = 20, height = 5, dpi = 300)
+```
+
+
+
+Comparison with incident PAR:
+
+For all type 1 profiles, downward irradiance values just below the surface were first calculated through extrapolation within the first penetration depth (as defined by Gordon and McCluney 1975) sing a second-degree polynomial function. 
+
+- I think this is just 1% of surface.
+
+Austin (1974) and the Sea-Air Interface:
+In his work, Austin (1974) established a factor of approximately 0.97 to account for the reduction in radiance that occurs when light passes from seawater to air at the interface.
