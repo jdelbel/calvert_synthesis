@@ -69,8 +69,7 @@ check <- f3 %>%
 f4 <- f3 %>% 
   pivot_wider(names_from = "position", values_from = "fwhm_pres") %>%
   mutate(scm_width = below - above)
-  # mutate(scm = case_when(pres_max == 1 ~ F,
-  #                        is.na(above) ~ F))
+
 
 int50 <- f4 %>% 
   filter(pres < 51) %>% 
@@ -84,27 +83,31 @@ f5 <- f4 %>%
 scm_metrics <- f5 %>% 
   select(id, date, station,
          f_max,
-        pres_max,
+          pres_max,
          fwhm_shallow = above,
          fwhm_deep = below,
          scm_width,
          scm_width,
          int_50) %>% 
   distinct() %>% 
-  mutate(max_int = (f_max/int_50)*100)
+  mutate(max_int = (f_max/int_50)*100) %>% 
+  mutate(scm = case_when(pres_max == 1 ~ F,
+                         fwhm_shallow == 1 ~ F,
+                         fwhm_deep < 5 ~ F,
+                         is.na(fwhm_shallow) ~ F))
 ```
 
 ```{r}
 width %>% 
   mutate(month = month(date)) %>% 
-  ggplot(aes(x = as.factor(month), y = max_int)) +
+  ggplot(aes(x = as.factor(month), y = int_50)) +
   geom_boxplot()
 ```
 
 
 ```{r}
 f3 %>% 
-  filter(date == "2023-08-16" & station == "KC10") %>%  
+  filter(date == "2017-08-14" & station == "KC10") %>%  
   ggplot(aes(x = f_npq, y = pres, color = station)) +
   geom_point() +
   geom_point(data = . %>% filter(pres == fwhm_pres), color = "black") +
@@ -113,7 +116,12 @@ f3 %>%
   ylim(40, 0)
 ```
 
-
+```{r}
+scm_metrics %>% 
+  mutate(month = month(date)) %>%
+  ggplot(aes(x = int_50, y = pres_max, color = as.factor(month))) +
+  geom_point() 
+```
 
 
 
