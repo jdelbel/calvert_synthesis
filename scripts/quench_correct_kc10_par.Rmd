@@ -473,10 +473,26 @@ par_0_join <- par_0 %>%
 pa1 %>% 
   filter(date < "2023-07-01") %>% 
   ggplot(aes(x = par_pruth, par_lo)) +
-  geom_point() +
+  geom_point(aes(color = as.factor(year)), size = 3) +
+  geom_smooth(method = "lm", se = F, color = "black") +
   geom_abline() +
+  ggpubr::stat_cor(aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")),
+                   p.accuracy = 0.001, size = 7, label.y.npc = 0.9) +
+  ggpubr::stat_regline_equation(size = 7, label.y.npc = 0.96) +
   lims(x = c(0, 2500),
-       y = c(0, 2500))
+       y = c(0, 2500)) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(x = bquote(PAR[PRUTH] ~ "("*"?"^"+" ~ μmol ~ m^-2*s^-1*")"),
+       y = bquote(PAR[LOOKOUT] ~ "("*"?"^"+" ~ μmol ~ m^-2*s^-1*")"),
+       color = NULL) +
+  theme_bw() +
+  theme(text = element_text(size = 22), #35
+        axis.text = element_text(color = "black"),
+        strip.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill = NA))
+
+ggsave(here("figures", "scatter_pruth_lookout.png"), 
+        width = 12, height = 9, dpi = 300)
 ```
 ```{r}
 pa1 %>% 
@@ -493,8 +509,27 @@ pa1 %>%
 ```{r}
 par_0_join %>% 
   filter(date < "2023-07-01") %>% 
-  ggplot(aes(x = par_lo, par_pruth)) +
-  geom_point()
+  ggplot(aes(x = par_pruth, par_lo)) +
+    geom_point(aes(color = as.factor(year)), size = 3) +
+  geom_smooth(method = "lm", se = F, color = "black") +
+  geom_abline() +
+  ggpubr::stat_cor(aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")),
+                   p.accuracy = 0.001, size = 7, label.y.npc = 0.9) +
+  ggpubr::stat_regline_equation(size = 7, label.y.npc = 0.96) +
+  lims(x = c(0, 2500),
+       y = c(0, 2500)) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(x = bquote(PAR[PRUTH] ~ "("*"?"^"+" ~ μmol ~ m^-2*s^-1*")"),
+       y = bquote(PAR[LOOKOUT] ~ "("*"?"^"+" ~ μmol ~ m^-2*s^-1*")"),
+       color = NULL) +
+  theme_bw() +
+  theme(text = element_text(size = 22), #35
+        axis.text = element_text(color = "black"),
+        strip.background = element_blank(),
+        panel.border = element_rect(colour = "black", fill = NA))
+
+ggsave(here("figures", "scatter_pruth_lookout_ctd.png"), 
+        width = 12, height = 9, dpi = 300)
 ```
 
 
@@ -524,7 +559,7 @@ par_0_join %>%
        y = c(0, 2500)) +
   facet_grid(~ctdnum) +
   scale_color_viridis_d(option = "turbo") +
-  labs(x = bquote(PAR[LOOKOUT] ~ "("*0^"+" ~ μmol ~ m^-2*s^-1*")"),
+  labs(x = bquote(PAR[LOOKOUT] ~ "("*?^"+" ~ μmol ~ m^-2*s^-1*")"),
        y = bquote(PAR[CTD] ~ "("*0^"+" ~ μmol ~ m^-2*s^-1*")"),
        color = NULL) +
   theme_bw() +
