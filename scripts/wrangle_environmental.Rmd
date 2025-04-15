@@ -12,17 +12,60 @@ library(gsw)
 ```
 
 ```{r}
-#QU39 from 2015 through 2023 - need to update this to include 2024
+#KC10 full dataset
 ctd <- read_csv(here("files_big", "ctd_kc10_all.csv"))
 
-wind <- read_csv(here("files", "wind_all.csv"))
+#Wind from the lookout?
+wind <- read_csv(here("files_big", "2025-04-14.1hourSamples_lookout.csv"))
+
+#Nutrients
+n <- read_csv(here("files", "2025-04-14_HakaiData_nutrients.csv"))
+
+#Freshwater
+fw <- read_csv(here("files", "Daily_flow_long_2014_2024_v2025_04_03.csv"))
 ```
 
 ```{r}
-wind <- wind %>% 
-  mutate(date = mdy(date)) 
+#I was going to join everything together into a CTD file, but now I am second guessing that as I will likely pull out specific metrics to correlate.
 ```
 
+```{r}
+#Daily average of wind and wind direction with 3 day backwards average
+wind_dm <- wind %>% 
+  mutate(date_time = mdy_hm(measurementTime),
+         date = date(date_time)) %>%
+  filter(WindSpd_UQL == 2) %>%
+  filter(WindDir_UQL == 2) %>% 
+  group_by(date) %>% 
+  summarise(w_dm = mean(WindSpd_Avg),
+            wd_dm = mean(WindDir_Avg)) %>% 
+  mutate(wind_b1_3 = rollmeanr(lag(w_dm, 1), k = 3, fill = NA),
+            wd_b1_3 = rollmeanr(lag(wd_dm, 1), k = 3, fill = NA)) %>% 
+  ungroup()
+```
+
+```{r}
+#Daily average of freshwater discharge with 10 day backward averages
+fw_dm <- fw %>% 
+  mutate(date = date(Date)) %>% 
+  drop_na() %>% 
+  group_by(date) %>% 
+  mutate(n = n()) %>% 
+  ungroup() %>% 
+  filter(n == 4) %>%
+  select(date, wg = Watershed_group, q = Q) %>% 
+  pivot_wider(names_from = "wg", values_from = "q") %>% 
+  mutate(qt_b1_10 = rollmeanr(lag(Q_Total, 1), k = 10, fill = NA),
+         qgm_b1_10 = rollmeanr(lag(Q_GM, 1), k = 10, fill = NA),
+         qsm_b1_10 = rollmeanr(lag(Q_SM, 1), k = 10, fill = NA),
+         qra_b1_10 = rollmeanr(lag(Q_RA, 1), k = 10, fill = NA)) 
+```
+
+```{r}
+#Join the daily averaged weather data
+weather_join <- wind_dm %>% 
+  left_join(fw_dm)
+```
 
 
 ```{r}
@@ -49,21 +92,24 @@ ctd_coord <- ctd %>%
 ```
 
 ```{r}
-# #Selecting 5m depth nutrients for QU39.
-# nuts_5 <- nuts %>% 
-#   filter(line_out_depth == 5) %>% 
-#   select(date, no2 = no2_no3_um, 
-#          sio2 = sio2,  
-#          po4 = po4) %>% 
-#   drop_na()
-# 
-# #Calculating daily mean in situation where there are duplicates.
-# nuts_5_dm <- nuts_5 %>% 
-#   group_by(date) %>% 
-#   summarise(no2_dm = mean(no2),
-#             po4_dm = mean(po4),
-#             sio2_dm = mean(sio2)) %>% 
-#   ungroup()
+#Selecting 5m depth nutrients for QU39.
+n <- n %>%
+  select(date,
+         pres = line_out_depth,
+         no2 = no2_no3_um,
+         sio2 = sio2,
+         po4 = po4) %>%
+  drop_na()
+
+#Calculating daily mean in situation where there are duplicates.
+n_dm <- n %>%
+  group_by(date, pres) %>%
+  summarise(no2_dm = mean(no2),
+            po4_dm = mean(po4),
+            sio2_dm = mean(sio2)) %>%
+  ungroup() %>% 
+  mutate(pres = case_when(pres == 0 ~ 1,
+                          T ~ as.numeric(pres)))
 ```
 
 
@@ -102,6 +148,8 @@ bv <- bv %>%
 ctd <- cbind(ctd, SA, CT, rho, bv)
 ```
 
+
+
 ```{r}
 #Performing calculations for delta_rho 
 
@@ -117,66 +165,119 @@ range_pres <- ctd %>%
 
 #Filter 2m data from the CTD datasheet
 ctd_2 <- ctd %>% 
-  filter(pres == 3) %>% 
-  select(cast_pk, station, lat, long, date, rho)
+  filter(pres == 2) %>% 
+  select(cast_pk, date, station, lat, long, date, rho_2 = rho)
 
 #filter 30m data
 ctd_30 <- ctd %>% 
   filter(pres == 30) %>% 
-  select(cast_pk, rho)
+  select(cast_pk, date, rho_30 = rho)
 
 #joining 2m data to 3m data
 ctd_dd <- ctd_2 %>% 
-  left_join(ctd_30, by = "cast_pk") %>% 
-  rename(rho_2 = rho.x, 
-         rho_30 = rho.y)
+  left_join(ctd_30) 
 
 #Calculating difference in density
 ctd_dd <- ctd_dd %>% 
   mutate(delta_rho = rho_30 - rho_2)
 
 #Preparing delta_rho calculation sheet for merging back into ctd datasheet
-ctd_dd <- ctd_dd %>% 
-  select(cast_pk, delta_rho)
-
-#Merging/joining delta_rho and corrected turbidity into ctd datasheet
-ctd <- ctd %>% 
-  left_join(ctd_dd) 
+ctd_dr_dm <- ctd_dd %>% 
+  select(date, station, delta_rho) %>% 
+  group_by(date) %>% 
+  summarise(dr_dm = mean(delta_rho))
 ```
+
+
 ```{r}
-rho21 <- ctd %>% 
+rho24_dm <- ctd %>% 
   group_by(cast_pk) %>% 
-  mutate(diff = abs(rho - 1021)) %>% 
+  mutate(diff = abs(rho - 1024)) %>% 
   slice_min(diff, with_ties = F) %>% 
   ungroup() %>%
-  select(cast_pk, rho1021_dep = pres) %>% 
-  filter(rho1021_dep < 50)
+  select(date, rho1024_dep = pres) %>% 
+  filter(rho1024_dep < 50) %>% 
+  group_by(date) %>% 
+  summarise(r24_dep_dm = mean(rho1024_dep)) %>% 
+  ungroup()
 ```
+
+```{r}
+#Controversial step - doing daily mean of each variable for joining
+ctd_dm <- ctd %>% 
+  select(date:temp, rho, N2) %>% 
+  pivot_longer(c(sal:N2), values_to = "val", names_to = "par") %>% 
+  group_by(date, pres, par) %>% 
+  summarise(val_dm = mean(val)) %>% 
+  ungroup() %>% 
+  pivot_wider(names_from = "par", values_from = "val_dm")
+```
+
+
+```{r}
+ctd_j1 <- ctd_dm %>% 
+  left_join(ctd_dr_dm) %>% 
+  left_join(rho24_dm) %>% 
+  left_join(n_dm)
+
+test <- ctd_j1 %>% 
+  select(date, r24_dep_dm) %>% 
+  distinct() %>% 
+  group_by(date) %>% 
+  mutate(n = n()) %>% 
+  ungroup()
+
+test2 <- ctd_j1 %>% 
+  filter(pres == 5) %>% 
+  group_by(date) %>% 
+  summarise(n = n()) %>% 
+  ungroup()
+```
+
+```{r}
+# I need to:
+# daily average all sheets separately
+#then join them
+#rho_24
+#CTD_dd
+```
+
+
+```{r}
+write.csv(ctd_j1, here("outputs", "enviro_ctd_nut_2025-04-15.csv"))
+write.csv(weather_join, here("outputs", "enviro_weather_2025-04-14.csv"))
+write.csv(n_dm, here("outputs", "enviro_nutrient_2025-04-14.csv"))
+
+# write.csv(ctd, here("outputs", "ctd_wrangle_2025-04-25_kc10.csv"))
+# write.csv(ctd_anomaly_month, here("outputs", "ctd_anom_week_2025-04-25_kc10.csv"))
+# write.csv(wind_anomaly_day, here("outputs", "wind_anom_day_2025-04-25.csv"))
+
+```
+
 
 
 
 ```{r}
 #Trying FWI calculation
-fwc <- ctd %>%
-  select(cast_pk, date, station, pres, sal) %>%
-  group_by(cast_pk) %>% 
-  filter(sal < 29.1 & pres > 2) %>% 
-  ungroup() %>%
-  mutate(fwc_1 = ((29.1 - sal)/29.1)) %>%
-  group_by(cast_pk) %>%
-  mutate(fwc = sum(fwc_1)) %>%
-  ungroup() %>%
-  distinct(cast_pk, fwc, .keep_all = TRUE) %>% 
-  select(cast_pk, fwc)
+# fwc <- ctd %>%
+#   select(cast_pk, date, station, pres, sal) %>%
+#   group_by(cast_pk) %>% 
+#   filter(sal < 29.1 & pres > 2) %>% 
+#   ungroup() %>%
+#   mutate(fwc_1 = ((29.1 - sal)/29.1)) %>%
+#   group_by(cast_pk) %>%
+#   mutate(fwc = sum(fwc_1)) %>%
+#   ungroup() %>%
+#   distinct(cast_pk, fwc, .keep_all = TRUE) %>% 
+#   select(cast_pk, fwc)
 ```
 
 
-```{r}
-#Merging FWI back into ctd worksheet  
-ctd <- ctd %>% 
-  left_join(fwc) %>% 
-  left_join(rho21)
-```
+
+
+
+
+
 ```{r}
 #Selecting 5m depth and doing daily mean for values I am going to look at
 ctd_5 <- ctd %>% 
@@ -203,16 +304,11 @@ ctd_5 <- ctd_5 %>%
          TRUE ~ as.numeric(fwc)))
 ```
 
-```{r}
-ctd_5 %>% 
-  ggplot(aes(x = date, y = dr)) + 
-  geom_line()
-  
-```
+
 
 ```{r}
 ctd_5_long <- ctd_5 %>% 
-  pivot_longer(c(sal:rho21_dep), values_to = "val", names_to = "par")
+  pivot_longer(c(sal:rho24_dep), values_to = "val", names_to = "par")
 
 #calculate the climatological mean, standard deviation and number of samples in each bin
 ctd_full_mm <- ctd_5_long %>%

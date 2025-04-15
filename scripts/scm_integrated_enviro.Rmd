@@ -17,69 +17,75 @@ library(zoo)
 library(reshape2)
 library(rioja)
 library(egg)
-
+library(ggcorrplot)
 ```
 
 ```{r}
-#Corrected CTD data
+#Slope and NPQ Corrected CTD data
 f <- read_csv(here("outputs", "corrected_flu_2025-04-10.csv"))
+env <- read_csv(here("outputs", "enviro_ctd_nut_2025-04-15.csv"))
+weath <- read_csv(here("outputs", "enviro_weather_2025-04-14.csv"))
 
-env <- read_csv(here("outputs", "enviro_5m_2025-04-25_kc10.csv"))
-```
-```{r}
-test_3 <- f %>% 
-  filter(date == "2016-01-16")
 ```
 
-
-
 ```{r}
-#Looking into different metrics for scm detection
+#Determining profile maximum concentration
 f_max <- f %>% 
   group_by(date, station) %>% 
   slice_max(f_npq, with_ties = F) %>% 
   ungroup() %>% 
   select(id, date, station, pres_max = pres, f_max = f_npq)
 
+#Joining the profile maximum to the ctd data
 f2 <- f %>% 
   select(id, date, station, pres, f_npq) %>% 
   left_join(f_max) 
 
-  
+#Determining the full width half maximum of the fluorescence peaks.
 fwhm <- f2 %>% 
   select(id, date, station, pres, f_npq, f_max, pres_max) %>% 
-  mutate(half_max = f_max/2) %>% 
-  mutate(position = case_when(pres < pres_max ~ "above",
+  mutate(half_max = f_max/2) %>% #half max concentration
+  mutate(position = case_when(pres < pres_max ~ "above", #above or below max depth
                               pres > pres_max ~ "below")) %>% 
   group_by(date, station, position) %>% 
-  slice(which.min(abs(f_npq - half_max))) %>% 
+  slice(which.min(abs(f_npq - half_max))) %>% #find closest value above/below to HM
   ungroup() %>% 
   select(id, fwhm_pres = pres, position, pres_max) %>% 
   filter(!is.na(position)) %>% 
   group_by(id) %>% 
-  mutate(n = n()) %>% 
+  mutate(n = n()) %>% #Should be 2 values (above/below), single means not met at surf
   ungroup()
 
+#Joining fwhm to ctd profile data
 f3 <- f2 %>% 
   left_join(fwhm) 
 
-check <- f3 %>% 
-  filter(is.na(n))
-
+#Making FWHM depth above and below max separate columns and calculating diff
 f4 <- f3 %>% 
   pivot_wider(names_from = "position", values_from = "fwhm_pres") %>%
   mutate(scm_width = below - above)
 
-
+#Calculating 50m integrated chlorophyll
 int50 <- f4 %>% 
   filter(pres < 51) %>% 
   group_by(id, date, station) %>% 
   summarise(int_50 = sum(f_npq)) %>% 
   ungroup()
 
-f5 <- f4 %>% 
-  left_join(int50)
+f20p <- f4 %>% 
+  filter(pres < 51) %>% 
+  mutate(f20p = f_max*0.2) %>% 
+  filter(f_npq > f20p) %>% 
+  group_by(date, station) %>% 
+  summarise(n_f20p = n()) %>% 
+  ungroup()
 
+#Joing integrated chlorophyll back in to cTD profile data
+f5 <- f4 %>% 
+  left_join(int50) %>% 
+  left_join(f20p)
+
+#Pulling out different profile metrics.
 scm_metrics <- f5 %>% 
   select(id, date, station,
          f_max,
@@ -88,32 +94,176 @@ scm_metrics <- f5 %>%
          fwhm_deep = below,
          scm_width,
          scm_width,
-         int_50) %>% 
+         int_50,
+         n_f20p) %>% 
   distinct() %>% 
-  mutate(max_int = (f_max/int_50)*100) %>% 
-  mutate(scm = case_when(pres_max == 1 ~ F,
-                         fwhm_shallow == 1 ~ F,
-                         fwhm_deep < 5 ~ F,
-                         is.na(fwhm_shallow) ~ F))
+  mutate(max_int = (f_max/int_50)*100) 
 ```
 
 ```{r}
-width %>% 
+scm_metrics %>% 
   mutate(month = month(date)) %>% 
-  ggplot(aes(x = as.factor(month), y = int_50)) +
-  geom_boxplot()
+  filter(station == "KC10") %>%
+  ggplot(aes(x = as.factor(month), y = , fill = station)) +
+  geom_boxplot() +
+  ggsci::scale_fill_npg()
+
+#SCM width isn't super intuitive as so many sources of variability (not really an SCM when biomass as surface and 1 is automatically selected as the FWHM depth or when the profiles is super mixed and low biomass and just picking up spikes). Although, it does seem like profile max concentration, depth, and max:integrated ratio do seem to work well enough - I should plot this out. These are the variables we could correlated to other things.
+```
+```{r}
+#Should look at where and when FZH01 and KC10 correlate.
+```
+
+```{r}
+#These are meant to be daily means and they are not - go back to enviro and fix.
+env_2 <- env %>% 
+  select(date, dr_dm, r24_dep_dm) %>% 
+  distinct()
+
+n <- env %>% 
+  select(date, pres, no2_dm) %>% 
+  drop_na() %>% 
+  filter(pres == 1 | pres == 10) %>% 
+  pivot_wider(names_from = pres, values_from = no2_dm) %>% 
+  rename(din_1 = `1`, din_10 = `10`)
+
+#These are daily means.
+ctd_surf <- env %>% 
+  select(date, pres, 
+         n2_surf = N2, 
+         rho_surf = rho, 
+         sal_surf = sal, 
+         temp_surf = temp) %>% 
+  filter(pres < 2) %>% 
+  select(-pres)
+
+ctd_fmax <- env %>%    
+  select(date, 
+         pres_max = pres, 
+         n2_fmax = N2, 
+         rho_fmax = rho, 
+         sal_fmax = sal, 
+         temp_fmax = temp) 
+
+scm_kc10 <- scm_metrics %>% 
+  filter(station == "KC10")
+
+
 ```
 
 
 ```{r}
-f3 %>% 
-  filter(date == "2017-08-14" & station == "KC10") %>%  
-  ggplot(aes(x = f_npq, y = pres, color = station)) +
+scm_correlate <- scm_kc10 %>% 
+  filter(station == "KC10") %>% 
+  left_join(weath) %>% 
+  left_join(env_2) %>% 
+  left_join(ctd_surf) %>% 
+  left_join(ctd_fmax) %>% 
+  left_join(n) %>% 
+  distinct()
+```
+```{r}
+scm_correlate %>% 
+  mutate(month = month(date)) %>% 
+  filter(station == "KC10") %>%
+  ggplot(aes(x = as.factor(month), y = din_10, fill = station)) +
+  geom_boxplot() +
+  ggsci::scale_fill_npg()
+```
+
+```{r}
+cor2 <- scm_correlate %>% 
+  select(f_max, pres_max, int_50, max_int, n_f20p, w_b1_3 = wind_b1_3,
+         wd_b1_3, qt_b1_10:temp_surf, din_1, din_10) %>% 
+  drop_na()
+
+corr <- round(cor(cor2, method = "spearman"), 1)
+p.mat <- cor_pmat(cor2)
+```
+
+```{r}
+ggcorrplot(corr, p.mat = p.mat, hc.order = TRUE,
+    type = "lower", insig = "blank", lab = T, lab_size = 10) +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+ggsave(here("figures", "corello.png"), 
+        width = 20, height = 20, dpi = 300)
+```
+
+
+
+
+```{r}
+scm_correlate %>% 
+  mutate(month = month(date)) %>% 
+  ggplot(aes(x = n_f20p, y = wd_b1_3, color = as.factor(month))) +
   geom_point() +
-  geom_point(data = . %>% filter(pres == fwhm_pres), color = "black") +
+  scale_color_viridis_d()
+```
+```{r}
+scm_correlate %>% 
+  mutate(year = year(date)) %>% 
+  filter(year > 2016) %>% 
+  ggplot(aes(x = date, y = qt_b1_10, color = station)) +
+  geom_point() +
+  geom_line()
+```
+
+
+
+```{r}
+f6 <- f5 %>% 
+  left_join(env)
+
+f6 %>% 
+  mutate(month = month(date),
+         year = year(date)) %>% 
+  filter(pres < 51) %>% 
+  ggplot(aes(x = f_npq, y = rho, color = as.factor(year))) +
+  geom_point(orientation = "y") +
+  ggsci::scale_color_d3()
+```
+```{r}
+f6 %>% 
+  mutate(month = month(date)) %>% 
+  filter(pres < 51) %>% 
+  filter(month > 2 & month < 11) %>% 
+  ggplot(aes(x = f_npq, y = rho, color = int_50)) +
+  geom_point(orientation = "y") +
+  geom_line(aes(group = date), orientation = "y")
+  scale_color_viridis_b()
+```
+
+
+
+
+
+
+
+```{r}
+
+f6 <- f6 %>% 
+  mutate(f10p = f_max*0.20)
+
+f5 %>% 
+  mutate(year = year(date)) %>% 
+  filter(year == 2021 & station == "KC10") %>% 
+  ggplot(aes(x = f_npq, y = pres, color = as.factor(date))) +
   geom_line(orientation = "y") +
   scale_y_reverse() +
-  ylim(40, 0)
+  scale_color_viridis_d() +
+  ylim(50, 0)
+
+#2023-03-18-KC10 - needs to be fixed
+
+
+#Issue where my algorithm is calculating finding the closest FWHM at the surface, but it's much higher at the surface.
+
+#2018-04-29-FZH01 Is a SCM (I think), but I don't have it classed as such.
+
+#For now I am going to ignore trying to figure out profile shape - just focus on the few metrics and try mashing with environmental variables
 ```
 
 ```{r}
