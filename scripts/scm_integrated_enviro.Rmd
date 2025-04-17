@@ -18,6 +18,7 @@ library(reshape2)
 library(rioja)
 library(egg)
 library(ggcorrplot)
+library(ggsci)
 ```
 
 ```{r}
@@ -25,8 +26,15 @@ library(ggcorrplot)
 f <- read_csv(here("outputs", "corrected_flu_2025-04-10.csv"))
 env <- read_csv(here("outputs", "enviro_ctd_nut_2025-04-15.csv"))
 weath <- read_csv(here("outputs", "enviro_weather_2025-04-14.csv"))
-
 ```
+
+```{r}
+weath %>% 
+  ggplot(aes(x = date, y = Q_Total)) +
+  geom_line()
+```
+
+
 
 ```{r}
 #Determining profile maximum concentration
@@ -37,12 +45,12 @@ f_max <- f %>%
   select(id, date, station, pres_max = pres, f_max = f_npq)
 
 #Joining the profile maximum to the ctd data
-f2 <- f %>% 
+fl2 <- f %>% 
   select(id, date, station, pres, f_npq) %>% 
   left_join(f_max) 
 
 #Determining the full width half maximum of the fluorescence peaks.
-fwhm <- f2 %>% 
+fwhm <- fl2 %>% 
   select(id, date, station, pres, f_npq, f_max, pres_max) %>% 
   mutate(half_max = f_max/2) %>% #half max concentration
   mutate(position = case_when(pres < pres_max ~ "above", #above or below max depth
@@ -57,22 +65,22 @@ fwhm <- f2 %>%
   ungroup()
 
 #Joining fwhm to ctd profile data
-f3 <- f2 %>% 
+fl3 <- fl2 %>% 
   left_join(fwhm) 
 
 #Making FWHM depth above and below max separate columns and calculating diff
-f4 <- f3 %>% 
+fl4 <- fl3 %>% 
   pivot_wider(names_from = "position", values_from = "fwhm_pres") %>%
   mutate(scm_width = below - above)
 
 #Calculating 50m integrated chlorophyll
-int50 <- f4 %>% 
+int50 <- fl4 %>% 
   filter(pres < 51) %>% 
   group_by(id, date, station) %>% 
   summarise(int_50 = sum(f_npq)) %>% 
   ungroup()
 
-f20p <- f4 %>% 
+f20p <- fl4 %>% 
   filter(pres < 51) %>% 
   mutate(f20p = f_max*0.2) %>% 
   filter(f_npq > f20p) %>% 
@@ -81,12 +89,12 @@ f20p <- f4 %>%
   ungroup()
 
 #Joing integrated chlorophyll back in to cTD profile data
-f5 <- f4 %>% 
+fl5 <- fl4 %>% 
   left_join(int50) %>% 
   left_join(f20p)
 
 #Pulling out different profile metrics.
-scm_metrics <- f5 %>% 
+scm_metrics <- fl5 %>% 
   select(id, date, station,
          f_max,
           pres_max,
@@ -100,16 +108,7 @@ scm_metrics <- f5 %>%
   mutate(max_int = (f_max/int_50)*100) 
 ```
 
-```{r}
-scm_metrics %>% 
-  mutate(month = month(date)) %>% 
-  filter(station == "KC10") %>%
-  ggplot(aes(x = as.factor(month), y = , fill = station)) +
-  geom_boxplot() +
-  ggsci::scale_fill_npg()
 
-#SCM width isn't super intuitive as so many sources of variability (not really an SCM when biomass as surface and 1 is automatically selected as the FWHM depth or when the profiles is super mixed and low biomass and just picking up spikes). Although, it does seem like profile max concentration, depth, and max:integrated ratio do seem to work well enough - I should plot this out. These are the variables we could correlated to other things.
-```
 ```{r}
 #Should look at where and when FZH01 and KC10 correlate.
 ```
@@ -126,6 +125,13 @@ n <- env %>%
   filter(pres == 1 | pres == 10) %>% 
   pivot_wider(names_from = pres, values_from = no2_dm) %>% 
   rename(din_1 = `1`, din_10 = `10`)
+
+s <- env %>% 
+  select(date, pres, dsi = sio2_dm) %>% 
+  drop_na() %>% 
+  filter(pres == 1 | pres == 10) %>% 
+  pivot_wider(names_from = pres, values_from = dsi) %>% 
+  rename(dsi_1 = `1`, dsi_10 = `10`)
 
 #These are daily means.
 ctd_surf <- env %>% 
@@ -160,6 +166,7 @@ scm_correlate <- scm_kc10 %>%
   left_join(ctd_surf) %>% 
   left_join(ctd_fmax) %>% 
   left_join(n) %>% 
+  left_join(s) %>% 
   distinct()
 ```
 ```{r}
@@ -193,15 +200,611 @@ ggsave(here("figures", "corello.png"),
 ```
 
 
+```{r}
+scm_correlate <- scm_correlate %>% 
+  mutate(month = month(date),
+         year = year(date))
+```
+
+```{r}
+#Physics Fig
+f1 <- scm_correlate %>% 
+  ggplot(aes(x = din_1, y = sal_surf, color = as.factor(month))) +
+  geom_point(size = 6) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(x = bquote("DIN"[SURF]~"\u0020\u0028\u00B5mol\u0020L"^-1*")"),
+       y = bquote("Salinity"[SURF])) +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        axis.text.x = element_blank(),
+        axis.title.x = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+f2 <- scm_correlate %>% 
+  ggplot(aes(x = dr_dm, y = sal_surf, color = as.factor(month))) +
+  geom_point(size = 6) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(x = bquote(Delta*rho~"("~kg~m^-3*")"),
+       y = bquote("Salinity"[SURF]), 
+       color = "Month") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        # legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        axis.text.x = element_blank(),
+        axis.title.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+f3 <- scm_correlate %>% 
+  ggplot(aes(x = din_1, y = temp_surf, color = as.factor(month))) +
+  geom_point(size = 6) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(x = bquote("DIN"[SURF]~"\u0020\u0028\u00B5mol\u0020L"^-1*")"),
+       y = bquote("Temp"[SURF]~"(°C)")) +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+f4 <- scm_correlate %>% 
+  ggplot(aes(x = dr_dm, y = temp_surf, color = as.factor(month))) +
+  geom_point(size = 6) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(x = bquote(Delta*rho["30-2m"]~"("*kg~m^-3*")"),
+       y = bquote("Salinity"[SURF]), 
+       color = "Month") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        # legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        # axis.text.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+fig_phys <- f1 + f2 + f3 + f4 + plot_layout(guides = "collect")
+
+ggsave(here("figures", "panel_physical.jpg"), fig_phys,
+       width = 16, height = 14, dpi = 300)
+```
+
+```{r}
+scm_correlate %>% 
+  ggplot(aes(x = sal_surf, y = temp_surf, color = as.factor(year))) +
+  geom_point(size = 6) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(y = bquote("Temp"[SURF]~"(°C)"),
+       x = bquote("Salinity"[SURF]), 
+       color = "Year") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        # legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        # axis.text.x = element_blank(),
+        # axis.title.y = element_blank(),
+        # axis.text.y = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+ggsave(here("figures", "surf_t_s.jpg"),
+       width = 10, height = 6, dpi = 300)
+```
+```{r}
+
+#Physics Fig
+f1 <- scm_correlate %>% 
+  ggplot(aes(x = qt_b1_10/10^3, y = sal_surf, color = as.factor(month))) +
+  geom_point(size = 6) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(x = bquote("Dis." ~ "("*10^4~m^3*~s^-1*")"),
+       y = bquote("Salinity"[SURF])) +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        axis.text.x = element_blank(),
+        axis.title.x = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+# bquote("DIN"[SURF]~"\u0020\u0028\u00B5mol\u0020L"^-1*")"
+
+f2 <- scm_correlate %>% 
+  ggplot(aes(x = qt_b1_10/10^3, y = temp_surf, color = as.factor(month))) +
+  geom_point(size = 6) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(x = bquote(Delta*rho~"("~kg~m^-3*")"),
+       y = bquote("Temp"[SURF]~"(°C)"), 
+       color = "Month") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        # legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        axis.text.x = element_blank(),
+        axis.title.x = element_blank(),
+        # axis.title.y = element_blank(),
+        # axis.text.y = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+f3 <- scm_correlate %>% 
+  ggplot(aes(x = qt_b1_10/10^3, y = dr_dm, color = as.factor(month))) +
+  geom_point(size = 6) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(x = bquote("Dis." ~ "(Q"[TOTAL]*10^3~m^3*~s^-1*")"),
+       y = bquote(Delta*rho["30-2m"]~"("*kg~m^-3*")")) +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+f4 <- scm_correlate %>% 
+  ggplot(aes(x = qt_b1_10/10^3, y = din_1, color = as.factor(month))) +
+  geom_point(size = 6) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(x = bquote("Dis." ~ "(Q"[TOTAL]*10^3~m^3*~s^-1*")"),
+       y = bquote("DIN"[SURF]~"\u0020\u0028\u00B5mol\u0020L"^-1*")"), 
+       color = "Month") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        # legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        # axis.text.x = element_blank(),
+        # axis.title.y = element_blank(),
+        # axis.text.y = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+fig_dis <- f1 + f2 + f3 + f4 + plot_layout(guides = "collect")
+
+ggsave(here("figures", "panel_dis.jpg"), fig_dis,
+       width = 16, height = 12, dpi = 300)
+```
+
+```{r}
+scm_correlate %>% 
+  ggplot(aes(x = qt_b1_10/10^3, y = dr_dm, color = as.factor(year))) +
+  geom_point(size = 6) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(x = bquote("Dis." ~ "("*10^3~m^3*~s^-1*")"),
+       y = bquote(Delta*rho["30-2m"]~"("*kg~m^-3*")"),
+       color = "Year") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        axis.text = element_text(color = 'black'),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+ggsave(here("figures", "surf_discharge.jpg"),
+       width = 10, height = 6, dpi = 300)
+```
+```{r}
+
+#Physics Fig
+f1 <- scm_correlate %>% 
+  ggplot(aes(x = int_50, y = qt_b1_10/10^3, color = as.factor(month))) +
+  geom_point(size = 6) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(y = bquote("Dis." ~ "(Q"[TOTAL]*10^3~m^3*~s^-1*")"),
+       x = bquote("Flu"[0-50*"m"]~ "("*mg~m^-2*")")) +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        axis.text.x = element_blank(),
+        axis.title.x = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+# bquote("DIN"[SURF]~"\u0020\u0028\u00B5mol\u0020L"^-1*")"
+
+f2 <- scm_correlate %>% 
+  ggplot(aes(x = int_50, y = dr_dm, color = as.factor(month))) +
+  geom_point(size = 6) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(y = bquote(Delta*rho["30-2m"]~"("*kg~m^-3*")"),
+       x = bquote("Flu"[0-50*"m"]~ "("*mg~m^-2*")"), 
+       color = "Month") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        # legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        axis.text.x = element_blank(),
+        axis.title.x = element_blank(),
+        # axis.title.y = element_blank(),
+        # axis.text.y = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+f3 <- scm_correlate %>% 
+  ggplot(aes(x = int_50, y = temp_surf, color = as.factor(month))) +
+  geom_point(size = 6) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(y = bquote("Temp"[SURF]~"(°C)"),
+       x = bquote("Flu"[0-50*"m"]~ "("*mg~m^-2*")"), 
+       color = "Month") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        axis.text.x = element_blank(),
+        axis.title.x = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+f4 <- scm_correlate %>% 
+  ggplot(aes(x = int_50, y = wind_b1_3, color = as.factor(month))) +
+  geom_point(size = 6) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(y = bquote("Wind"[LOOKOUT]~"("*m~s^-1*")"),
+       x = bquote("Flu"[0-50*"m"]~"("*mg~m^-2*")"), 
+       color = "Month") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        # legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        # axis.text.x = element_blank(),
+        # axis.title.y = element_blank(),
+        # axis.text.y = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+f5 <- scm_correlate %>% 
+  ggplot(aes(x = int_50, y = din_1, color = as.factor(month))) +
+  geom_point(size = 6) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(y = bquote("DIN"[SURF]~"\u0020\u0028\u00B5mol\u0020L"^-1*")"),
+       x = bquote("Flu"[0-50*"m"]~"("*mg~m^-2*")"), 
+       color = "Month") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        # legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        # axis.text.x = element_blank(),
+        # axis.title.y = element_blank(),
+        # axis.text.y = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+f6 <- scm_correlate %>% 
+  ggplot(aes(x = int_50, y = dsi_1, color = as.factor(month))) +
+  geom_point(size = 6) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(y = bquote("DSi"[SURF]~"\u0020\u0028\u00B5mol\u0020L"^-1*")"),
+       x = bquote("Flu"[0-50*"m"]~"("*mg~m^-2*")"), 
+       color = "Month") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        # legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        # axis.text.x = element_blank(),
+        # axis.title.y = element_blank(),
+        # axis.text.y = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+fig_int <- f1 + f2 + f3 + f4 + f5 + f6 + plot_layout(guides = "collect")
+
+ggsave(here("figures", "panel_int.jpg"), fig_int,
+       width = 20, height = 10, dpi = 300)
+```
+
+
+
+```{r}
+f1 <- scm_correlate %>% 
+  ggplot(aes(x = int_50, y = pres_max, color = as.factor(month))) +
+  geom_point(size = 6) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(y = bquote("Flu"[MAX]~"Depth"~"(m)"),
+       x = bquote("Flu"[0-50*"m"]~"("*mg~m^-2*")"), 
+       color = "Month") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        # legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        # axis.text.x = element_blank(),
+        # axis.title.y = element_blank(),
+        # axis.text.y = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+
+f2 <- scm_correlate %>% 
+  ggplot(aes(x = int_50, y = rho_fmax, color = as.factor(month))) +
+  geom_point(size = 6) +
+  geom_hline(yintercept = 1024) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(y = bquote("Flu"[MAX]~sigma*tau~"("*kg~m^-3*")"),
+       x = bquote("Flu"[0-50*"m"]~"("*mg~m^-2*")"), 
+       color = "Month") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        # legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        # axis.text.x = element_blank(),
+        # axis.title.y = element_blank(),
+        # axis.text.y = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+fig_int2 <- f1 + f2 + plot_layout(guides = "collect")
+
+ggsave(here("figures", "panel_int_pres_rho.jpg"), fig_int2,
+       width = 14, height = 6, dpi = 300)
+```
+```{r}
+fl5 %>% 
+  left_join(env) %>% 
+  mutate(month = month(date),
+         year = year(date)) %>% 
+  filter(pres < 51) %>% 
+  ggplot(aes(x = f_npq, y = rho, color = as.factor(year))) +
+  geom_point(orientation = "y", size = 6) +
+  geom_hline(yintercept = 1024) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(y = bquote(sigma*tau~"("*kg~m^-3*")"),
+       x = bquote("Flu"~"("*mg~m^-3*")"), 
+       color = "Year") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        # legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        # axis.text.x = element_blank(),
+        # axis.title.y = element_blank(),
+        # axis.text.y = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+ggsave(here("figures", "profile_Density_flu.jpg"), 
+       width = 9, height = 14, dpi = 300)
+```
+
+```{r}
+f1 <- fl5 %>% 
+  filter(station == "KC10") %>% 
+  left_join(env) %>% 
+  mutate(month = month(date),
+         year = year(date)) %>% 
+  filter(pres < 51) %>% 
+  filter(year == 2015 | year == 2017 | year == 2018 | year == 2020 | year == 2024) %>% 
+  # filter(year == 2023 | year == 2020 | year == 2024 | year == 2019) %>% 
+  filter(month == 7) %>% 
+  ggplot(aes(x = f_npq, y = pres, color = as.factor(year))) +
+  geom_point(orientation = "y", size = 4) +
+  geom_line(orientation = "y", size = 2) +
+  scale_color_viridis_d(option = "turbo") +
+  scale_y_reverse() +
+  labs(y = bquote("Depth (m)"),
+       x = bquote("Flu"~"("*mg~m^-3*")"), 
+       color = "Year") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        # legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        # axis.text.x = element_blank(),
+        # axis.title.y = element_blank(),
+        # axis.text.y = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+f2 <- fl5 %>% 
+  filter(station == "KC10") %>% 
+  left_join(env) %>% 
+  mutate(month = month(date),
+         year = year(date)) %>% 
+  filter(pres < 51) %>% 
+  filter(year == 2015 | year == 2017 | year == 2018 | year == 2020 | year == 2024) %>%
+  # filter(year == 2023 | year == 2020 | year == 2024 | year == 2019) %>% 
+  filter(month == 7) %>% 
+  ggplot(aes(x = temp, y = pres, color = as.factor(year))) +
+  geom_point(orientation = "y", size = 4) +
+  geom_line(orientation = "y", size = 2) +
+  scale_color_viridis_d(option = "turbo") +
+  scale_y_reverse() +
+  labs(y = bquote("Depth (m)"),
+       x = bquote("Temp"), 
+       color = "Year") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        # legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        axis.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        # axis.text.y = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+f3 <- fl5 %>% 
+  filter(station == "KC10") %>% 
+  left_join(env) %>% 
+  mutate(month = month(date),
+         year = year(date)) %>% 
+  filter(pres < 51) %>% 
+  filter(year == 2015 | year == 2017 | year == 2018 | year == 2020 | year == 2024) %>% 
+  # filter(year == 2023 | year == 2020 | year == 2024 | year == 2019) %>% 
+  filter(month == 7) %>% 
+  ggplot(aes(x = sal, y = pres, color = as.factor(year))) +
+  geom_point(orientation = "y", size = 4) +
+  geom_line(orientation = "y", size = 2) +
+  scale_color_viridis_d(option = "turbo") +
+  scale_y_reverse() +
+  labs(y = bquote("Depth (m)"),
+       x = bquote("Salinity"), 
+       color = "Year") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        # legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        axis.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        # axis.text.y = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+
+f4 <- fl5 %>% 
+  filter(station == "KC10") %>% 
+  left_join(env) %>% 
+  mutate(month = month(date),
+         year = year(date)) %>% 
+  filter(pres < 51) %>% 
+  filter(year == 2015 | year == 2017 | year == 2018 | year == 2020 | year == 2024) %>%
+  # filter(year == 2023 | year == 2020 | year == 2024 | year == 2019) %>% 
+  filter(month == 7) %>% 
+  ggplot(aes(x = no2_dm, y = pres, color = as.factor(year))) +
+  geom_point(orientation = "y", size = 4) +
+  geom_line(orientation = "y", size = 2) +
+  scale_color_viridis_d(option = "turbo") +
+  scale_y_reverse() +
+  labs(y = bquote("Depth (m)"),
+       x = bquote("DIN"), 
+       color = "Year") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        # legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        axis.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        # axis.text.y = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+fig_july <- f1 + f2 + f3 + f4 + plot_layout(guides = "collect", nrow = 1)
+
+ggsave(here("figures", "profile_july_prof_2015.jpg"), fig_july,
+       width = 20, height = 12, dpi = 300)
+```
+```{r}
+
+```
+
+
+
+```{r}
+fl5 %>% 
+  filter(station == "KC10") %>% 
+  left_join(env) %>% 
+  mutate(month = month(date),
+         year = year(date)) %>% 
+  filter(pres < 51) %>% 
+  filter(dr_dm > 2) %>% 
+  # filter(year == 2023 | year == 2020 | year == 2024 | year == 2019) %>% 
+  ggplot(aes(x = f_npq, y = pres, color = as.factor(year))) +
+  geom_point(orientation = "y", size = 4) +
+  geom_line(orientation = "y", size = 2) +
+  scale_color_viridis_d(option = "turbo") +
+  scale_y_reverse() +
+  labs(y = bquote("Depth (m)"),
+       x = bquote("DIN"), 
+       color = "Year") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        # legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        axis.text.y = element_blank(),
+        axis.title.y = element_blank(),
+        # axis.text.y = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+```
+
+
+
+```{r}
+f1 <- scm_correlate %>% 
+  ggplot(aes(x = max_int, y = int_50, color = as.factor(year))) +
+  geom_point(size = 6) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(x = bquote("Flu"[MAX]:"Flu"[0-50*"m"]~"(%)"),
+       y = bquote("Flu"[0-50*"m"]~"("*mg~m^-2*")"), 
+       color = "Year") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        # legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        # axis.text.x = element_blank(),
+        # axis.title.y = element_blank(),
+        # axis.text.y = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+f2 <- scm_correlate %>% 
+  ggplot(aes(x = max_int, y = temp_surf, color = as.factor(year))) +
+  geom_point(size = 6) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(x = bquote("Flu"[MAX]:"Flu"[0-50*"m"]~"(%)"),
+       y = bquote("Temp"[SURF]~"(°C)"), 
+       color = "Year") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        # legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        # axis.text.x = element_blank(),
+        # axis.title.y = element_blank(),
+        # axis.text.y = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+f3 <- scm_correlate %>% 
+  ggplot(aes(x = max_int, y = wind_b1_3, color = as.factor(year))) +
+  geom_point(size = 6) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(x = bquote("Flu"[MAX]:"Flu"[0-50*"m"]~"(%)"),
+       y = bquote("Wind"[LOOKOUT]~"("*m~s^-1*")"), 
+       color = "Year") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        # legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        # axis.text.x = element_blank(),
+        # axis.title.y = element_blank(),
+        # axis.text.y = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+fig_mf <- f1 + f2 + f3 + plot_layout(guides = "collect")
+
+ggsave(here("figures", "panel_max_int_rat.jpg"), fig_mf,
+       width = 20, height = 6, dpi = 300)
+```
+
+
+
 
 
 ```{r}
 scm_correlate %>% 
-  mutate(month = month(date)) %>% 
-  ggplot(aes(x = n_f20p, y = wd_b1_3, color = as.factor(month))) +
+  mutate(month = month(date),
+         year = year(date)) %>%
+  # filter(month == 7) %>% 
+  ggplot(aes(x = max_int, y = rho_fmax, color = as.factor(month))) +
   geom_point() +
-  scale_color_viridis_d()
+  scale_color_ucscgb()
 ```
+```{r}
+scm_correlate %>% 
+  mutate(month = month(date),
+         year = year(date)) %>%
+  # filter(month == 7) %>% 
+  ggplot(aes(x = dsi_1, y = qt_b1_10, color = as.factor(year))) +
+  geom_point() +
+  scale_color_ucscgb()
+```
+
+
+
 ```{r}
 scm_correlate %>% 
   mutate(year = year(date)) %>% 
