@@ -57,36 +57,133 @@ up <- up %>%
   filter(!is.nan(ui)) %>% 
   group_by(date) %>% 
   summarise(ui = mean(ui)) %>% 
+  ungroup() %>% 
+  mutate(year = year(date)) %>% 
+  group_by(year) %>% 
+  mutate(cu_sum = cumsum(ui)) %>% 
   ungroup()
 ```
 
 ```{r}
-mei %>% 
+f1 <- mei %>%
+  filter(date > "2016-01-01" & date < "2025-01-01") %>%
   ggplot(aes(x = date, y = mei, fill = mei)) +
   geom_bar(stat = "identity") +
   # scale_fill_cmocean(name = "balance") +
   scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +
   ylim(-2.5, 2.5) +
   # scale_fill_distiller(palette = 'RdBu') +
-  theme_bw()
+  theme_bw() +
+  labs(y = "MEI",
+       fill = "MEI") +
+  theme(text = element_text(size = 30),
+        legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        axis.text.x = element_blank(),
+        axis.title.x = element_blank(),
+        # axis.text.y = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
 ```
+
 ```{r}
-npgo %>% 
+f2 <- npgo %>% 
   ggplot(aes(x = date, y = npgo, fill = npgo)) +
   geom_bar(stat = "identity") +
   scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +
-  # scale_fill_distiller(palette = 'RdBu') +
-  theme_bw()
+  labs(y = "NPGO") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        axis.text.x = element_blank(),
+        axis.title.x = element_blank(),
+        # axis.text.y = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
 ```
 ```{r}
-up %>%
-  filter(date > "2016-01-01") %>% 
-  ggplot(aes(x = date, y = ui)) +
-  geom_bar(stat = "identity") +
-  # scale_fill_gradient2(low = "blue", mid = "white", high = "red", midpoint = 0) +
-  # scale_fill_distiller(palette = 'RdBu') +
-  theme_bw()
+coeff = 10
+
+f3 <- up %>%
+  filter(date > "2016-01-01" & date < "2025-01-01") %>%
+  mutate(color = ifelse(ui < 0, "blue","red")) %>%
+  ggplot(aes(x = date, ))+
+  geom_col(aes(y = ui, fill = color)) +
+  geom_line(aes(y = cu_sum/coeff, color = as.factor(year)),
+            size = 2) +
+  scale_y_continuous(name = "UI",
+                     sec.axis = sec_axis(~.*coeff, name = "Cumulative UI")) +
+  scale_fill_identity(guide = FALSE) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(color = NULL) +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        axis.text.x = element_blank(),
+        axis.title.x = element_blank(),
+        # axis.text.y = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
 ```
+
+```{r}
+fig_clim <- f1 / f2 / f3
+
+
+ggsave(here("figures", "panel_clim.jpg"), fig_clim,
+       width = 16, height = 14, dpi = 300)
+```
+```{r}
+q <- weath %>% 
+  select(date, Q_GM, Q_SM, Q_RA) %>% 
+  pivot_longer(c(Q_GM:Q_RA), names_to = "Watershed_group", values_to = "Q") %>% 
+  drop_na() %>% 
+  group_by(date) %>% 
+  mutate(n = n()) %>% 
+  ungroup()
+```
+
+```{r}
+# Order locations from fjord to shelf
+riv_loc <- c("Q_GM",
+             "Q_SM",
+             "Q_RA",
+             "Q_tot")
+
+q <- arrange(mutate(q, 
+                      Watershed_group = factor(Watershed_group,
+                                               levels = riv_loc)))
+```
+
+
+```{r}
+f4 <- q %>% 
+  filter(date > "2016-01-01" & date < "2025-01-01") %>%
+  ggplot(aes(x = date, y = Q/10^3, fill = Watershed_group)) +
+  geom_area() +
+  scale_fill_manual(values = c("#6699CE", "#C96999", "#00AB82")) +
+  labs(y = bquote("Dis." ~ "("*10^3~m^3*~s^-1*")"),
+       fill = NULL) +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        legend.position = c(0.8, 0.8),
+        axis.text = element_text(color = 'black'),
+        # axis.text.x = element_blank(),
+        axis.title.x = element_blank(),
+        # axis.text.y = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+```
+```{r}
+fig_clim <- f1 / f2 / f3 /f4
+
+
+ggsave(here("figures", "panel_clim_fW.jpg"), fig_clim,
+       width = 16, height = 16, dpi = 300)
+```
+
 
 
 
@@ -221,25 +318,28 @@ scm_correlate <- scm_kc10 %>%
   left_join(ctd_fmax) %>% 
   left_join(n) %>% 
   left_join(s) %>% 
-  distinct()
+  distinct() %>% 
+  mutate(s_n = dsi_1/din_1)
 ```
 ```{r}
 scm_correlate %>% 
   mutate(month = month(date)) %>% 
   filter(station == "KC10") %>%
-  ggplot(aes(x = as.factor(month), y = din_10, fill = station)) +
+  ggplot(aes(x = as.factor(month), y = dsi_1/din_1, fill = station)) +
   geom_boxplot() +
-  ggsci::scale_fill_npg()
+  ggsci::scale_fill_npg() +
+  ylim(0, 20)
 ```
 
 ```{r}
 cor2 <- scm_correlate %>% 
+  mutate(s_n = dsi_1/din_1) %>% 
   select(f_max, pres_max, int_50, max_int, n_f20p, w_b1_3 = wind_b1_3,
-         wd_b1_3, qt_b1_10:temp_surf, din_1, din_10) %>% 
+         wd_b1_3, qt_b1_10:temp_surf, din_1, din_10, s_n) %>% 
   drop_na()
 
 corr <- round(cor(cor2, method = "spearman"), 1)
-p.mat <- cor_pmat(cor2)
+p.mat <- cor_pmat(corr)
 ```
 
 ```{r}
@@ -249,9 +349,26 @@ ggcorrplot(corr, p.mat = p.mat, hc.order = TRUE,
   theme(text = element_text(size = 30),
         axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
 
-ggsave(here("figures", "corello.png"), 
+ggsave(here("figures", "corello_s_n.png"), 
         width = 20, height = 20, dpi = 300)
 ```
+
+```{r}
+scm_correlate %>%
+  mutate(month = month(date),
+         year = year(date)) %>% 
+  ggplot(aes(x = din_1, y = dsi_1, color = as.factor(year))) +
+  geom_point() +
+  scale_color_viridis_d(option = "turbo") 
+
+scm_correlate %>%
+  mutate(month = month(date)) %>% 
+  ggplot(aes(x = din_1, y = dsi_1, color = Q_Total)) +
+  geom_point() +
+  scale_color_viridis_c(option = "turbo")  
+```
+
+
 
 
 ```{r}
@@ -626,6 +743,108 @@ ggsave(here("figures", "profile_Density_flu.jpg"),
 ```
 
 ```{r}
+fl5 %>% 
+  left_join(env) %>% 
+  mutate(month = month(date),
+         year = year(date)) %>% 
+  filter(pres < 51) %>%
+  ggplot(aes(x = date, y = pres, color = f_npq)) +
+  geom_point(orientation = "y", size = 3) +
+  # geom_hline(yintercept = 1024) +
+  scale_color_viridis_c(option = "turbo") +
+  labs(y = bquote(sigma*tau~"("*kg~m^-3*")"),
+       color = bquote("Flu"~"("*mg~m^-3*")"), 
+       x = "Date") +
+  theme_bw() +
+  scale_y_reverse() +
+  theme(text = element_text(size = 30),
+        # legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        # axis.text.x = element_blank(),
+        # axis.title.y = element_blank(),
+        # axis.text.y = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+ggsave(here("figures", "section_test.jpg"), 
+       width = 20, height = 7, dpi = 300)
+```
+
+
+```{r}
+test <- fl5 %>%
+  left_join(env) %>% 
+  filter(station == "KC10") %>% 
+  mutate(date_dec = decimal_date(date)) %>% 
+  select(date_dec, pres, rho, f_npq) %>% 
+  drop_na()
+
+ctd_mba <- mba.surf(test[c("date_dec", "pres", "f_npq")], no.X = 600, no.Y = 600, extend = T)
+dimnames(ctd_mba$xyz.est$z) <- list(ctd_mba$xyz.est$x, ctd_mba$xyz.est$y)
+ctd_mba_plot <- melt(ctd_mba$xyz.est$z, varnames = c('date_dec', 'pres'), value.name = 'f_npq') %>%
+  filter(pres < 51) %>%
+  mutate(date_h = lubridate::date_decimal(date_dec),
+         date = lubridate::date(date_h),
+         year = lubridate::year(date)) 
+
+
+test2 <- env %>% 
+  mutate(date_dec = decimal_date(date),
+         date_h = lubridate::date_decimal(date_dec)) %>% 
+  select(date_h, r24_dep_dm) %>%
+  distinct() 
+  
+
+ctd_mba_plot %>% 
+  ggplot(aes(x = date_h, y = pres)) +
+  geom_raster(aes(fill = f_npq)) +
+  geom_line(data = test2, aes(x = date_h, y = r24_dep_dm), color = "white",
+            size = 1.25) +
+  # geom_line(data = test, aes(x = ))
+  # cmocean::scale_fill_cmocean(name = "delta",
+  #                             limits = c(0, 10),
+  #                             oob = scales::squish) +
+  scale_fill_viridis_c(
+                       limits = c(0, 10),
+                       oob = scales::squish) +
+  # geom_contour(aes(z = f), bins = 6, colour = "black", alpha = 0.5) +
+  # geom_contour(aes(z = f), binwidth = 5, colour = "black", alpha = 1) +
+  # geom_contour(aes(z = f), breaks = 5, colour = "black") +
+### Activate to see which pixels are real and not interpolated
+  # geom_point(data = ctd_qc, aes(x = date, y = pres),
+  #            colour = 'black', size = 0.2, alpha = 0.4, shape = 8) +
+###
+  labs(y = "depth (m)", x = NULL, fill = "Fluorescence") +
+  # coord_cartesian(expand = 0) +
+  scale_y_reverse() +
+  labs(fill = bquote(CTD[FLU]~"(mg" ~ m^-3*")"),
+       y = "Depth") +
+  scale_x_datetime(limits = as_datetime(c("2016-01-01", "2024-12-31")),
+               expand = c(0, 0), date_breaks = "years", date_labels = "%Y") +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = "top",
+        legend.box = "horizontal") +
+  guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5,
+                                barwidth = 50, barheight = 1,
+                                frame.colour = "black", ticks.colour = "black"))
+
+ggsave(here("figures", "section_test2_pres.jpg"), 
+       width = 20, height = 7, dpi = 300)
+```
+```{r}
+f_export <- test %>% 
+  select(date, station, pres, rho, f_npq)
+
+write.csv()
+```
+
+
+
+
+```{r}
 f1 <- fl5 %>% 
   filter(station == "KC10") %>% 
   left_join(env) %>% 
@@ -931,17 +1150,20 @@ scm_metrics %>%
 ```
 
 ```{r}
-data_pca <- scm_correlate %>% 
+data_pca <- scm_correlate %>%
+  mutate(year = year(date),
+         month = month(date)) %>% 
   select(date, year, month, temp_surf, sal_surf, dr_dm,
-         qt_b1_10, wd_b1_3, wind_b1_3, din_1) %>% 
-  drop_na()
+         qt_b1_10, wd_b1_3, wind_b1_3, din_1, dsi_1, s_n) %>% 
+  drop_na() %>% 
+  filter(!s_n == Inf)
 
 # r24_dep_dm
 ```
 
 ```{r}
 #Pulling out explanatory variables for PCA analysis
-expl <- data_pca[, 4:10]
+expl <- data_pca[, 4:12]
 ```
 
 ```{r}
@@ -1098,10 +1320,10 @@ ggplot() +
   scale_x_continuous(sec.axis = dup_axis(labels = NULL, name = NULL)) +
   scale_y_continuous(sec.axis = dup_axis(labels = NULL, name = NULL)) + 
   geom_point(data = sites_loc_pca, aes(x = axis1, y = axis2, 
-                                       color = max_int, 
+                                       color = as.factor(month), 
                                        stroke = 1), 
              size = 12) +
-  scale_color_viridis_b(option = "turbo") +
+  scale_color_viridis_d(option = "turbo") +
   # geom_text(data = vscores, aes(x = PC1, y = PC2, label = rownames(vscores)),
   #           col = 'red') +
   geom_segment(data = vscores, aes(x = 0, y = 0, xend = PC1, yend = PC2), 
@@ -1122,7 +1344,7 @@ ggplot() +
                   max.iter = 3e3,
                   size = 12,
                   color = "black") +
-  labs(x = "PCA1 (59%)",
+  labs(x = "PCA1 (55%)",
        y = "PCA2 (14%)", 
        color = NULL) +
   
@@ -1146,7 +1368,7 @@ ggplot() +
         # legend.position = "top",
         # legend.box = "vertical")
 
-ggsave(here("figures", "PCA_test_m_int_no-rho-1024.png"), 
+ggsave(here("figures", "PCA_s_n.png"), 
        width = 15, height = 12, dpi = 300)
 ```
 ```{r}
@@ -1194,7 +1416,7 @@ cor(dis, coph)
 ```
 ```{r}
 # Enhanced hierarchical clustering, cut in 3 groups
-fviz_dend(cluster.average, cex = 0.5, k = 7, color_labels_by_k = TRUE)
+fviz_dend(cluster.average, cex = 0.5, k = 6, color_labels_by_k = TRUE)
 ```
 
 
@@ -1210,7 +1432,7 @@ fviz_gap_stat(gap_stat)
 ```{r}
 #This step sets clusters. Currently, set to three. Not fully supported by silhouette plot, but does make sense considering the data.
 
-k <- 5
+k <- 6
 clust <- cutree(cluster.average, k = k)
 
 clust.df <- data.frame(label = rownames(hc),
@@ -1271,20 +1493,20 @@ unique_vars <- levels(factor(dendrogram_ends$site_id)) %>%
 # count number of unique variables
 color_count <- length(unique(unique_vars$.))
 
-# get RColorBrewer palette
-get_palette <- colorRampPalette(brewer.pal(n = 3, name = "Set1"))
-
-# produce RColorBrewer palette based on number of unique variables in metadata:
-palette <- get_palette(color_count) %>% 
- as.data.frame() %>%
- rename("color" = ".") %>%
- rownames_to_column(var = "row_id")
-
-color_list <- left_join(unique_vars, palette, by = "row_id") %>%
- select(-row_id)
-
-site_color <- as.character(color_list$color)
-names(site_color) <- color_list$.
+# # get RColorBrewer palette
+# get_palette <- colorRampPalette(brewer.pal(n = 3, name = "Set1"))
+# 
+# # produce RColorBrewer palette based on number of unique variables in metadata:
+# palette <- get_palette(color_count) %>% 
+#  as.data.frame() %>%
+#  rename("color" = ".") %>%
+#  rownames_to_column(var = "row_id")
+# 
+# color_list <- left_join(unique_vars, palette, by = "row_id") %>%
+#  select(-row_id)
+# 
+# site_color <- as.character(color_list$color)
+# names(site_color) <- color_list$.
 ```
 ```{r}
 
@@ -1314,7 +1536,7 @@ ggplot() +
  # scale_color_manual(values = site_color) +
  # scale_y_reverse(limits = c(1, -0.5)) +
  scale_color_npg() +
- ylim(-8, 20) +
+ ylim(-8, 25) +
   # coord_flip() +
  ylab("Wards Distance") +
  theme_bw() +
@@ -1328,7 +1550,7 @@ ggplot() +
 # x and y coordinates for aesthetic reasons
 
  
-ggsave(here("figures", "dendrogram.png"),
+ggsave(here("figures", "dendrogram_sn.png"),
        width = 18, height = 10, dpi = 300)
 ```
 
@@ -1402,7 +1624,7 @@ ggplot() +
         # legend.position = "top",
         # legend.box = "vertical")
 
-ggsave(here("figures", "PCA_test_cluster.png"), 
+ggsave(here("figures", "PCA_test_cluster_s_n.png"), 
        width = 15, height = 12, dpi = 300)
 
 ```
@@ -1416,6 +1638,14 @@ pca_phyto %>%
   geom_boxplot() 
 
 ```
+
+```{r}
+scm_correlate %>% 
+  filter(s_n < 100) %>% 
+  ggplot(aes(x = sal_surf, s_n, color = as.factor(year))) +
+  geom_point()
+```
+
 
 ```{r}
 fl6 <- fl5 %>% 
