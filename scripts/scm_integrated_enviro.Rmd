@@ -37,6 +37,78 @@ mei <- read_csv(here("files_big", "mei_2025-04-24.csv"))
 npgo <- read_csv(here("files_big", "npgo_2025-04-24.csv"))
 up <- read_csv(here("files_big", "up_2025-04-24.csv"))
 ```
+
+```{r}
+sn <- env %>% 
+  select(date, pres, no2_dm, po4_dm, sio2_dm) %>% 
+  drop_na() %>% 
+  group_by(date) %>% 
+  mutate(n = n()) %>% 
+  ungroup() %>% 
+  filter(n > 6) %>% 
+  mutate(year = year(date)) %>% 
+  group_by(year) %>% 
+  mutate(n_year = n()) %>% 
+  ungroup() %>% 
+  mutate(sn = sio2_dm - no2_dm) %>% 
+  mutate(date_dec = decimal_date(date)) %>% 
+  filter(year > 2016)
+
+sn_deep <- env %>% 
+  select(date, pres, no2_dm, po4_dm, sio2_dm) %>% 
+  drop_na() %>% 
+  filter(pres > 50) %>% 
+  group_by(date) %>% 
+  mutate(n = n()) %>% 
+  ungroup() %>% 
+  mutate(sn = sio2_dm - no2_dm)
+
+sn %>% 
+  mutate(month = month(date)) %>% 
+  ggplot(aes(x = as.factor(month), y = sio2_dm, fill = as.factor(pres))) +
+  geom_boxplot() +
+  ggsci::scale_fill_npg() 
+
+sn_deep %>% 
+  mutate(month = month(date)) %>% 
+  ggplot(aes(x = as.factor(month), y = sio2_dm, fill = as.factor(pres))) +
+  geom_boxplot() +
+  ggsci::scale_fill_npg() 
+```
+
+```{r}
+sn_mba <- mba.surf(sn[c("date_dec", "pres", "sn")], no.X = 300, no.Y = 300, extend = F)
+dimnames(sn_mba$xyz.est$z) <- list(sn_mba$xyz.est$x, sn_mba$xyz.est$y)
+sn_mba_plot <- melt(sn_mba$xyz.est$z, varnames = c('date_dec', 'pres'), value.name = 'sn') %>%
+  mutate(date_h = lubridate::date_decimal(date_dec),
+         date = lubridate::date(date_h),
+         year = lubridate::year(date)) %>% 
+filter(pres < 51)
+
+sn_mba_plot %>% 
+  ggplot(aes(x = date_h, y = pres)) +
+  geom_raster(aes(fill = sn)) +
+  scale_fill_viridis_c() +
+  scale_y_reverse() +
+  labs(fill = "sn",
+       y = "Depth") +
+  scale_x_datetime(limits = as_datetime(c("2017-01-01", "2024-12-31")),
+               expand = c(0, 0), date_breaks = "years", date_labels = "%Y") +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = "top",
+        legend.box = "horizontal") +
+  guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5,
+                                barwidth = 50, barheight = 1,
+                                frame.colour = "black", ticks.colour = "black"))
+
+ggsave(here("figures", "section_sn.jpg"),
+       width = 20, height = 7, dpi = 300)
+```
+
+
 ```{r}
 mei <- mei %>% 
   rename(mei = `Multivariate ENSO Index Version 2 (MEI.v2)  missing value -999 https://psl.noaa.gov/data/timeseries/month/`) %>% 
@@ -325,11 +397,20 @@ scm_correlate <- scm_kc10 %>%
 scm_correlate %>% 
   mutate(month = month(date)) %>% 
   filter(station == "KC10") %>%
-  ggplot(aes(x = as.factor(month), y = dsi_1/din_1, fill = station)) +
+  ggplot(aes(x = as.factor(month), y = dsi_10 - din_10, fill = station)) +
   geom_boxplot() +
   ggsci::scale_fill_npg() +
   ylim(0, 20)
 ```
+```{r}
+test_sn <- scm_correlate %>% 
+  group_by(year) %>% 
+  summarise(mean_sn = mean(dsi_1 - din_1, na.rm = T)) %>% 
+  ungroup()
+```
+
+
+
 
 ```{r}
 cor2 <- scm_correlate %>% 
@@ -835,10 +916,10 @@ ggsave(here("figures", "section_test2_pres.jpg"),
        width = 20, height = 7, dpi = 300)
 ```
 ```{r}
-f_export <- test %>% 
-  select(date, station, pres, rho, f_npq)
+# f_export <- test %>% 
+#   select(date, station, pres, rho, f_npq)
 
-write.csv()
+# write.csv()
 ```
 
 
@@ -1090,10 +1171,10 @@ scm_correlate %>%
 
 
 ```{r}
-f6 <- f5 %>% 
+fl6 <- fl5 %>% 
   left_join(env)
 
-f6 %>% 
+fl6 %>% 
   mutate(month = month(date),
          year = year(date)) %>% 
   filter(pres < 51) %>% 
@@ -1102,7 +1183,7 @@ f6 %>%
   ggsci::scale_color_d3()
 ```
 ```{r}
-f6 %>% 
+fl6 %>% 
   mutate(month = month(date)) %>% 
   filter(pres < 51) %>% 
   filter(month > 2 & month < 11) %>% 
@@ -1120,10 +1201,10 @@ f6 %>%
 
 ```{r}
 
-f6 <- f6 %>% 
+fl6 <- fl6 %>% 
   mutate(f10p = f_max*0.20)
 
-f5 %>% 
+fl5 %>% 
   mutate(year = year(date)) %>% 
   filter(year == 2021 & station == "KC10") %>% 
   ggplot(aes(x = f_npq, y = pres, color = as.factor(date))) +
@@ -1154,9 +1235,9 @@ data_pca <- scm_correlate %>%
   mutate(year = year(date),
          month = month(date)) %>% 
   select(date, year, month, temp_surf, sal_surf, dr_dm,
-         qt_b1_10, wd_b1_3, wind_b1_3, din_1, dsi_1, s_n) %>% 
-  drop_na() %>% 
-  filter(!s_n == Inf)
+         qt_b1_10, wd_b1_3, wind_b1_3, din_1, dsi_1) %>%
+  mutate(s_n = dsi_1 - din_1) %>% 
+  drop_na() 
 
 # r24_dep_dm
 ```
@@ -1634,16 +1715,49 @@ ggsave(here("figures", "PCA_test_cluster_s_n.png"),
 
 ```{r}
 pca_phyto %>% 
-  ggplot(aes(x = cluster, y = sal_surf)) +
+  filter(s_n < 200) %>% 
+  ggplot(aes(x = cluster, y = din_1)) +
   geom_boxplot() 
+  
 
 ```
 
 ```{r}
 scm_correlate %>% 
-  filter(s_n < 100) %>% 
-  ggplot(aes(x = sal_surf, s_n, color = as.factor(year))) +
-  geom_point()
+  ggplot(aes(x = Q_GM, y = dsi_1 - din_1, color = month)) +
+  geom_point() +
+  scale_color_viridis_c() 
+
+# +
+#   facet_wrap(~month)
+```
+
+
+```{r}
+scm_correlate %>% 
+  ggplot(aes(x = dsi_1 - din_1, int_50, color = dr_dm)) +
+  geom_point() +
+  scale_color_viridis_c()
+```
+```{r}
+scm_correlate %>%
+  ggplot(aes(x = date, y = dsi_1 - din_1)) +
+  geom_point() +
+  geom_line() +
+  facet_grid(year~.)
+```
+
+
+```{r}
+scm_correlate %>% 
+  ggplot(aes(x = dsi_1, y = dr_dm)) +
+  geom_point() 
+
+env %>% 
+  select(date, pres, sio2_dm) %>% 
+  filter(pres == 1) %>% 
+  ggplot(aes(x = date, y = )) +
+  geom_line()
 ```
 
 

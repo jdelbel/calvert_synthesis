@@ -1,0 +1,370 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+
+```{r}
+library(tidyverse)
+library(here)
+library(readxl)
+library(patchwork)
+library(lubridate)
+library(MBA)
+library(reshape)
+library(colorRamps)
+```
+
+```{r}
+n <- read_csv(here("files", "2025-05-05_HakaiData_nutrients.csv"))
+```
+```{r}
+#Selecting 5m depth nutrients for QU39.
+n <- n %>%
+  select(date,
+         station = site_id,
+         pres = line_out_depth,
+         no2 = no2_no3_um,
+         sio2 = sio2,
+         po4 = po4) %>%
+  drop_na()
+
+#Calculating daily mean in situation where there are duplicates.
+n_dm <- n %>%
+  mutate(pres = case_when(pres == 0 ~ 1,
+                          T ~ as.numeric(pres))) %>% 
+  group_by(date, station, pres) %>%
+  summarise(no2_dm = mean(no2),
+            po4_dm = mean(po4),
+            sio2_dm = mean(sio2)) %>%
+  ungroup()  
+  
+```
+```{r}
+sn <- n_dm %>% 
+  select(date, station, pres, no2_dm, po4_dm, sio2_dm) %>% 
+  drop_na() %>% 
+  filter(pres < 51) %>% 
+  group_by(date, station) %>% 
+  mutate(n = n()) %>% 
+  ungroup() %>% 
+  filter(n > 4) %>% 
+  mutate(sn = sio2_dm - no2_dm) %>% 
+  mutate(date_dec = decimal_date(date),
+         month = month(date),
+         year = year(date),
+         date_h = lubridate::date_decimal(date_dec))
+
+sn2 <- n_dm %>% 
+  select(date, station, pres, no2_dm, po4_dm, sio2_dm) %>% 
+  drop_na() %>% 
+  # filter(pres < 101) %>% 
+  group_by(date, station) %>% 
+  mutate(n = n()) %>% 
+  ungroup() %>% 
+  filter(n > 4) %>% 
+  mutate(sn = sio2_dm - no2_dm) %>% 
+  mutate(date_dec = decimal_date(date),
+         month = month(date),
+         year = year(date),
+         date_h = lubridate::date_decimal(date_dec))
+
+sn_dep <- sn %>% 
+  select(station, pres) %>% 
+  group_by(station, pres) %>% 
+  summarise(n = n()) %>% 
+  ungroup()
+  
+```
+
+```{r}
+sn %>% 
+  filter(!pres == 40) %>% 
+  ggplot(aes(x = as.factor(month), y = sn, fill = as.factor(station))) +
+  geom_boxplot() +
+  ggsci::scale_fill_aaas() +
+  facet_grid(pres~., scales = "free_y") +
+  labs(fill = NULL,
+       y =  bquote("Si*\u0020\u0028\u00B5mol\u0020L"^-1*")")) +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        legend.position = c(0.92, 0.95),
+        axis.text = element_text(color = 'black'),
+        axis.title.x = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+ggsave(here("figures", "s_star_month_depth.jpg"), 
+       width = 16, height = 14, dpi = 300)
+```
+```{r}
+sn %>% 
+  filter(!pres == 40) %>% 
+  ggplot(aes(x = as.factor(month), y = sn, fill = as.factor(station))) +
+  geom_boxplot() +
+  geom_hline(yintercept = 13.4) +
+  geom_hline(yintercept = 19.4) +
+  ggsci::scale_fill_aaas() +
+  labs(fill = NULL,
+       y =  bquote("Si*\u0020\u0028\u00B5mol\u0020L"^-1*")")) +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        legend.position = c(0.92, 0.85),
+        axis.text = element_text(color = 'black'),
+        axis.title.x = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+ggsave(here("figures", "s_star_month.jpg"), 
+       width = 16, height = 6, dpi = 300)
+```
+```{r}
+sn %>% 
+  filter(!pres == 40) %>% 
+  ggplot(aes(x = station, y = sn, fill = as.factor(station))) +
+  geom_boxplot() +
+  geom_hline(yintercept = 13.4) +
+  geom_hline(yintercept = 19.4) +
+  ggsci::scale_fill_aaas() +
+  labs(fill = NULL,
+       y =  bquote("Si*\u0020\u0028\u00B5mol\u0020L"^-1*")")) +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        legend.position = c(0.92, 0.85),
+        axis.text = element_text(color = 'black'),
+        axis.title.x = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+ggsave(here("figures", "s_star_month.jpg"), 
+       width = 16, height = 6, dpi = 300)
+```
+
+
+
+```{r}
+sn %>% 
+  filter(!pres == 40) %>% 
+  ggplot(aes(x = sio2_dm, y = no2_dm, color = as.factor(station))) +
+  geom_point(size = 4) +
+  ggsci::scale_color_aaas() +
+  lims(x = c(0,50),
+       y = c(0, 50)) +
+  labs(fill = NULL,
+       x = bquote("Si(OH)"[4]~"\u0020\u0028\u00B5mol\u0020L"^-1*")"),
+       y = bquote("NO"[3]^"-"~"\u0020\u0028\u00B5mol\u0020L"^-1*")")) +
+  facet_grid(pres~station) +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        strip.background = element_blank())
+
+ggsave(here("figures", "s_star_scatter.jpg"), 
+       width = 14, height = 16, dpi = 300)
+```
+
+```{r}
+sn %>%
+  filter(!pres == 40) %>% 
+  ggplot(aes(x = date, y = sn, color = station)) +
+  geom_point() +
+  geom_line(size = 3) +
+  facet_grid(pres~., scales = "free_y") +
+  ggsci::scale_color_aaas() +
+  labs(fill = NULL,
+       y =  bquote("Si*\u0020\u0028\u00B5mol\u0020L"^-1*")")) +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        legend.position = c(0.92, 0.95),
+        axis.text = element_text(color = 'black'),
+        axis.title.x = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+ggsave(here("figures", "s_star_time_series_depth.jpg"), 
+       width = 16, height = 14, dpi = 300)
+```
+```{r}
+sn %>%
+  filter(!pres == 40) %>% 
+  group_by(date, station) %>% 
+  summarise(sn = mean(sn)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = date, y = sn, color = station)) +
+  geom_point() +
+  geom_line(size = 3) +
+  ggsci::scale_color_aaas() +
+  labs(fill = NULL,
+       y =  bquote("Si*\u0020\u0028\u00B5mol\u0020L"^-1*")")) +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        legend.position = c(0.92, 0.95),
+        axis.text = element_text(color = 'black'),
+        axis.title.x = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+ggsave(here("figures", "s_star_time_series_single.jpg"), 
+       width = 16, height = 6, dpi = 300)
+```
+
+
+```{r}
+sn3 <- sn2 %>% 
+  filter(station == "DFO2")
+
+sn_mba_d <- mba.surf(sn3[c("date_dec", "pres", "sn")], no.X = 500, no.Y = 500)
+dimnames(sn_mba_d$xyz.est$z) <- list(sn_mba_d$xyz.est$x, sn_mba_d$xyz.est$y)
+sn_mba_plot_d <- melt(sn_mba_d$xyz.est$z, varnames = c('date_dec', 'pres'), value.name = 'sn') %>%
+  mutate(date_h = lubridate::date_decimal(date_dec),
+         date = lubridate::date(date_h),
+         year = lubridate::year(date))
+
+s1 <- sn_mba_plot_d %>% 
+  ggplot(aes(x = date_h, y = pres)) +
+  geom_raster(aes(fill = value), interpolate = F, hjust = 0.5, vjust = 0.5) +
+  geom_contour(aes(z = value), color = "white", binwidth = 5) + 
+  geom_point(data = sn2, aes(date_h, pres), colour = 'white', size = 0.5) +
+  scale_fill_viridis_c(limits = c(0, 30),
+                       oob = scales::squish) +
+  scale_y_reverse() +
+  ylim(51, 0) +
+  labs(fill = bquote("Si*\u0020\u0028\u00B5mol\u0020L"^-1*")"),
+       y = "Depth") +
+  scale_x_datetime(limits = as_datetime(c("2017-01-01", "2024-12-31")),
+               expand = c(0, 0), date_breaks = "years", date_labels = "%Y") +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        legend.position = "right",
+        legend.key.width  = unit(0.7, "lines"),
+        legend.key.height = unit(5, "lines"),
+        legend.title = element_text(size = 30, angle = 270),
+        legend.title.align = 0.5,
+        legend.direction = "vertical") +
+    guides(fill = guide_colourbar(title.position = "right"))
+        
+#         ,
+#         legend.box = "horizontal") +
+#   guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5,
+#                                 barwidth = 50, barheight = 1,
+#                                 frame.colour = "black", ticks.colour = "black"))
+# 
+# ggsave(here("figures", "s_star_section_dfo2.jpg"), 
+#        width = 16, height = 6, dpi = 300)
+```
+```{r}
+sn4 <- sn2 %>% 
+  filter(station == "KC10") 
+
+sn_mba_k <- mba.surf(sn4[c("date_dec", "pres", "sn")], no.X = 500, no.Y = 500)
+dimnames(sn_mba_k$xyz.est$z) <- list(sn_mba_k$xyz.est$x, sn_mba_k$xyz.est$y)
+sn_mba_plot_k <- melt(sn_mba_k$xyz.est$z, varnames = c('date_dec', 'pres'), value.name = 'sn') %>%
+  mutate(date_h = lubridate::date_decimal(date_dec),
+         date = lubridate::date(date_h),
+         year = lubridate::year(date))
+
+s2 <- sn_mba_plot_k %>% 
+  ggplot(aes(x = date_h, y = pres)) +
+  geom_raster(aes(fill = value), interpolate = F, hjust = 0.5, vjust = 0.5) +
+  geom_contour(aes(z = value), color = "white", binwidth = 5) + 
+  geom_point(data = sn2, aes(date_h, pres), colour = 'white', size = 0.5) +
+  scale_fill_viridis_c(limits = c(0, 30),
+                       oob = scales::squish) +
+  scale_y_reverse() +
+  ylim(51, 0) +
+  labs(fill = bquote("Si*\u0020\u0028\u00B5mol\u0020L"^-1*")"),
+       y = "Depth") +
+  scale_x_datetime(limits = as_datetime(c("2017-01-01", "2024-12-31")),
+               expand = c(0, 0), date_breaks = "years", date_labels = "%Y") +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        legend.position = "right",
+        legend.key.width  = unit(0.7, "lines"),
+        legend.key.height = unit(5, "lines"),
+        legend.title = element_text(size = 30, angle = 270),
+        legend.title.align = 0.5,
+        legend.direction = "vertical") +
+    guides(fill = guide_colourbar(title.position = "right"))
+        
+  #       ,
+  #       legend.box = "horizontal") +
+  # guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5,
+  #                               barwidth = 50, barheight = 1,
+  #                               frame.colour = "black", ticks.colour = "black"))
+
+# ggsave(here("figures", "s_star_section_kc10.jpg"), 
+#        width = 16, height = 6, dpi = 300)
+```
+
+
+```{r}
+sn5 <- sn2 %>% 
+  filter(station == "QCS01") 
+
+sn_mba_q <- mba.surf(sn5[c("date_dec", "pres", "sn")], no.X = 500, no.Y = 500)
+dimnames(sn_mba_q$xyz.est$z) <- list(sn_mba_q$xyz.est$x, sn_mba_q$xyz.est$y)
+sn_mba_plot_q <- melt(sn_mba_q$xyz.est$z, varnames = c('date_dec', 'pres'), value.name = 'sn') %>%
+  mutate(date_h = lubridate::date_decimal(date_dec),
+         date = lubridate::date(date_h),
+         year = lubridate::year(date))
+
+s3 <- sn_mba_plot_q %>% 
+  ggplot(aes(x = date_h, y = pres)) +
+  geom_raster(aes(fill = value), interpolate = F, hjust = 0.5, vjust = 0.5) +
+  geom_contour(aes(z = value), color = "white", binwidth = 5) + 
+  geom_point(data = sn2, aes(date_h, pres), colour = 'white', size = 0.5) +
+  scale_fill_viridis_c(limits = c(0, 30),
+                       oob = scales::squish) +
+  scale_y_reverse() +
+  ylim(51, 0) +
+  labs(fill = bquote("Si*\u0020\u0028\u00B5mol\u0020L"^-1*")"),
+       y = "Depth") +
+  scale_x_datetime(limits = as_datetime(c("2017-01-01", "2024-12-31")),
+               expand = c(0, 0), date_breaks = "years", date_labels = "%Y") +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        legend.position = "right",
+        legend.key.width  = unit(0.7, "lines"),
+        legend.key.height = unit(5, "lines"),
+        legend.title = element_text(size = 30, angle = 270),
+        legend.title.align = 0.5,
+        legend.direction = "vertical") +
+    guides(fill = guide_colourbar(title.position = "right"))
+        
+  #       ,
+  #       legend.box = "horizontal") +
+  # guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5,
+  #                               barwidth = 50, barheight = 1,
+  #                               frame.colour = "black", ticks.colour = "black"))
+```
+```{r}
+s_com <- s1/s2/s3 + plot_layout(guides = "collect")
+
+ggsave(here("figures", "s_star_section_all.jpg"), s_com,
+       width = 16, height = 14, dpi = 300)
+```
+
+```{r}
+s_n <- n_dm %>%
+  filter(pres > 10) %>% 
+  mutate(s_n = sio2_dm/no2_dm,
+         n_s = no2_dm/sio2_dm,
+         sn = sio2_dm - no2_dm) %>% 
+  group_by(station) %>% 
+  summarise(meds_s_n = median(s_n),
+            med_n_s = median(n_s),
+            med_sn = median(sn),
+            med_si = median(sio2_dm),
+            med_n = median(no2_dm)) %>% 
+  ungroup()
+```
+
