@@ -581,7 +581,7 @@ interp <- as.data.frame(sp.interp)
 
 interp <- interp %>% 
   mutate(pres = x.new) %>% 
-  pivot_longer(cols = (1:18), names_to = "id", values_to = "chl_loess") %>% 
+  pivot_longer(cols = (1:21), names_to = "id", values_to = "chl_loess") %>% 
   # mutate(date = date(date)) %>% 
   mutate_at(vars(chl_loess), funs(round(., 2)))
 ```
