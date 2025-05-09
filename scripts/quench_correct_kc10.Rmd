@@ -44,6 +44,7 @@ par_c <- read_csv(here("files", "8_binAvg-1743715163197.csv"))
   
   
 ```
+
 ```{r}
 #Working with CTD fluorescence datasets
 
@@ -709,6 +710,8 @@ fig <- f1 / f2 + plot_layout(heights = c(0.5, 1.1))
 ggsave(here("figures", "scatter_histo_test.png"), fig,
         width = 16, height = 18, dpi = 300)
 ```
+
+
 ```{r}
 outlier <- f_slope_join %>% 
   filter(f_npq > 10 & chl_comb < 10)
