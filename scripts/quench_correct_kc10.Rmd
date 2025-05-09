@@ -165,6 +165,7 @@ c_join <- c_dm %>%
 
 #A comparison of the bulk and SF sum should be plotted and offset applied if needed.
 ```
+
 ```{r}
 #Plotting where we have data available - can switch out KC10 for FZH01 in filtering
 c_join %>% 
@@ -173,6 +174,8 @@ c_join %>%
   geom_point() +
   facet_grid(pres~.)
 ```
+
+
 ```{r}
 #joining the discrete chlorophyll concentrations to the fluorometer dataset and creating a new datasheet to apply fits too.
 
@@ -191,9 +194,6 @@ f_fit <- f_dm %>%
 ```
 
 Need to go through and proide rationale why I'm removing things above.
-
-
-
 
 ```{r}
 #For each profile, determining the linear model between chlorophyll and fluorescence data.
@@ -246,6 +246,8 @@ fit_mod_wide <- fit_mod_wide %>%
 
 
 ```
+
+
 ```{r}
 #Looking at numbers of profiles that a decent correlation was found 
 fit_sig <- fit_mod_wide %>% 
@@ -366,6 +368,9 @@ f_insign <- f_dm %>%
   unite(id, c(date, station), sep = "-") %>% 
   filter(id %in% f_insign_id)
 ```
+
+
+
 
 ```{r}
 f_insign %>% 
@@ -497,14 +502,17 @@ ggsave(here("figures", "check_slope_scatter.png"),
 #Maybe before fitting curves try to investigate where big differences exist between corrected fluorescence and chlorophyll. Can I also use PAR here to develop a relationship?
 
 f_slope_quench <- f_slope_join %>% 
-  drop_na() %>% 
+  # drop_na() %>% #I think this is an issue.
+  filter(!is.na(slope_best)) %>%
+  filter(!is.na(chl_comb)) %>% 
   mutate(f_slope = f_dm*slope_best,
          fc_rat = f_slope/chl_comb,
-         diff = f_slope - chl_comb)
+         diff = f_slope - chl_comb,
+         diff = round(diff, 2))
 
 
 quench <- f_slope_quench %>% 
-  filter(diff <= -1 & pres <= 5)
+  filter(diff <= -0.9 & pres <= 5)
   
 quench_id <- quench$id
 #Look into:
@@ -558,7 +566,7 @@ chl_wide <- f_slope_quench %>%
 
 ```{r}
 spec <- chl_wide %>% 
-  select(2:19)
+  select(2:22)
 
 # spec <- as.data.frame(chl_mm_wide$chl_dm)
 depth <- chl_wide$pres
@@ -595,6 +603,7 @@ f_slope_join <- f_slope_join %>%
                            pres > 5 ~ F,
                            is.na(chl_loess) ~ F))
 ```
+
 ```{r}
 scatter_test <- f_slope_join %>% 
   filter(!is.na(slope_best)) %>% 
@@ -708,11 +717,10 @@ ggsave(here("figures", "histo_test.png"),
 ```{r}
 fig <- f1 / f2 + plot_layout(heights = c(0.5, 1.1))
 
-
-
 ggsave(here("figures", "scatter_histo_test.png"), fig,
         width = 16, height = 18, dpi = 300)
 ```
+
 ```{r}
 outlier <- f_slope_join %>% 
   filter(f_npq > 10 & chl_comb < 10)
@@ -834,6 +842,7 @@ ggsave(here("figures", "scatter_slope_ratio.png"),
 #So when rat_5 > slope_best, potentially a result of NPQ. 
 #Not sure if this will work.
 ```
+
 ```{r}
 s2 <- f_rat_5 %>% 
   ggplot(aes(x = f_slope, y = f_r5)) +
@@ -888,14 +897,6 @@ test <- f_slope_join %>%
   mutate(fc_rat = f_dm/chl_comb)
 ```
 
-
-
-
-
-
-
-
-
 ```{r}
 #Looking at profiles where the npq_correction was performed.
 cor_npq <- f_slope_join %>% 
@@ -947,6 +948,7 @@ ggsave(here("figures", "check_npq_prof_2023-05-14_20-fix.png"),
 #Slope - Could either use sensor correlation, 5m ratio
 #NPQ ??? PAR?
 
+
 ```{r}
 corrected <- f_slope_join %>% 
   filter(!is.na(slope_best))
@@ -974,7 +976,8 @@ corrected %>%
 
 #Initial comparison shows that they can be different
 ```
+
 ```{r}
-write.csv(corrected, here("outputs", "corrected_flu_2025-04-10.csv"))
+write.csv(corrected, here("outputs", "corrected_flu_2025-05-09.csv"))
 ```
 
