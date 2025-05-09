@@ -1,0 +1,292 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+#Upload packages
+library(tidyverse)
+library(here)
+library(readxl)
+library(patchwork)
+library(lubridate)
+library(MBA)
+library(mgcv)
+library(FNN)
+library(zoo)
+library(reshape2)
+library(rioja)
+library(egg)
+library(ggcorrplot)
+library(ggsci)
+library(vegan)
+library(ggrepel)
+library(ggforce)
+library(factoextra)
+library(cluster)
+library(ggdendro)
+library(cmocean)
+```
+
+```{r}
+#Slope and NPQ Corrected CTD data
+f <- read_csv(here("outputs", "corrected_flu_2025-04-10.csv"))
+env <- read_csv(here("outputs", "enviro_ctd_nut_2025-04-15.csv"))
+n <- read_csv(here("files", "2025-05-05_HakaiData_nutrients.csv"))
+```
+```{r}
+int50 <- f %>% 
+  filter(pres < 51) %>% 
+  group_by(id, date, station) %>% 
+  summarise(int_50 = sum(f_npq)) %>% 
+  ungroup() %>% 
+  group_by(date) %>% 
+  summarise(int_50 = mean(int_50)) %>% 
+  ungroup() %>% 
+  mutate(month = month(date),
+         year = year(date)) %>% 
+  mutate(month_adj = case_when(date == "2022-07-28" ~ 8,
+                               date == "2017-08-31" ~ 9,
+                               date == "2017-04-28" ~ 5,
+                               T ~ as.numeric(month)))
+```
+
+```{r}
+#calculate the climatological mean, standard deviation and number of samples in each bin
+int_ts_mm <- int50 %>%
+  group_by(month_adj) %>% 
+  summarise(mm_ts_int = mean(int_50, na.rm = T),
+            sd_ts_int = sd(int_50, na.rm = T),
+            n_ts = n()) %>% 
+  ungroup()
+
+#creating a monthly mean for each year - some years have more than 1 observation - I think. I should maybe correct for where there are two observations per month.
+int_year_mm <- int50 %>%
+  select(year, month_adj, int_50) %>% 
+  group_by(year, month_adj) %>% 
+  summarise(mm_year_int = mean(int_50, na.rm = T),
+            n_year = n()) %>% 
+  ungroup() 
+
+#calculate the standardized anomaly and create a center of the month date for plotting
+int_anomaly_month <- int_year_mm %>% 
+  left_join(int_ts_mm) %>% 
+  mutate(anom = mm_year_int - mm_ts_int,
+         anom_std = anom/sd_ts_int,
+         day = 15) %>% 
+  unite("date", year, month_adj, day, sep = "-", remove = F) %>% 
+  mutate(date2 = lubridate::ymd(date)) %>% 
+  mutate(pos = anom >= 0) #allows me to plot red/blue colors
+```
+
+```{r}
+int_anomaly_month %>% 
+  ggplot() +
+  geom_point(data = int50, aes(x = date, y = int_50), alpha = 0.3) +
+  geom_line(data = int50, aes(x = date, y = int_50), alpha = 0.3) +
+  geom_col(data = int_anomaly_month, aes(x = date2, y = anom, fill = pos),
+           position = "identity", colour = "black") +
+  scale_fill_manual(values = c("blue", "red"), guide = FALSE) +
+  # geom_hline(yintercept = 1) +
+  # geom_hline(yintercept = -1) +
+  # geom_hline(yintercept = 2, linetype = "dashed") +
+  # geom_hline(yintercept = -2, linetype = "dashed") +
+  # lims(y = c(-0.5, 0.5)) +
+  scale_x_date(limits = as.Date(c("2014-01-01", "2025-01-01")),
+               expand = c(0, 0),
+               date_breaks = "years", date_labels = "%b%y") +
+  labs(y = bquote(Monthly~Anomaly~"(mg" ~ m^-2*")")) +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        panel.grid.major.x =  element_line(color = "black", size = 0.5),
+        panel.grid.minor.x =  element_line(color = "darkgrey", size = 0.5),
+        # strip.text.x = element_blank(),
+        # panel.spacing = unit(2, "lines"),
+        text = element_text(size = 40),
+        axis.text = element_text(colour = "black"),
+        axis.title.x = element_blank())
+
+ggsave(here("figures", "anomaly_test_3.png"),
+        width = 20, height = 8, dpi = 300)
+```
+```{r}
+#These are daily means.
+ctd_surf <- env %>% 
+  select(date, pres, 
+         n2_surf = N2, 
+         rho_surf = rho, 
+         sal_surf = sal, 
+         temp_surf = temp) %>% 
+  filter(pres <= 3) %>% 
+  pivot_longer(c(n2_surf:temp_surf), values_to = "val", names_to = "par") %>% 
+  group_by(date, par) %>% 
+  summarise(val = mean(val)) %>% 
+  ungroup() %>% 
+  mutate(month = month(date),
+         year = year(date)) %>%  
+  mutate(month = case_when(date == "2022-07-28" ~ 8,
+                               date == "2017-08-31" ~ 9,
+                               date == "2017-04-28" ~ 5,
+                               T ~ as.numeric(month))) 
+
+# ctd_strat <- env %>% 
+#   select(date, dr_dm, r24_dep_dm) %>% 
+#   distinct() %>% 
+  
+  
+
+  
+  
+
+```
+
+```{r}
+#calculate the climatological mean, standard deviation and number of samples in each bin
+surf_ts_mm <- ctd_surf %>%
+  group_by(month, par) %>% 
+  summarise(mm_ts_int = mean(val, na.rm = T),
+            sd_ts_int = sd(val, na.rm = T),
+            n_ts = n()) %>% 
+  ungroup()
+
+#creating a monthly mean for each year - some years have more than 1 observation - I think. I should maybe correct for where there are two observations per month.
+surf_year_mm <- ctd_surf %>%
+  select(year, month, val, par) %>% 
+  group_by(year, month, par) %>% 
+  summarise(mm_year_int = mean(val, na.rm = T),
+            n_year = n()) %>% 
+  ungroup() 
+
+#calculate the standardized anomaly and create a center of the month date for plotting
+surf_anomaly_month <- surf_year_mm %>% 
+  left_join(surf_ts_mm) %>% 
+  mutate(anom = mm_year_int - mm_ts_int,
+         anom_std = anom/sd_ts_int,
+         day = 15) %>% 
+  unite("date", year, month, day, sep = "-", remove = F) %>% 
+  mutate(date2 = lubridate::ymd(date)) %>% 
+  mutate(pos = anom >= 0) %>% 
+  filter(!par == "n2_surf") %>% 
+  mutate(month = case_when(date == "2022-07-28" ~ 8,
+                               date == "2017-08-31" ~ 9,
+                               date == "2017-04-28" ~ 5,
+                               T ~ as.numeric(month)))
+```
+
+```{r}
+surf_anomaly_month %>% 
+  ggplot() +
+  geom_col(data = surf_anomaly_month, aes(x = date2, y = anom, fill = pos),
+           position = "identity", colour = "black") +
+  scale_fill_manual(values = c("blue", "red"), guide = FALSE) +
+  scale_x_date(limits = as.Date(c("2012-01-01", "2025-01-01")),
+               expand = c(0, 0),
+               date_breaks = "years", date_labels = "%b%y") +
+  labs(y = "Monthly Anomaly") +
+  facet_grid(par~.) +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        panel.grid.major.x =  element_line(color = "black", size = 0.5),
+        panel.grid.minor.x =  element_line(color = "darkgrey", size = 0.5),
+        # strip.text.x = element_blank(),
+        # panel.spacing = unit(2, "lines"),
+        text = element_text(size = 40),
+        axis.text = element_text(colour = "black"),
+        axis.title.x = element_blank())
+
+ggsave(here("figures", "anomaly_test_temp.png"),
+        width = 20, height = 14, dpi = 300)
+```
+
+```{r}
+#Selecting 5m depth nutrients for QU39.
+n <- n %>%
+  select(date,
+         station = site_id,
+         pres = line_out_depth,
+         no2 = no2_no3_um,
+         sio2 = sio2,
+         po4 = po4) %>%
+  drop_na()
+
+#Calculating daily mean in situation where there are duplicates.
+n_dm <- n %>%
+  mutate(pres = case_when(pres == 0 ~ 1,
+                          T ~ as.numeric(pres))) %>% 
+  group_by(date, station, pres) %>%
+  summarise(no2_dm = mean(no2),
+            po4_dm = mean(po4),
+            sio2_dm = mean(sio2)) %>%
+  ungroup() %>% 
+  filter(station == "KC10" & pres == 100) %>% 
+  mutate(month = month(date),
+         year = year(date)) %>% 
+  mutate(month = case_when(date == "2022-07-28" ~ 8,
+                               date == "2017-08-31" ~ 9,
+                               date == "2017-04-28" ~ 5,
+                               T ~ as.numeric(month))) %>% 
+  mutate(s_star = sio2_dm - no2_dm) %>% 
+  pivot_longer(c(no2_dm:sio2_dm, s_star), names_to = "par", values_to = "val")
+  
+```
+
+```{r}
+#calculate the climatological mean, standard deviation and number of samples in each bin
+n_ts_mm <- n_dm %>%
+  group_by(month, par) %>% 
+  summarise(mm_ts_int = mean(val, na.rm = T),
+            sd_ts_int = sd(val, na.rm = T),
+            n_ts = n()) %>% 
+  ungroup()
+
+#creating a monthly mean for each year - some years have more than 1 observation - I think. I should maybe correct for where there are two observations per month.
+n_year_mm <- n_dm %>%
+  select(year, month, val, par) %>% 
+  group_by(year, month, par) %>% 
+  summarise(mm_year_int = mean(val, na.rm = T),
+            n_year = n()) %>% 
+  ungroup() 
+
+#calculate the standardized anomaly and create a center of the month date for plotting
+n_anomaly_month <- n_year_mm %>% 
+  left_join(n_ts_mm) %>% 
+  mutate(anom = mm_year_int - mm_ts_int,
+         anom_std = anom/sd_ts_int,
+         day = 15) %>% 
+  unite("date", year, month, day, sep = "-", remove = F) %>% 
+  mutate(date2 = lubridate::ymd(date)) %>% 
+  mutate(pos = anom >= 0) %>% 
+  filter(!par == "n2_surf") %>% 
+  mutate(month = case_when(date == "2022-07-28" ~ 8,
+                               date == "2017-08-31" ~ 9,
+                               date == "2017-04-28" ~ 5,
+                               T ~ as.numeric(month)))
+```
+```{r}
+
+n_anomaly_month %>% 
+  ggplot() +
+  geom_col(data = n_anomaly_month, aes(x = date2, y = anom, fill = pos),
+           position = "identity", colour = "black") +
+  scale_fill_manual(values = c("blue", "red"), guide = FALSE) +
+  scale_x_date(limits = as.Date(c("2012-01-01", "2025-01-01")),
+               expand = c(0, 0),
+               date_breaks = "years", date_labels = "%b%y") +
+  labs(y = "Monthly Anomaly") +
+  facet_grid(par~., scales = "free_y") +
+  theme_bw() +
+  theme(strip.background = element_blank(),
+        panel.grid.major.x =  element_line(color = "black", size = 0.5),
+        panel.grid.minor.x =  element_line(color = "darkgrey", size = 0.5),
+        # strip.text.x = element_blank(),
+        # panel.spacing = unit(2, "lines"),
+        text = element_text(size = 40),
+        axis.text = element_text(colour = "black"),
+        axis.title.x = element_blank())
+
+ggsave(here("figures", "anomaly_test_n_100.png"),
+        width = 20, height = 14, dpi = 300)
+```
+
+
+

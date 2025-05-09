@@ -1,0 +1,408 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Some new interpolation tutorials to consider:
+https://search.r-project.org/CRAN/refmans/rioja/html/interp.dataset.html
+https://github.com/hdugan/NTLlakeloads
+
+```{r}
+#Upload packages
+library(tidyverse)
+library(here)
+library(readxl)
+library(patchwork)
+library(lubridate)
+library(MBA)
+library(mgcv)
+library(FNN)
+library(zoo)
+library(reshape2)
+library(rioja)
+library(egg)
+library(palr)
+
+```
+
+```{r}
+# 2024 corrected buoy data
+b22 <- read.csv(here("outputs", "buoy_corr_dm_2022.csv"))
+
+bsal <- read.csv(here("files", "buoy_salinity_2022.csv"))
+
+#Corrected CTD data
+f <- read_csv(here("outputs", "corrected_flu_2025-04-10.csv"))
+
+env <- read_csv(here("outputs", "enviro_5m_2025-04-25_kc10.csv"))
+
+env_anom <- read_csv(here("outputs", "ctd_anom_week_2025-04-25_kc10.csv"))
+
+#Downloading discrete chlorophyll samples
+cd <- read_csv(here("files", "2024-12-05_HakaiData_chlorophyll.csv"))
+
+wind <- read_csv(here("files", "wind_all.csv"))
+
+wind_anom <- read.csv(here("outputs", "wind_anom_day_2025-04-25.csv"))
+
+#CHEMTAX
+chem <- read_csv(here("files", "chemtax_kc10_2024.csv"))
+
+```
+
+```{r}
+b22 <- b22 %>% 
+  select(date_corr, fl_med_day) %>% 
+  distinct()
+
+bsal2 <- bsal %>% 
+  mutate(measurementTime = mdy_hm(measurementTime),
+         date = date(measurementTime)) %>% 
+  filter(WaterSalinity_UQL == 2 & year == 2022) %>% 
+  group_by(date) %>% 
+  summarise(mean_sal = mean(WaterSalinity)) %>% 
+  ungroup()
+
+f22 <- f %>% 
+  mutate(year = year(date)) %>% 
+  filter(year == 2022)
+
+wind <- wind %>% 
+  mutate(date = mdy(date))
+
+wind22 <- wind %>% 
+  filter(year == 2022)
+  
+```
+
+```{r}
+cd <- cd %>% 
+  filter(filter_type == "Bulk GF/F" & line_out_depth == 0) %>% 
+  select(date, chla)
+```
+
+```{r}
+b22 <- b22 %>% 
+  mutate(date = lubridate::ymd(date_corr),
+         year = lubridate::year(date),
+         yday = lubridate::yday(date)) 
+
+b22 <- b22 %>% 
+  left_join(cd) %>% 
+  left_join(bsal2)
+```
+```{r}
+#Working with chemtax data to make it easy to plot
+
+#Making the date column a date format
+chem <- chem %>% 
+  mutate(date2 = lubridate::mdy(Date)) 
+
+#Selecting appropriate columns and renaming to easy to work with names
+chem <- chem %>%
+  select(date = date2, cyan = Cyanobacteria, hapt = Hapto, 
+         GA = `Prasinophytes-3`, cryp = Cryptophytes,
+         dino = `Dinoflagellates-1`, raph = Raphido,
+         dict = Dictyo, diat = `Diatoms-1`)
+
+#Pivoting to long/tidy for plotting in ggplot
+chem <- chem %>% 
+  pivot_longer(c(cyan:diat), names_to = "group", values_to = "contribution")
+
+#Calculating TChla for each sample
+chem_tchla <- chem %>% 
+  group_by(date, group) %>% 
+  summarise(contribution = mean(contribution)) %>% 
+  ungroup() %>% 
+  group_by(date) %>% 
+  mutate(tchla = sum(contribution)) %>% 
+  ungroup()
+
+
+#checking to see if there are any duplicates - there were replicates taken for DFO comparisons. None found because I already averaged these for the manuscript.
+chem_dup <- chem_tchla %>%
+  distinct(date, tchla) %>% 
+  group_by(date) %>% 
+  mutate(dup = n()) %>% 
+  ungroup() %>% 
+  filter(dup > 1)
+
+#Good to move forward
+```
+
+
+
+```{r}
+# f1 <- wind24 %>% 
+#   ggplot(aes(x = date, y = WindSpd_Med^3, color = as.factor(year))) +
+#   geom_line(size = 2) +
+#   ggsci::scale_color_futurama() +
+#   scale_x_date(limits = as_date(c("2024-01-01", "2024-12-31")),
+#                expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+#   labs(y = bquote(Wind~"("*m^-3*")")) +
+#   theme_bw() +
+#   theme(legend.position = "none",
+#         text = element_text(size = 35), #35
+#         axis.text = element_text(color = "black"),
+#         axis.title.x = element_blank(),
+#         axis.text.x = element_blank())
+```
+
+
+```{r}
+# f1 <- 
+  
+f1 <-   ggplot() + 
+  # geom_area(data = wind_24, aes(x = date, speed_dm^3),
+  #           fill = "grey", alpha = 0.7) +
+  # geom_col(data = wind_anom, aes(x = date, y = anom, fill = pos)) +
+  # annotate("rect", xmin = date("2024-07-02"), xmax = date("2024-07-24"),
+  #          ymin = 0, ymax = Inf, fill = 'grey', alpha = 1) +
+  geom_vline(xintercept = as_date("2024-03-18"),
+             linetype = "solid", size = 1, color = "black") +
+  geom_line(data = wind22, aes(x = date, y = WindSpd_Med^3),
+            size = 2) +
+  # annotate("text", x = as.Date("2024-01-15"), y = 3500,
+  #          label = "a)",
+  #          size = 10) +
+  # annotate("text", x = as.Date("2024-04-15"), y = 3500,
+  #          label = "2024 SB",
+  #          size = 10) +
+  scale_fill_manual(values = c("blue", "red"), guide = FALSE) +
+  ggsci::scale_color_futurama() +
+  labs(y = bquote(Wind~"("*m^-3*s^-3*")")) +
+  scale_x_date(limits = as_date(c("2022-01-01", "2022-12-31")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank())
+```
+
+```{r}
+# # f2 <- 
+#   
+#   env %>% 
+#   ggplot() + 
+#   # geom_area(data = anom_fwc, aes(x = year_month, y = anom*coeff),
+#   #           # linetype = "dotdash",
+#   #           fill = "grey",
+#   #           # color = "black",
+#   #           alpha = 1) +
+#   geom_point(aes(x = date, y = dr), 
+#              pch = 21,
+#              size = 4,
+#              fill = "white",
+#              stroke = 3) +
+#   geom_col(data = anom_dr, aes(x = year_month, y = anom, fill = pos)) +
+#   geom_vline(xintercept = as_date("2024-03-18"),
+#              linetype = "solid", size = 1, color = "black") +
+#   # scale_y_continuous(name = bquote(Delta*rho~"("~kg~m^-3*")"),
+#   #                    sec.axis = sec_axis(~.*coeff,
+#   #                                        name = "Sal")) +
+#   scale_fill_manual(values = c("blue", "red"), guide = FALSE) +
+#   # lims(y = c(-4, 5)) 
+#   labs(y = bquote(Delta*rho~"("~kg~m^-3*")")) +
+#   scale_x_date(limits = as_date(c("2024-01-01", "2024-12-31")),
+#                expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+#   theme_bw() +
+#   theme(text = element_text(size = 35), #35
+#         axis.text = element_text(color = "black"),
+#         axis.title.x = element_blank(),
+#         axis.text.x = element_blank(),
+#         axis.title.y.right = element_text(color = "#474F58"))
+```
+
+```{r}
+b22_long <- b22 %>%
+  select(date_corr, chla, fl_med_day, mean_sal) %>% 
+  pivot_longer(c(chla, fl_med_day, mean_sal),
+              names_to = "par", values_to = "val") %>% 
+  mutate(date = date(date_corr))
+```
+
+```{r}
+# f3 <- 
+  
+f2 <-   b22_long %>% 
+  ggplot(aes(x = date, y = val, color = par)) +
+  annotate("rect", xmin = date("2024-03-05"), xmax = date("2024-04-30"),
+           ymin = 0, ymax = Inf, fill = 'darkgreen', alpha = 0.2) +
+  geom_line(data = filter(b22_long,
+                          par == "fl_med_day"),
+            size = 2) +
+  geom_line(data = filter(b22_long,
+                          par == "mean_sal"),
+            size = 2) +
+  geom_point(data = filter(b22_long,
+                          par == "chla"),
+            size = 4, pch = 8, stroke = 2) +
+  # geom_vline(xintercept = as_date("2024-03-18"),
+  #            linetype = "solid", size = 1, color = "black") +
+  # geom_vline(xintercept = as_date("2024-04-06"),
+  #            linetype = "dashed", size = 1, color = "black") +
+  # annotate("text", x = as.Date("2024-01-15"), y = 21,
+  #          label = "b)",
+  #          size = 10) +
+  ggsci::scale_color_jama(labels = c(expression(Chl[Discrete]),
+                                         expression(Chl[BUOY]),
+                                         expression(Salinity[BUOY]))) +
+  scale_x_date(limits = as_date(c("2022-01-01", "2022-12-31")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  ylab(expression(atop(Chl~"(mg" ~ m^-3*")",
+                       paste("Salinity")))) +
+  labs(color = NULL) +
+  
+  # labs(y = bquote(Buoy[FLU]~"(mg" ~ m^-3*")"),
+  #      x  = NULL,
+  #      color = NULL) +
+  theme_bw() +
+  theme(legend.position = "right",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank())
+```
+
+
+
+
+
+
+
+
+```{r}
+#Now plot 2024 CTD profiles
+# f2 <- 
+  
+# f4 <- 
+  
+# f3 <-  
+# https://cran.r-project.org/web/packages/palr/vignettes/nasa_chla.html
+# maxrange <- c(0.01, 10)
+# pal <- chl_pal(palette = TRUE)  
+# sb <- which(pal$breaks >= maxrange[1] & pal$breaks <= maxrange[2])
+  
+f3 <- f22 %>% 
+  filter(pres < 51) %>% 
+  mutate(day = 15,
+         year = year(date),
+         month = month(date)) %>% 
+  unite(date_2, c(year, month, day), sep = "-", remove = F) %>% 
+  mutate(date_2 = date(date_2)) %>% 
+  ggplot(aes(x = date)) +
+  geom_tile(aes(y = pres, fill = f_npq)) +
+  # geom_vline(xintercept = as_date("2024-03-18"),
+  #            linetype = "solid", size = 1, color = "white") +
+  geom_hline(yintercept = 5,
+             linetype = "dashed", size = 1, color = "white") +
+  # annotate("text", x = as.Date("2024-01-15"), y = 5,
+  #          label = "c)",
+  #          size = 10) +
+  # annotate("text", x = as.Date("2024-11-19"), y = 9,
+  #          label = "5m",
+  #          size = 10,
+  #          color = "white") +
+  scale_y_reverse(breaks = seq(0, 50, by = 10)) +
+  # cmocean::scale_fill_cmocean(name = "delta",
+  #                             limits = c(0, 20),
+  #                             oob = scales::squish) +
+  scale_fill_viridis_c(limits = c(0, 30),
+                       oob = scales::squish) +
+  labs(fill = bquote(CTD[FLU]~"(mg" ~ m^-3*")"),
+       y = "Depth") +
+  scale_x_date(limits = as_date(c("2022-01-01", "2022-12-31")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  theme_bw() +
+  theme(text = element_text(size = 38), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        # axis.text.x = element_blank(),
+        legend.position = "right",
+        legend.key.height = unit(1.8, "cm"),
+        legend.title = element_text(size = 30, angle = 270),
+        legend.title.align = 0.5,
+        legend.direction = "vertical",
+        axis.text.x = element_blank()
+        ) +
+    guides(fill = guide_colourbar(title.position = "right"))
+
+  # theme(text = element_text(size = 35), #35
+  #       axis.text = element_text(color = "black"),
+  #       axis.title.x = element_blank(),
+  #       legend.position = "top",
+  #       legend.box = "horizontal") +
+  # guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5,
+  #                               barwidth = 50, barheight = 1,
+  #                               frame.colour = "black", ticks.colour = "black"))
+```
+
+
+```{r}
+
+#Setting plotting order phytoplankton groups
+
+#Order phytoplankton groups roughly from smallest to largest - create order list
+order_chem <- c("cyan", "hapt", "GA", "cryp",
+                   "dino", "raph", "dict", "diat")
+
+#Chemtax full data - Specify order of phyto groups for figures
+chem_tchla <- arrange(mutate(chem_tchla,
+                                group = factor(group,
+                                levels = order_chem)))
+
+
+```
+
+```{r}
+# f5 <- 
+  
+f4 <- chem_tchla %>%
+  ggplot() +
+  # annotate("rect", xmin = date("2024-03-05"), xmax = date("2024-04-30"),
+  #          ymin = 0, ymax = Inf, fill = 'darkgreen', alpha = 0.2) +
+  geom_bar(aes(date, contribution, fill = fct_rev(group)),
+           position = "stack", stat = "identity",
+           alpha = 1, color = "black", size = 1) +
+  # geom_vline(xintercept = as_date("2024-03-18"),
+  #            linetype = "solid", size = 1, color = "black") +
+  # annotate("text", x = as.Date("2024-01-15"), y = 5.4,
+  #          label = "d)",
+  #          size = 10) +
+  # annotate("text", x = as.Date("2024-12-15"), y = 5.4,
+  #          label = "5m",
+  #          size = 10) +
+  ggsci::scale_fill_npg() +
+  # lims(y = c(0, 5)) +
+  scale_x_date(limits = as.Date(c("2022-01-01", "2022-12-31")),
+               expand = c(0, 0),
+               date_breaks = "months", date_labels = "%b") +
+  theme_bw() +
+  labs(y = bquote("Phyto. (mg" ~ m^-3*")"),
+       fill = "Group") +
+  theme(
+        legend.position = "right",
+        # legend.position = c(1.02, 0.5),
+        legend.key.height = unit(0.5, "cm"),
+        # legend.text = element_text(size = 25),
+        legend.title = element_blank(),
+        text = element_text(size = 38), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+        # axis.text.y = element_blank())
+```
+
+```{r}
+test2 <- ggarrange(f1, f2, f3, f4, ncol = 1)
+
+  
+
+ggsave(here("figures", "panel_kc10_2022_CHEMTAX_2.png"), test2,
+        width = 16, height = 16, dpi = 300)
+```
+
+
+
+
+

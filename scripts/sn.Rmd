@@ -355,7 +355,7 @@ ggsave(here("figures", "s_star_section_all.jpg"), s_com,
 
 ```{r}
 s_n <- n_dm %>%
-  filter(pres > 10) %>% 
+  filter(pres > 9 & pres < 101) %>% 
   mutate(s_n = sio2_dm/no2_dm,
          n_s = no2_dm/sio2_dm,
          sn = sio2_dm - no2_dm) %>% 
@@ -364,7 +364,9 @@ s_n <- n_dm %>%
             med_n_s = median(n_s),
             med_sn = median(sn),
             med_si = median(sio2_dm),
-            med_n = median(no2_dm)) %>% 
+            med_n = median(no2_dm),
+            n = n(),
+            max_dep = max(pres)) %>% 
   ungroup()
 ```
 
