@@ -253,11 +253,11 @@ chem_dup <- chem_tchla %>%
 # f1 <- 
   
 f1_22 <-   ggplot() + 
-  geom_line(data = wind22, aes(x = date, y = WindSpd_Med^3),
+  geom_line(data = wind22, aes(x = date, y = WindSpd_Med),
             size = 2) +
-  ylim(0, 6000) +
-  labs(y = bquote(Wind~"("*m^-3*s^-3*")")) +
-  scale_x_date(limits = as_date(c("2022-01-01", "2022-12-31")),
+  ylim(0, 12) +
+  labs(y = bquote(Wind~"("*m*s^-1*")")) +
+  scale_x_date(limits = as_date(c("2022-08-01", "2022-09-01")),
                expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
   theme_bw() +
   theme(text = element_text(size = 35), #35
@@ -270,11 +270,12 @@ f1_22 <-   ggplot() +
 # f1 <- 
   
 f1_24 <-   ggplot() + 
-  geom_line(data = wind24, aes(x = date, y = WindSpd_Med^3),
+  geom_line(data = wind24, aes(x = date, y = WindSpd_Med),
             size = 2) +
-  ylim(0, 6000) +
+  ylim(0, 12) +
+  labs(y = bquote(Wind~"("*m*s^-1*")")) +
   labs(y = bquote(Wind~"("*m^-3*s^-3*")")) +
-  scale_x_date(limits = as_date(c("2024-01-01", "2024-12-31")),
+  scale_x_date(limits = as_date(c("2024-08-01", "2024-09-01")),
                expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
   theme_bw() +
   theme(text = element_text(size = 35), #35
@@ -303,7 +304,7 @@ fd_22 <- q %>%
   ggplot(aes(x = date, y = Q/10^3, fill = Watershed_group)) +
   geom_area() +
   scale_fill_uchicago() +
-  scale_x_date(limits = as.Date(c("2022-01-01", "2022-12-31")),
+  scale_x_date(limits = as.Date(c("2022-08-01", "2022-09-01")),
                expand = c(0, 0),
                date_breaks = "months", date_labels = "%b") +
   theme_bw() +
@@ -329,7 +330,7 @@ fd_24 <- q %>%
   ggplot(aes(x = date, y = Q/10^3, fill = Watershed_group)) +
   geom_area() +
   scale_fill_uchicago() +
-  scale_x_date(limits = as.Date(c("2024-01-01", "2024-12-31")),
+  scale_x_date(limits = as.Date(c("2024-08-01", "2024-09-01")),
                expand = c(0, 0),
                date_breaks = "months", date_labels = "%b") +
   theme_bw() +
@@ -391,7 +392,7 @@ f2_22 <-
                                          expression(Chl[BUOY]),
                                          expression(Salinity[BUOY]),
                                      expression(Temp[BUOY]))) +
-  scale_x_date(limits = as_date(c("2022-01-01", "2022-12-31")),
+  scale_x_date(limits = as_date(c("2022-08-01", "2022-09-01")),
                expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
   ylab(expression(atop(Chl~"(mg" ~ m^-3*")",
                        paste("Salinity,"~"Temp")))) +
@@ -425,7 +426,7 @@ b22_long %>%
                                          expression(Chl[BUOY]),
                                          expression(Salinity[BUOY]),
                                      expression(Temp[BUOY]))) +
-  scale_x_date(limits = as_date(c("2022-01-01", "2023-01-01")),
+  scale_x_date(limits = as_date(c("2022-08-01", "2022-09-01")),
                expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
   ylab(expression(atop(Chl~"(mg" ~ m^-3*")",
                        paste("Salinity,"~"Temp")))) +
@@ -461,7 +462,7 @@ f2_24 <-
                                          expression(Chl[BUOY]),
                                          expression(Salinity[BUOY]),
                                      expression(Temp[BUOY]))) +
-  scale_x_date(limits = as_date(c("2024-01-01", "2024-12-31")),
+  scale_x_date(limits = as_date(c("2024-08-01", "2024-09-01")),
                expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
   ylab(expression(atop(Chl~"(mg" ~ m^-3*")",
                        paste("Salinity,"~"Temp")))) +
@@ -481,7 +482,7 @@ wfb <- ggarrange(f1_22, f1_24, fd_22, fd_24, f2_22, f2_24, ncol = 2)
 
   
 
-ggsave(here("figures", "panel_kc10_w_f_b.png"), wfb,
+ggsave(here("figures", "panel_kc10_w_f_b_Aug.png"), wfb,
         width = 24, height = 12, dpi = 300)
 ```
 
