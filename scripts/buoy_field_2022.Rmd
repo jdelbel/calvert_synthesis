@@ -76,6 +76,10 @@ b22 <- b22 %>%
   select(date_corr, fl_med_day) %>% 
   distinct()
 
+b24 <- b24 %>% 
+  select(date_corr, fl_med_day) %>% 
+  distinct()
+
 bsal2 <- bsal %>% 
   mutate(measurementTime = mdy_hm(measurementTime),
          date = date(measurementTime)) %>% 
@@ -692,12 +696,12 @@ f4 <- chem_tchla %>%
 ```
 
 ```{r}
-test2 <- ggarrange(f1, f2, f3, f4, ncol = 1)
-
-  
-
-ggsave(here("figures", "panel_kc10_2022_CHEMTAX_2.png"), test2,
-        width = 16, height = 16, dpi = 300)
+# test2 <- ggarrange(f1, f2, f3, f4, ncol = 1)
+# 
+#   
+# 
+# ggsave(here("figures", "panel_kc10_2022_CHEMTAX_2.png"), test2,
+#         width = 16, height = 16, dpi = 300)
 ```
 ```{r}
 wind_22_24 <- wind %>% 
@@ -762,13 +766,28 @@ f5 <- q %>%
 ```
 
 ```{r}
-test3 <- ggarrange(f1, f2, f5, ncol = 1)
-
-  
-
-ggsave(here("figures", "panel_kc10_2022_CHEMTAX_2_FW.png"), test3,
-        width = 16, height = 12, dpi = 300)
+# test3 <- ggarrange(f1, f2, f5, ncol = 1)
+# 
+#   
+# 
+# ggsave(here("figures", "panel_kc10_2022_CHEMTAX_2_FW.png"), test3,
+#         width = 16, height = 12, dpi = 300)
 ```
+```{r}
+q_22 <- q %>% 
+  filter(year == 2022)
+
+#2022-07-12 to 15 discharge peaks
+#2022-07-24 to 26 buoy salinity minimum
+#so 9ish day lag?
+#is this consistent?
+
+
+```
+
+
+
+
 ```{r}
 
 f6 <- q %>% 
@@ -795,6 +814,7 @@ f6 <- q %>%
         # axis.text.y = element_blank())
 
 ```
+
 ```{r}
 test4 <- ggarrange(f5, f6, ncol = 1)
 
@@ -805,12 +825,279 @@ ggsave(here("figures", "panel_kc10_2022_2024_Q.png"), test4,
 ```
 
 ```{r}
-b22 %>% 
-  left_join(wind22) %>% 
+b_all <- rbind(b22, b24)
+
+bf1 <- b_all %>% 
+  left_join(weath) %>%
   mutate(month = month(date)) %>% 
-  filter(month == 8) %>% 
-  ggplot(aes(x = mean_sal, y = fl_med_day)) +
-  geom_point() +
-  scale_color_viridis_b()
+  filter(year == 2022) %>% 
+  mutate(month = month(date)) %>% 
+  ggplot(aes(x = lag(Q_Total/10^3, 9), y = mean_sal)) +
+  geom_point(aes(color = as.factor(month)), size = 4) +
+  geom_smooth(method = "lm") +
+  facet_grid(year~.) +
+  ggpubr::stat_cor(aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")),
+                   p.accuracy = 0.001, size = 9, label.y.npc = 0.1) +
+  ggpubr::stat_regline_equation(size = 9, label.y.npc = 0.16) +
+  ylim(15, 32) +
+  xlim(0, 5) +
+  labs(x = bquote(Q[TOTAL-9] ~ "("*10^3~m^3*~s^-1*")"),
+       y = bquote(Salinity[BUOY]),
+       color = "Month") +
+  scale_color_viridis_d(option = "turbo") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        legend.position = "right",
+        axis.text = element_text(color = 'black'),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+bf2 <- b_all %>% 
+  left_join(weath) %>% 
+  filter(year == 2024) %>% 
+  mutate(month = month(date)) %>% 
+  ggplot(aes(x = lag(Q_Total/10^3, 6), y = mean_sal)) +
+  geom_point(aes(color = as.factor(month)), size = 4) +
+  geom_smooth(method = "lm") +
+  facet_grid(year~.) +
+  ggpubr::stat_cor(aes(label = paste(..rr.label.., ..p.label.., sep = "~`,`~")),
+                   p.accuracy = 0.001, size = 9, label.y.npc = 0.1) +
+  ggpubr::stat_regline_equation(size = 9, label.y.npc = 0.16) +
+  ylim(15, 32) +
+  xlim(0, 5) +
+  labs(x = bquote(Q[TOTAL-6] ~ "("*10^3~m^3*~s^-1*")"),
+       y = bquote(Salinity[BUOY]),
+       color = "Month") +
+  scale_color_viridis_d(option = "turbo") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        legend.position = "right",
+        axis.text = element_text(color = 'black'),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+bfig <- bf1/bf2 + plot_layout(guides = "collect")
+
+ggsave(here("figures", "discharge_buoy_sal.png"), bfig,
+        width = 8, height = 12, dpi = 300)
 ```
+
+```{r}
+b_all <- b_all %>% 
+  group_by(year) %>% 
+  mutate(csum = cumsum(fl_med_day)) %>% 
+  mutate(max = max(csum)) %>% 
+  ungroup()
+```
+
+```{r}
+dates <- as.data.frame(seq(as.Date("2024-01-01"),as.Date("2024-12-04"),1))
+
+b24_cor1 <- b24 %>% 
+  filter(date <= "2024-03-19" | date >= "2024-03-25")
+
+b24_cor2 <- dates %>% 
+  rename(date = `seq(as.Date("2024-01-01"), as.Date("2024-12-04"), 1)`) %>% 
+  left_join(b24_cor1) %>% 
+  select(date, fl_med_day)
+
+b24_cor3 <- data.frame(date = seq(b24_cor2$date[1], b24_cor2$date[nrow(b24_cor2)], by = 1)) %>%
+  full_join(b24_cor2, by = "date") %>%
+  mutate(fl_fill = na.approx(fl_med_day))
+
+b22_cm <- b22 %>% 
+  mutate(med = median(fl_med_day),
+         fl_med = fl_med_day - med,
+         csum = cumsum(fl_med)) %>% 
+  select(date, fl = fl_med_day, csum)
+
+b24_cm <- b24_cor3 %>% 
+  mutate(med = median(fl_fill),
+         fl_med = fl_fill - med,
+         csum = cumsum(fl_med)) %>% 
+  select(date, fl = fl_fill, csum)
+
+cm <- rbind(b22_cm, b24_cm)
+
+
+csf_1 <- cm %>% 
+  mutate(yday = yday(date),
+         year = year(date),
+         date2 = as.Date(yday, origin = "2024-01-01")) %>% 
+  ggplot(aes(x = date2, y = fl)) +
+  geom_line(aes(color = as.factor(year)), size = 2) +
+  scale_x_date(date_breaks = "months", date_labels = "%b") +
+  scale_color_simpsons()+
+  scale_color_jama() +
+  ylab(bquote("Flu"[BUOY]~"(mg" ~ m^-2*")")) +
+  labs(color = NULL) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+
+csf_2 <- cm %>% 
+  mutate(yday = yday(date),
+         year = year(date),
+         date2 = as.Date(yday, origin = "2024-01-01")) %>% 
+  ggplot(aes(x = date2, y = csum)) +
+  geom_line(aes(color = as.factor(year)), size = 2) +
+  scale_x_date(date_breaks = "months", date_labels = "%b") +
+  scale_color_jama() +
+  ylab(bquote("Int. Flu"[BUOY]~"(mg" ~ m^-2*")")) +
+  labs(color = NULL) +
+  theme_bw() +
+  theme(legend.position = c(0.9, 0.13),
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+
+csfig <- csf_1/csf_2 
+
+ggsave(here("figures", "cum_sum.png"), csfig,
+        width = 16, height = 10, dpi = 300)
+```
+
+
+
+```{r}
+fs1 <- b22 %>% 
+  left_join(weath) %>% 
+  mutate(month = month(date)) %>%
+  ggplot(aes(x = mean_sal, y = fl_med_day)) +
+  geom_point(aes(color = as.factor(month)), size = 4) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(x = bquote(Salinity[BUOY]),
+       y = bquote(flu[Buoy]~"("*mg~m^-3*")"),
+       color = "Month") +
+  xlim(15, 32) +
+  ylim(0, 22) +
+  ggtitle("2022") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        legend.position = "right",
+        axis.text = element_text(color = 'black'),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+fs2 <- b24 %>%
+  left_join(weath) %>% 
+  mutate(month = month(date)) %>%
+  ggplot(aes(x = mean_sal, y = fl_med_day)) +
+  geom_point(aes(color = as.factor(month)), size = 4) +
+  scale_color_viridis_d(option = "turbo") +
+  xlim(15, 32) +
+  ylim(0, 22) +
+  labs(x = bquote(Salinity[BUOY]),
+       y = bquote(FLu[Buoy]~"("*mg~m^-3*")"),
+       color = "Month") +
+  ggtitle("2024") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        legend.position = "right",
+        axis.text = element_text(color = 'black'),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+fsfig <- fs1/fs2 + plot_layout(guides = "collect")
+
+ggsave(here("figures", "buoy_sal_flu.png"), fsfig,
+        width = 8, height = 12, dpi = 300)
+```
+```{r}
+ft1 <- b22 %>% 
+  left_join(weath) %>% 
+  mutate(month = month(date)) %>%
+  ggplot(aes(x = mean_temp, y = fl_med_day)) +
+  geom_point(aes(color = as.factor(month)), size = 4) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(x = bquote(Temp[BUOY]),
+       y = bquote(flu[Buoy]~"("*mg~m^-3*")"),
+       color = "Month") +
+  xlim(4, 17) +
+  ylim(0, 22) +
+  ggtitle("2022") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        legend.position = "right",
+        axis.text = element_text(color = 'black'),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+ft2 <- b24 %>%
+  left_join(weath) %>% 
+  mutate(month = month(date)) %>%
+  ggplot(aes(x = mean_temp, y = fl_med_day)) +
+  geom_point(aes(color = as.factor(month)), size = 4) +
+  scale_color_viridis_d(option = "turbo") +
+  xlim(4, 17) +
+  ylim(0, 22) +
+  labs(x = bquote(Temp[BUOY]),
+       y = bquote(FLu[Buoy]~"("*mg~m^-3*")"),
+       color = "Month") +
+  ggtitle("2024") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        legend.position = "right",
+        axis.text = element_text(color = 'black'),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+ftfig <- ft1/ft2 + plot_layout(guides = "collect")
+
+ggsave(here("figures", "buoy_temp_flu.png"), ftfig,
+        width = 8, height = 12, dpi = 300)
+```
+```{r}
+fw1 <- b22 %>% 
+  left_join(weath) %>% 
+  mutate(month = month(date)) %>%
+  ggplot(aes(x = wind_b1_3, y = fl_med_day)) +
+  geom_point(aes(color = as.factor(month)), size = 4) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(x = bquote(WS[LO-3-AVG]~"("*m~s^-1*")"),
+       y = bquote(flu[Buoy]~"("*mg~m^-3*")"),
+       color = "Month") +
+  xlim(0, 15) +
+  ylim(0, 22) +
+  ggtitle("2022") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        legend.position = "right",
+        axis.text = element_text(color = 'black'),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+fw2 <- b24 %>%
+  left_join(weath) %>% 
+  mutate(month = month(date)) %>%
+  ggplot(aes(x = wind_b1_3, y = fl_med_day)) +
+  geom_point(aes(color = as.factor(month)), size = 4) +
+  scale_color_viridis_d(option = "turbo") +
+  xlim(0, 15) +
+  ylim(0, 22) +
+  labs(x = bquote(WS[LO-3-AVG]~"("*m~s^-1*")"),
+       y = bquote(FLu[Buoy]~"("*mg~m^-3*")"),
+       color = "Month") +
+  ggtitle("2024") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        legend.position = "right",
+        axis.text = element_text(color = 'black'),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+fwfig <- fw1/fw2 + plot_layout(guides = "collect")
+
+ggsave(here("figures", "buoy_wind_flu.png"), fwfig,
+        width = 8, height = 12, dpi = 300)
+```
+
+
+
+
+
+
+
 
