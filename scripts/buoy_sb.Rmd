@@ -1,0 +1,819 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Some new interpolation tutorials to consider:
+https://search.r-project.org/CRAN/refmans/rioja/html/interp.dataset.html
+https://github.com/hdugan/NTLlakeloads
+
+```{r}
+#Upload packages
+library(tidyverse)
+library(here)
+library(readxl)
+library(patchwork)
+library(lubridate)
+library(MBA)
+library(mgcv)
+library(FNN)
+library(zoo)
+library(reshape2)
+library(rioja)
+library(egg)
+library(palr)
+library(ggsci)
+
+```
+
+```{r}
+# 2024 corrected buoy data
+b22 <- read.csv(here("outputs", "buoy_corr_dm_2022.csv"))
+b23 <- read.csv(here("outputs", "buoy_corr_dm_2023.csv"))
+b24 <- read.csv(here("outputs", "buoy_corr_dm_2024.csv"))
+b25 <- read.csv(here("outputs", "buoy_corr_dm_2025.csv"))
+
+bsal <- read.csv(here("files", "buoy_ts_all.csv"))
+
+wind <- read_csv(here("files", "wind_all.csv"))
+
+weath <- read_csv(here("outputs", "enviro_weather_2025-04-14.csv"))
+
+```
+```{r}
+b22 <- b22 %>% 
+  select(date_corr, fl_med_day) %>% 
+  distinct()
+
+b23 <- b23 %>% 
+  select(date_corr, fl_med_day) %>% 
+  distinct()
+
+b24 <- b24 %>% 
+  select(date_corr, fl_med_day) %>% 
+  distinct()
+
+b25 <- b25 %>% 
+  select(date_corr, fl_med_day) %>% 
+  distinct()
+```
+
+
+
+```{r}
+q <- weath %>% 
+  select(date, Q_GM, Q_SM, Q_RA) %>% 
+  pivot_longer(c(Q_GM:Q_RA), names_to = "Watershed_group", values_to = "Q") %>% 
+  drop_na() %>% 
+  group_by(date) %>% 
+  mutate(n = n()) %>% 
+  ungroup() %>% 
+  mutate(year = year(date))
+```
+
+
+
+```{r}
+b22 <- b22 %>% 
+  select(date_corr, fl_med_day) %>% 
+  distinct()
+
+bsal2 <- bsal %>% 
+  mutate(measurementTime = mdy_hm(measurementTime),
+         date = date(measurementTime)) %>% 
+  filter(WaterSalinity_UQL == 2 & (year == 2022 | year == 2024)) %>% 
+  group_by(date) %>% 
+  summarise(mean_sal = mean(WaterSalinity)) %>% 
+  ungroup()
+
+btemp <- bsal %>% 
+  mutate(measurementTime = mdy_hm(measurementTime),
+         date = date(measurementTime)) %>% 
+  filter(WaterTemp_UQL == 2 & (year == 2022 | year == 2024)) %>% 
+  group_by(date) %>% 
+  summarise(mean_temp = mean(WaterTemp)) %>% 
+  ungroup()
+
+bsal2 <- bsal2 %>% 
+  left_join(btemp)
+
+f22 <- f %>% 
+  mutate(year = year(date)) %>% 
+  filter(year == 2022)
+
+wind <- wind %>% 
+  mutate(date = mdy(date))
+
+wind22 <- wind %>% 
+  filter(year == 2022)
+
+wind24 <- wind %>% 
+  filter(year == 2024)
+```
+
+```{r}
+cd <- cd %>% 
+  filter(filter_type == "Bulk GF/F" & line_out_depth == 0) %>% 
+  select(date, chla) %>% 
+  mutate(chla = case_when(date == "2022-05-05" ~ 1.41,
+                          TRUE ~ as.numeric(chla)))
+
+cm <- cm %>% 
+  filter(filter_type == "Bulk GF/F") %>% 
+  select(date, pres = line_out_depth, chla) %>% 
+  mutate(pres = case_when(pres == 0 ~ 1,
+                          TRUE ~ as.numeric(pres)))
+
+cs <- cs %>% 
+  filter(filter_type == "Bulk GF/F") %>% 
+  select(date, pres = line_out_depth, chla) %>% 
+  mutate(pres = case_when(pres == 0 ~ 1,
+                          TRUE ~ as.numeric(pres)))
+
+c2 <- rbind(cm, cs)
+
+c2_wide <- c2 %>% 
+  pivot_wider(names_from = "date", values_from = "chla")
+```
+
+```{r}
+# fm <- fm %>% 
+#   select(pres = `Pressure (dbar)`, flu = `Fluorometry Chlorophyll (ug/L)`)
+# 
+# fmc <- fm %>% 
+#   left_join(cm) 
+```
+```{r}
+#lets just interpolate the chlorophyll bottle data rather than "fix" the fluorometer
+spec <- c2_wide %>% 
+  select(2:3)
+
+# spec <- as.data.frame(chl_mm_wide$chl_dm)
+depth <- c2_wide$pres
+
+# interpolate new dataset to every 0.5 cm
+# using default method (linear)
+x.new <- seq(1, 101, by = 1)
+sp.interp <- interp.dataset(y = spec, x = depth, xout = x.new,
+                               method = "loess", span = 0.5)
+
+interp <- as.data.frame(sp.interp)
+
+interp <- interp %>% 
+  mutate(pres = x.new) %>% 
+  pivot_longer(cols = (1:2), names_to = "date", values_to = "f_npq") %>% 
+  # mutate(date = date(date)) %>% 
+  mutate_at(vars(f_npq), funs(round(., 2))) %>% 
+  # mutate(date = as.Date("2022-03-09")) %>% 
+  select(date, pres, f_npq) %>% 
+  mutate(date = date(date))
+```
+
+
+
+```{r}
+b22 <- b22 %>% 
+  mutate(date = lubridate::ymd(date_corr),
+         year = lubridate::year(date),
+         yday = lubridate::yday(date)) 
+
+b22 <- b22 %>% 
+  left_join(cd) %>% 
+  left_join(bsal2)
+
+b24 <- b24 %>% 
+  mutate(date = lubridate::ymd(date_corr),
+         year = lubridate::year(date),
+         yday = lubridate::yday(date)) 
+
+b24 <- b24 %>% 
+  left_join(cd) %>% 
+  left_join(bsal2)
+```
+
+
+
+```{r}
+#Working with chemtax data to make it easy to plot
+
+#Making the date column a date format
+chem <- chem %>% 
+  mutate(date2 = lubridate::mdy(Date)) 
+
+#Selecting appropriate columns and renaming to easy to work with names
+chem <- chem %>%
+  select(date = date2, cyan = Cyanobacteria, hapt = Hapto, 
+         GA = `Prasinophytes-3`, cryp = Cryptophytes,
+         dino = `Dinoflagellates-1`, raph = Raphido,
+         dict = Dictyo, diat = `Diatoms-1`)
+
+#Pivoting to long/tidy for plotting in ggplot
+chem <- chem %>% 
+  pivot_longer(c(cyan:diat), names_to = "group", values_to = "contribution")
+
+#Calculating TChla for each sample
+chem_tchla <- chem %>% 
+  group_by(date, group) %>% 
+  summarise(contribution = mean(contribution)) %>% 
+  ungroup() %>% 
+  group_by(date) %>% 
+  mutate(tchla = sum(contribution)) %>% 
+  ungroup()
+
+
+#checking to see if there are any duplicates - there were replicates taken for DFO comparisons. None found because I already averaged these for the manuscript.
+chem_dup <- chem_tchla %>%
+  distinct(date, tchla) %>% 
+  group_by(date) %>% 
+  mutate(dup = n()) %>% 
+  ungroup() %>% 
+  filter(dup > 1)
+
+#Good to move forward
+```
+
+
+
+```{r}
+# f1 <- wind24 %>% 
+#   ggplot(aes(x = date, y = WindSpd_Med^3, color = as.factor(year))) +
+#   geom_line(size = 2) +
+#   ggsci::scale_color_futurama() +
+#   scale_x_date(limits = as_date(c("2024-01-01", "2024-12-31")),
+#                expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+#   labs(y = bquote(Wind~"("*m^-3*")")) +
+#   theme_bw() +
+#   theme(legend.position = "none",
+#         text = element_text(size = 35), #35
+#         axis.text = element_text(color = "black"),
+#         axis.title.x = element_blank(),
+#         axis.text.x = element_blank())
+```
+
+
+```{r}
+# f1 <- 
+  
+f1_22 <-   ggplot() + 
+  geom_line(data = wind22, aes(x = date, y = WindSpd_Med),
+            size = 2) +
+  ylim(0, 12) +
+  labs(y = bquote(Wind~"("*m*s^-1*")")) +
+  scale_x_date(limits = as_date(c("2022-08-01", "2022-09-01")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank())
+```
+
+```{r}
+# f1 <- 
+  
+f1_24 <-   ggplot() + 
+  geom_line(data = wind24, aes(x = date, y = WindSpd_Med),
+            size = 2) +
+  ylim(0, 12) +
+  labs(y = bquote(Wind~"("*m*s^-1*")")) +
+  labs(y = bquote(Wind~"("*m^-3*s^-3*")")) +
+  scale_x_date(limits = as_date(c("2024-08-01", "2024-09-01")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank())
+```
+
+```{r}
+# Order locations from fjord to shelf
+riv_loc <- c("Q_GM",
+             "Q_SM",
+             "Q_RA",
+             "Q_tot")
+
+q <- arrange(mutate(q, 
+                      Watershed_group = factor(Watershed_group,
+                                               levels = riv_loc)))
+```
+
+```{r}
+fd_22 <- q %>% 
+  filter(year == 2022) %>% 
+  ggplot(aes(x = date, y = Q/10^3, fill = Watershed_group)) +
+  geom_area() +
+  scale_fill_uchicago() +
+  scale_x_date(limits = as.Date(c("2022-08-01", "2022-09-01")),
+               expand = c(0, 0),
+               date_breaks = "months", date_labels = "%b") +
+  theme_bw() +
+  labs(y = bquote("Dis." ~ "("*10^3~m^3*~s^-1*")"),
+       fill = NULL) +
+  ylim(0, 5) +
+  theme(
+        legend.position = "none",
+        # legend.position = c(1.02, 0.5),
+        legend.key.height = unit(0.5, "cm"),
+        # legend.text = element_text(size = 25),
+        legend.title = element_blank(),
+        text = element_text(size = 38), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank())
+        # axis.text.y = element_blank())
+```
+
+```{r}
+fd_24 <- q %>% 
+  filter(year == 2024) %>% 
+  ggplot(aes(x = date, y = Q/10^3, fill = Watershed_group)) +
+  geom_area() +
+  scale_fill_uchicago() +
+  scale_x_date(limits = as.Date(c("2024-08-01", "2024-09-01")),
+               expand = c(0, 0),
+               date_breaks = "months", date_labels = "%b") +
+  theme_bw() +
+  labs(y = bquote("Dis." ~ "("*10^3~m^3*~s^-1*")"),
+       fill = NULL) +
+  ylim(0, 5) +
+  theme(
+        legend.position = "right",
+        # legend.position = c(1.02, 0.5),
+        legend.key.height = unit(0.5, "cm"),
+        # legend.text = element_text(size = 25),
+        legend.title = element_blank(),
+        text = element_text(size = 38), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank())
+        # axis.text.y = element_blank())
+```
+
+```{r}
+b22_long <- b22 %>%
+  select(date_corr, chla, fl_med_day, mean_sal, mean_temp) %>% 
+  pivot_longer(c(chla, fl_med_day, mean_sal, mean_temp),
+              names_to = "par", values_to = "val") %>% 
+  mutate(date = date(date_corr))
+```
+
+```{r}
+
+b24_long <- b24 %>%
+  select(date_corr, chla, fl_med_day, mean_sal, mean_temp) %>% 
+  pivot_longer(c(chla, fl_med_day, mean_sal, mean_temp),
+              names_to = "par", values_to = "val") %>% 
+  mutate(date = date(date_corr))
+
+```
+
+```{r}
+f2_22 <-
+  b22_long %>% 
+  ggplot(aes(x = date, y = val, color = par)) +
+  annotate("rect", xmin = date("2024-03-05"), xmax = date("2024-04-30"),
+           ymin = 0, ymax = Inf, fill = 'darkgreen', alpha = 0.2) +
+  geom_line(data = filter(b22_long,
+                          par == "fl_med_day"),
+            size = 2) +
+  geom_line(data = filter(b22_long,
+                          par == "mean_sal"),
+            size = 2) +
+  geom_line(data = filter(b22_long,
+                          par == "mean_temp"),
+            size = 2) +
+  geom_point(data = filter(b22_long,
+                          par == "chla"),
+            size = 4, pch = 8, stroke = 2) +
+  ggsci::scale_color_jama(labels = c(expression(Chl[Discrete]),
+                                         expression(Chl[BUOY]),
+                                         expression(Salinity[BUOY]),
+                                     expression(Temp[BUOY]))) +
+  scale_x_date(limits = as_date(c("2022-08-01", "2022-09-01")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  ylab(expression(atop(Chl~"(mg" ~ m^-3*")",
+                       paste("Salinity,"~"Temp")))) +
+  labs(color = NULL) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+```
+
+```{r}
+b22_long %>% 
+  mutate(month = month(date)) %>% 
+  ggplot(aes(x = date, y = val, color = par)) +
+  annotate("rect", xmin = date("2024-03-05"), xmax = date("2024-04-30"),
+           ymin = 0, ymax = Inf, fill = 'darkgreen', alpha = 0.2) +
+  geom_line(data = filter(b22_long,
+                          par == "fl_med_day"),
+            size = 2) +
+  geom_line(data = filter(b22_long,
+                          par == "mean_sal"),
+            size = 2) +
+  geom_line(data = filter(b22_long,
+                          par == "mean_temp"),
+            size = 2) +
+  geom_point(data = filter(b22_long,
+                          par == "chla"),
+            size = 4, pch = 8, stroke = 2) +
+  ggsci::scale_color_jama(labels = c(expression(Chl[Discrete]),
+                                         expression(Chl[BUOY]),
+                                         expression(Salinity[BUOY]),
+                                     expression(Temp[BUOY]))) +
+  scale_x_date(limits = as_date(c("2022-08-01", "2022-09-01")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  ylab(expression(atop(Chl~"(mg" ~ m^-3*")",
+                       paste("Salinity,"~"Temp")))) +
+  labs(color = NULL) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+```
+
+
+
+```{r}
+f2_24 <-
+  b24_long %>% 
+  ggplot(aes(x = date, y = val, color = par)) +
+  annotate("rect", xmin = date("2024-03-05"), xmax = date("2024-04-30"),
+           ymin = 0, ymax = Inf, fill = 'darkgreen', alpha = 0.2) +
+  geom_line(data = filter(b24_long,
+                          par == "fl_med_day"),
+            size = 2) +
+  geom_line(data = filter(b24_long,
+                          par == "mean_sal"),
+            size = 2) +
+  geom_line(data = filter(b24_long,
+                          par == "mean_temp"),
+            size = 2) +
+  geom_point(data = filter(b24_long,
+                          par == "chla"),
+            size = 4, pch = 8, stroke = 2) +
+  ggsci::scale_color_jama(labels = c(expression(Chl[Discrete]),
+                                         expression(Chl[BUOY]),
+                                         expression(Salinity[BUOY]),
+                                     expression(Temp[BUOY]))) +
+  scale_x_date(limits = as_date(c("2024-08-01", "2024-09-01")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  ylab(expression(atop(Chl~"(mg" ~ m^-3*")",
+                       paste("Salinity,"~"Temp")))) +
+  labs(color = NULL) +
+  theme_bw() +
+  theme(legend.position = "right",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        # axis.text.x = element_blank(),
+        axis.title.y = element_blank(),
+        axis.text.y = element_blank())
+```
+
+```{r}
+wfb <- ggarrange(f1_22, f1_24, fd_22, fd_24, f2_22, f2_24, ncol = 2)
+
+  
+
+ggsave(here("figures", "panel_kc10_w_f_b_Aug.png"), wfb,
+        width = 24, height = 12, dpi = 300)
+```
+
+
+
+```{r}
+
+#Setting plotting order phytoplankton groups
+
+#Order phytoplankton groups roughly from smallest to largest - create order list
+order_chem <- c("cyan", "hapt", "GA", "cryp",
+                   "dino", "raph", "dict", "diat")
+
+#Chemtax full data - Specify order of phyto groups for figures
+chem_tchla <- arrange(mutate(chem_tchla,
+                                group = factor(group,
+                                levels = order_chem)))
+
+
+```
+
+```{r}
+# f5 <- 
+  
+chem_tchla %>%
+  ggplot() +
+  geom_bar(aes(date, contribution, fill = fct_rev(group)),
+           position = "stack", stat = "identity",
+           alpha = 1, color = "black", size = 1) +
+  ggsci::scale_fill_npg() +
+  scale_x_date(limits = as.Date(c("2019-01-01", "2024-12-31")),
+               expand = c(0, 0),
+               date_breaks = "years", date_labels = "%Y") +
+  theme_bw() +
+  labs(y = bquote("Phyto. (mg" ~ m^-3*")"),
+       fill = "Group") +
+  theme(
+        legend.position = "right",
+        # legend.position = c(1.02, 0.5),
+        legend.key.height = unit(0.5, "cm"),
+        # legend.text = element_text(size = 25),
+        legend.title = element_blank(),
+        text = element_text(size = 38), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+        # axis.text.y = element_blank())
+
+ggsave(here("figures", "chemtax_19-24.png"),
+        width = 16, height = 6, dpi = 300)
+```
+```{r}
+test <- weath %>% 
+  select(date, Q_Total) %>% 
+  filter(!is.na(Q_Total)) %>% 
+  mutate(yday = yday(date),
+         year = year(date)) %>% 
+  group_by(yday) %>% 
+  mutate(mean = mean(Q_Total)) %>% 
+  ungroup()
+
+test %>% 
+  filter(year == 2020) %>% 
+  ggplot() +
+  geom_line(aes(x = yday, y = mean)) +
+  geom_line(aes(x = yday, y = Q_Total, color = as.factor(year)))
+
+```
+
+
+
+
+```{r}
+#Now plot 2024 CTD profiles
+# f2 <- 
+  
+# f4 <- 
+  
+# f3 <-  
+# https://cran.r-project.org/web/packages/palr/vignettes/nasa_chla.html
+maxrange <- c(0.01, 35)
+pal <- chl_pal(palette = TRUE)
+sb <- which(pal$breaks >= maxrange[1] & pal$breaks <= maxrange[2])
+
+
+f22_plot <- f22 %>% 
+  select(date, pres, f_npq)
+
+f22_plot <- rbind(f22_plot, interp)
+
+  
+f3 <-
+  f22_plot %>% 
+  filter(pres < 51) %>% 
+  mutate(day = 15,
+         year = year(date),
+         month = month(date)) %>% 
+  unite(date_2, c(year, month, day), sep = "-", remove = F) %>% 
+  mutate(date_2 = date(date_2)) %>% 
+  ggplot(aes(x = date)) +
+  geom_tile(aes(y = pres, fill = f_npq)) +
+  # geom_vline(xintercept = as_date("2024-03-18"),
+  #            linetype = "solid", size = 1, color = "white") +
+  geom_hline(yintercept = 5,
+             linetype = "dashed", size = 1, color = "white") +
+  # annotate("text", x = as.Date("2024-01-15"), y = 5,
+  #          label = "c)",
+  #          size = 10) +
+  # annotate("text", x = as.Date("2024-11-19"), y = 9,
+  #          label = "5m",
+  #          size = 10,
+  #          color = "white") +
+  scale_y_reverse(breaks = seq(0, 50, by = 10)) +
+  # cmocean::scale_fill_cmocean(name = "delta",
+  #                             limits = c(0, 20),
+  #                             oob = scales::squish) +
+  scale_fill_viridis_c(limits = c(0, 30),
+                       oob = scales::squish) +
+  #   scale_fill_gradientn(
+  #   colours = oce::oceColors9A(120),
+  #   breaks = c(0, 10, 20, 30),
+  #   limits = c(0, 35),
+  # ) +
+  # scale_fill_gradient2(low = "blue",
+  #                      mid = "green",
+  #                      high = "red",
+  #                      midpoint = 5) +
+  labs(fill = bquote(CTD[FLU]~"(mg" ~ m^-3*")"),
+       y = "Depth") +
+  scale_x_date(limits = as_date(c("2022-01-01", "2022-12-31")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  theme_bw() +
+  theme(text = element_text(size = 38), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        # axis.text.x = element_blank(),
+        legend.position = "right",
+        legend.key.height = unit(1.8, "cm"),
+        legend.title = element_text(size = 30, angle = 270),
+        legend.title.align = 0.5,
+        legend.direction = "vertical",
+        axis.text.x = element_blank()
+        ) +
+    guides(fill = guide_colourbar(title.position = "right"))
+
+  # theme(text = element_text(size = 35), #35
+  #       axis.text = element_text(color = "black"),
+  #       axis.title.x = element_blank(),
+  #       legend.position = "top",
+  #       legend.box = "horizontal") +
+  # guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5,
+  #                               barwidth = 50, barheight = 1,
+  #                               frame.colour = "black", ticks.colour = "black"))
+```
+
+
+```{r}
+
+#Setting plotting order phytoplankton groups
+
+#Order phytoplankton groups roughly from smallest to largest - create order list
+order_chem <- c("cyan", "hapt", "GA", "cryp",
+                   "dino", "raph", "dict", "diat")
+
+#Chemtax full data - Specify order of phyto groups for figures
+chem_tchla <- arrange(mutate(chem_tchla,
+                                group = factor(group,
+                                levels = order_chem)))
+
+
+```
+
+```{r}
+# f5 <- 
+  
+f4 <- chem_tchla %>%
+  ggplot() +
+  # annotate("rect", xmin = date("2024-03-05"), xmax = date("2024-04-30"),
+  #          ymin = 0, ymax = Inf, fill = 'darkgreen', alpha = 0.2) +
+  geom_bar(aes(date, contribution, fill = fct_rev(group)),
+           position = "stack", stat = "identity",
+           alpha = 1, color = "black", size = 1) +
+  # geom_vline(xintercept = as_date("2024-03-18"),
+  #            linetype = "solid", size = 1, color = "black") +
+  # annotate("text", x = as.Date("2024-01-15"), y = 5.4,
+  #          label = "d)",
+  #          size = 10) +
+  # annotate("text", x = as.Date("2024-12-15"), y = 5.4,
+  #          label = "5m",
+  #          size = 10) +
+  ggsci::scale_fill_npg() +
+  # lims(y = c(0, 5)) +
+  scale_x_date(limits = as.Date(c("2022-01-01", "2022-12-31")),
+               expand = c(0, 0),
+               date_breaks = "months", date_labels = "%b") +
+  theme_bw() +
+  labs(y = bquote("Phyto. (mg" ~ m^-3*")"),
+       fill = "Group") +
+  theme(
+        legend.position = "right",
+        # legend.position = c(1.02, 0.5),
+        legend.key.height = unit(0.5, "cm"),
+        # legend.text = element_text(size = 25),
+        legend.title = element_blank(),
+        text = element_text(size = 38), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+        # axis.text.y = element_blank())
+```
+
+```{r}
+test2 <- ggarrange(f1, f2, f3, f4, ncol = 1)
+
+  
+
+ggsave(here("figures", "panel_kc10_2022_CHEMTAX_2.png"), test2,
+        width = 16, height = 16, dpi = 300)
+```
+```{r}
+wind_22_24 <- wind %>% 
+  filter(year == 2022 | year == 2024) %>% 
+  mutate(yday = yday(date))
+
+  ggplot() + 
+  geom_line(data = wind_22_24, aes(x = yday, y = WindSpd_Med^3,
+                               color = as.factor(year)),
+            size = 2) +
+  ggsci::scale_color_aaas() +
+  labs(y = bquote(Wind~"("*m^-3*s^-3*")"),
+       color = NULL) +
+  facet_grid(year~.) +
+  # scale_x_date(limits = as_date(c("2022-01-01", "2022-12-31")),
+  #              expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        # axis.text.x = element_blank(),
+        legend.position = "none")
+
+ggsave(here("figures", "panel_kc10_2022_2024_wind.png"), 
+        width = 16, height = 10, dpi = 300)  
+```
+```{r}
+# Order locations from fjord to shelf
+riv_loc <- c("Q_GM",
+             "Q_SM",
+             "Q_RA",
+             "Q_tot")
+
+q <- arrange(mutate(q, 
+                      Watershed_group = factor(Watershed_group,
+                                               levels = riv_loc)))
+```
+
+```{r}
+f5 <- q %>% 
+  filter(year == 2022) %>% 
+  ggplot(aes(x = date, y = Q/10^3, fill = Watershed_group)) +
+  geom_area() +
+  scale_fill_uchicago() +
+  scale_x_date(limits = as.Date(c("2022-01-01", "2022-12-31")),
+               expand = c(0, 0),
+               date_breaks = "months", date_labels = "%b") +
+  theme_bw() +
+  labs(y = bquote("Dis." ~ "("*10^3~m^3*~s^-1*")"),
+       fill = NULL) +
+  ylim(0, 5) +
+  theme(
+        legend.position = "right",
+        # legend.position = c(1.02, 0.5),
+        legend.key.height = unit(0.5, "cm"),
+        # legend.text = element_text(size = 25),
+        legend.title = element_blank(),
+        text = element_text(size = 38), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+        # axis.text.y = element_blank())
+```
+
+```{r}
+test3 <- ggarrange(f1, f2, f5, ncol = 1)
+
+  
+
+ggsave(here("figures", "panel_kc10_2022_CHEMTAX_2_FW.png"), test3,
+        width = 16, height = 12, dpi = 300)
+```
+```{r}
+
+f6 <- q %>% 
+  filter(year == 2024) %>% 
+  ggplot(aes(x = date, y = Q/10^3, fill = Watershed_group)) +
+  geom_area() +
+  scale_fill_uchicago() +
+  scale_x_date(limits = as.Date(c("2024-01-01", "2024-12-31")),
+               expand = c(0, 0),
+               date_breaks = "months", date_labels = "%b") +
+  theme_bw() +
+  labs(y = bquote("Dis." ~ "("*10^3~m^3*~s^-1*")"),
+       fill = NULL) +
+  ylim(0, 5) +
+  theme(
+        legend.position = "right",
+        # legend.position = c(1.02, 0.5),
+        legend.key.height = unit(0.5, "cm"),
+        # legend.text = element_text(size = 25),
+        legend.title = element_blank(),
+        text = element_text(size = 38), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+        # axis.text.y = element_blank())
+
+```
+```{r}
+test4 <- ggarrange(f5, f6, ncol = 1)
+
+  
+
+ggsave(here("figures", "panel_kc10_2022_2024_Q.png"), test4,
+        width = 16, height = 8, dpi = 300)
+```
+
+```{r}
+b22 %>% 
+  left_join(wind22) %>% 
+  mutate(month = month(date)) %>% 
+  filter(month == 8) %>% 
+  ggplot(aes(x = mean_sal, y = fl_med_day)) +
+  geom_point() +
+  scale_color_viridis_b()
+```
+
