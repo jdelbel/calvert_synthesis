@@ -56,6 +56,23 @@ weath <- read_csv(here("outputs", "enviro_weather_2025-04-14.csv"))
 
 ```
 
+```{r}
+f %>% 
+  mutate(month = month(date),
+         year = year(date)) %>% 
+  filter(pres < 51 & station == "KC10" & year > 2016) %>% 
+  ggplot(aes(x = f_npq, y = pres)) +
+  geom_line(orientation = "y") +
+  scale_y_reverse() +
+  facet_wrap(~id)
+
+ggsave(here("figures", "profiles.png"),
+        width = 24, height = 24, dpi = 300)
+```
+
+
+
+
 
 
 ```{r}
