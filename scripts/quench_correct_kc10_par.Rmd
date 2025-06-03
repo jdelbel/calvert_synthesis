@@ -504,8 +504,6 @@ pa1 %>%
        y = c(0, 2500))
 ```
 
-
-
 ```{r}
 par_0_join %>% 
   filter(date < "2023-07-01") %>% 
@@ -571,7 +569,14 @@ par_0_join %>%
 ggsave(here("figures", "validate_par2.png"), 
         width = 20, height = 5, dpi = 300)
 ```
+```{r}
+write.csv(p6, here("outputs", "corrected_par_2025-06-03.csv"))
+```
 
+```{r}
+test <- p6 %>% 
+  mutate(test = exp(fitted.values))
+```
 
 
 Comparison with incident PAR:
