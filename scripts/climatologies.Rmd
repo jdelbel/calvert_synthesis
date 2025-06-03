@@ -46,6 +46,9 @@ fec <- read_csv(here("files", "fecal.csv"))
 #CHEMTAX
 chem <- read_csv(here("files", "chemtax_kc10_2024.csv"))
 
+#CHEMTAX
+par <- read_csv(here("outputs", "corrected_par_2025-06-03.csv"))
+
 ```
 ```{r}
 #Removing cyanobacteria from the counts.
@@ -90,6 +93,27 @@ chem <- chem %>%
   pivot_longer(c(cyan:diat), names_to = "group", values_to = "contribution")
 
 ```
+
+```{r}
+par_check <- par %>% 
+  filter(depth == 1) %>% 
+  mutate(check = par_dr == max_par)
+
+zeu <- par %>% 
+  filter(!castpk == "1089") %>% 
+  group_by(castpk) %>% 
+  slice_max(depth) %>% 
+  ungroup() %>% 
+  select(date, zeu = depth)
+
+zeu %>% 
+  group_by(date) %>% 
+  summarise(zeu = mean(zeu)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = date, y = zeu)) +
+  geom_point()
+```
+
 
 
 ```{r}
@@ -245,6 +269,18 @@ chem_mm <- chem %>%
   group_by(month, group) %>% 
   summarise(chem_mm = mean(contribution),
             chem_sd = sd(contribution)) %>% 
+  ungroup()
+
+zeu_mm <- zeu %>% 
+  mutate(month = month(date)) %>% 
+    mutate(year = year(date)) %>% 
+  filter(year > 2016) %>% 
+  group_by(month) %>% 
+  summarise(zeu_mm = mean(zeu),
+            zeu_sd = sd(zeu),
+            n = n(),
+            min = min(zeu),
+            max = max(zeu)) %>% 
   ungroup()
 ```
 ```{r}
@@ -548,7 +584,28 @@ chem_mm %>%
         text = element_text(size = 35), #35
         axis.text = element_text(color = "black")) 
 ```
-
+```{r}
+zeu_mm %>%
+  ggplot(aes(x = month, y = zeu_mm)) +
+  geom_ribbon(aes(y = zeu_mm,
+                  ymin = zeu_mm + zeu_sd,
+                  ymax = zeu_mm - zeu_sd),
+              alpha = 0.2, color = "transparent") +
+  geom_line(size = 3) +
+  scale_color_tron() +
+  labs(y = bquote("Z"[eu]~"("*depth~m^-1*")"),
+       x = NULL,
+       color = NULL,
+       fill = NULL) +
+  scale_x_continuous(breaks = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+                     limits = c(1,12),
+                     labels = c("J", "F", "M", "A", "M", "J",
+                                "J", "A", "S", "O", "N", "D")) +
+  theme_bw() +
+  theme(legend.position = c(0.9, 0.83),
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black")) 
+```
 
 
 ```{r}
