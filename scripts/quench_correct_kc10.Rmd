@@ -482,6 +482,7 @@ check_slope %>%
 ggsave(here("figures", "check_slope_prof.png"),
         width = 16, height = 16, dpi = 300)
 ```
+
 ```{r}
 check_slope %>% 
   drop_na() %>% 
