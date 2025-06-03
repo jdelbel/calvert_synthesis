@@ -1,0 +1,84 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+#Upload packages
+library(tidyverse)
+library(here)
+library(readxl)
+library(patchwork)
+library(lubridate)
+library(MBA)
+library(mgcv)
+library(FNN)
+library(zoo)
+library(reshape2)
+library(rioja)
+library(egg)
+library(ggcorrplot)
+library(ggsci)
+library(vegan)
+library(ggrepel)
+library(ggforce)
+library(factoextra)
+library(cluster)
+library(ggdendro)
+library(cmocean)
+```
+
+```{r}
+#Slope and NPQ Corrected CTD data
+f <- read_csv(here("outputs", "corrected_flu_2025-04-10.csv"))
+env <- read_csv(here("outputs", "enviro_ctd_nut_2025-04-15.csv"))
+weath <- read_csv(here("outputs", "enviro_weather_2025-04-14.csv"))
+ctd <- read_csv(here("outputs", "ctd_wrangle_2025-04-25_kc10.csv"))
+
+
+# mei <- read_csv(here("files_big", "mei_2025-04-24.csv")) 
+# npgo <- read_csv(here("files_big", "npgo_2025-04-24.csv"))
+# up <- read_csv(here("files_big", "up_2025-04-24.csv"))
+```
+```{r}
+
+```
+
+
+```{r}
+f_max <- f %>% 
+  mutate(month = month(date)) %>% 
+  filter(station == "KC10") %>% 
+  group_by(id) %>% 
+  slice_max(f_npq) %>% 
+  ungroup() %>% 
+  select(date, month, id, pres, f_npq) %>% 
+  filter(f_npq >= 5) %>% 
+  filter(pres >= 5) %>% 
+  filter(month == 7)
+```
+
+```{r}
+f_max <- f_max %>% 
+  left_join(ctd) %>% 
+  distinct()
+```
+```{r}
+ctd %>% 
+  filter(date == "2022-07-28") %>% 
+  filter(pres < 51) %>% 
+  ggplot(aes(x = rho, y = pres)) + 
+  geom_line(orientation = "y") +
+  scale_y_reverse()
+```
+```{r}
+weath %>% 
+  mutate(month = month(date),
+         year = year(date)) %>%
+  filter(month == 6) %>% 
+  ggplot(aes(x = as.factor(month), y = w_dm, color = as.factor(year))) +
+  geom_boxplot() 
+
+```
+
+

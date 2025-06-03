@@ -1,0 +1,635 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+#Upload packages
+library(tidyverse)
+library(readxl)
+library(here)
+library(patchwork)
+library(RColorBrewer)
+library(ggpubr)
+library(broom)
+library(vegan)
+library(ggcorrplot)
+```
+
+```{r}
+#Upload data from my master data standardization sheet
+micro <- read_csv(here("files", "research_kc10_2025-05-28_2.csv")) 
+
+# clust <- read_csv(here("outputs", "taxonomic_clusters_2024-04-08.csv"))
+
+#Uploading chl data that has been converted to TChla
+# chl <- read_csv(here("outputs", "tchla_calibration_2024-04-05.csv"))
+
+#Size-fractionated data
+# sf <- read_csv(here("files", "chl_2018_2020.csv"))
+
+#Chemtax data.
+# chem <- read_csv(here("files", "chemtax_2024-04-24.csv"))
+
+```
+
+```{r}
+#Removing cyanobacteria from the counts.
+micro <- micro %>%
+  filter(!scientificName_accepted == "Cyanobacteria")
+
+micro <- micro %>%
+  filter(!scientificName_accepted == "Protozoa")
+
+micro <- micro %>% 
+  filter(!orig_name == "Leptocylindrus danicus_sum")
+```
+
+```{r}
+#Filtering out bulk chlorophyll, removing bad data and cutting down on columns
+# sf_less <- sf %>% 
+#   filter(line_out_depth == 5 & !filter_type == "Bulk GF/F") %>% 
+#   filter(chla_flag == "AV" | chla_flag == "SVC" | is.na(chla_flag)) %>%
+#   mutate(year = lubridate::year(date)) %>% 
+#   select(date, year, site_id, filter_type, chla) %>% 
+#   filter(!is.na(chla)) %>% 
+#   group_by(date) %>% 
+#   mutate(n_filt = n()) %>% 
+#   ungroup() %>% 
+#   filter(n_filt == 3) %>% 
+#   select(-n_filt) %>% 
+#   group_by(date, site_id, filter_type) %>% 
+#   mutate(n_type = n()) %>% 
+#   filter(n_type == 1) %>% 
+#   ungroup() %>% 
+#   select(-n_type) %>% 
+#   group_by(date, site_id) %>% 
+#   mutate(sum_sf = sum(chla)) %>% 
+#   ungroup() %>% 
+#   mutate(perc_sf = chla/sum_sf) 
+
+```
+
+```{r}
+#Renaming the chemtax columns and making them easier to work with.
+# chem <- chem %>% 
+#   rename(cyan = Cyanobacteria, hapt = Hapto, GA = `Prasinophytes-3`,
+#          cryp = Cryptophytes, dino = `Dinoflagellates-1`, raph = Raphido,
+#          dict = Dictyo, diat = `Diatoms-1`) %>% 
+#   mutate(date = lubridate::mdy(date))
+# 
+# #Making a long format for plotting.
+# chem_long <- chem %>% 
+#   pivot_longer(c(cyan:diat), values_to = "tchla", names_to = "group")
+```
+
+
+```{r}
+#Adding date and Season Columns.
+micro <- micro %>% 
+  mutate(year = lubridate::year(date),
+         month = lubridate::month(date)) %>% 
+  relocate(year, .after = date) %>% 
+  relocate(month, .after = year)
+
+dates <- micro %>% 
+  select(date) %>% 
+  distinct()
+
+micro <- micro %>%  
+  mutate(month_surv = case_when(date == "2019-08-29" ~ 9,
+                                date == "2019-08-31" ~ 9,
+                                date == "2020-04-30" ~ 5,
+                                date == "2022-07-28" ~ 8,
+                                TRUE ~ as.numeric (month))) %>% 
+  mutate(month_mid = 15) %>% 
+  unite(month_date, c("year", "month_surv", "month_mid"), sep = "-") %>% 
+  mutate(month_date = lubridate::ymd(month_date))
+
+# chem_long <- chem_long %>% 
+#   mutate(year = lubridate::year(date),
+#          month = lubridate::month(date)) %>% 
+#   relocate(year, .after = date) %>% 
+#   relocate(month, .after = year)
+# 
+# chem_long <- chem_long %>%  
+#   mutate(month_surv = case_when(date == "2019-08-29" ~ 9,
+#                                 date == "2019-08-31" ~ 9,
+#                                 date == "2020-04-30" ~ 5,
+#                                 TRUE ~ as.numeric (month))) %>% 
+#   mutate(month_mid = 15) %>% 
+#   unite(month_date, c("year", "month_surv", "month_mid"), sep = "-") %>% 
+#   mutate(month_date = lubridate::ymd(month_date))
+# 
+# sf_less <- sf_less %>% 
+#   mutate(year = lubridate::year(date),
+#          month = lubridate::month(date)) %>% 
+#   relocate(year, .after = date) %>% 
+#   relocate(month, .after = year)
+# 
+# sf_less <- sf_less %>%  
+#   mutate(month_surv = case_when(date == "2019-08-29" ~ 9,
+#                                 date == "2019-08-31" ~ 9,
+#                                 date == "2020-04-30" ~ 5,
+#                                 TRUE ~ as.numeric (month))) %>% 
+#   mutate(month_mid = 15) %>% 
+#   unite(month_date, c("year", "month_surv", "month_mid"), sep = "-") %>% 
+#   mutate(month_date = lubridate::ymd(month_date))
+
+```
+
+
+
+```{r}
+# Changing site_id to location 
+# micro <- micro %>% 
+#     mutate(location = case_when(site_id == "DFO2" ~ "F",
+#                               site_id == "KC10" ~ "C",
+#                               site_id == "QCS01" ~ "S",
+#                               TRUE ~ as.character(site_id))) %>% 
+#   relocate(location, .after = site_id)
+# 
+# chem_long <- chem_long %>% 
+#     mutate(location = case_when(site_id == "DFO2" ~ "F",
+#                               site_id == "KC10" ~ "C",
+#                               site_id == "QCS01" ~ "S",
+#                               TRUE ~ as.character(site_id))) %>% 
+#   relocate(location, .after = site_id)
+# 
+# sf_less <- sf_less %>% 
+#     mutate(location = case_when(site_id == "DFO2" ~ "F",
+#                               site_id == "KC10" ~ "C",
+#                               site_id == "QCS01" ~ "S",
+#                               TRUE ~ as.character(site_id))) %>% 
+#   relocate(location, .after = site_id)
+
+```
+
+```{r}
+
+#Looking at maximum species abundance wise
+micro <- micro %>%
+  group_by(scientificName) %>%
+  mutate(max_abund = max(count),
+         median_abund = median(count),
+         n = n()) %>% 
+  ungroup()
+
+#Picking out top 8 abundance species (bloom formers)
+top_8 <- micro %>% 
+  distinct(scientificName_accepted, max_abund) %>% 
+  slice_max(max_abund, n = 8)
+```
+
+```{r}
+#Filtering species with lower than top 8 highest abundances and putting them in other categories
+micro_8 <- micro %>%
+  mutate(scientificName2 = ifelse(max_abund < 215000 & group == "Bacillariophyta",
+                                  "Other diatom", scientificName_accepted)) %>% 
+  mutate(scientificName2 = ifelse(max_abund < 215000 & !group == "Bacillariophyta",
+                                  "Other flagellate", scientificName2)) 
+# %>% 
+  # mutate(scientificName2 = ifelse(scientificName2 == "Protozoa",
+  #                                 "Other flagellate", scientificName2))
+```
+
+```{r}
+
+micro_8 <- micro_8 %>% 
+  group_by(date, month_date, scientificName2) %>% 
+  summarise(species_sum = sum(count)) %>% 
+  ungroup()
+```
+```{r}
+micro_8_c <- micro_8  
+
+colourCount_c = length(unique(micro_8_c$scientificName2))
+getPalette_c = colorRampPalette(brewer.pal(15, "Paired"))
+```
+
+
+```{r}
+#25%
+spec_ord <- c("Biddulphiales", #
+              "Thalassiosira pacifica", #
+              "Chaetoceros debilis",
+              "Skeletonema marinoi", #
+              "Hillea", #
+              "Teleaulax", #
+              "Chattonella",
+              "Choanozoa",
+              "Other diatom", #
+              "Other flagellate") #
+
+micro_8_c <- arrange(mutate(micro_8_c,
+                         scientificName2 = factor(scientificName2,
+                                                 levels = spec_ord)))
+```
+
+```{r}
+# micro_8_c <- micro_8_c %>% 
+#   left_join(chl)
+```
+
+```{r}
+micro_8_plot <- micro_8_c %>% 
+  # select(-site_id, -tchla) %>% 
+  pivot_wider(names_from = scientificName2, values_from = species_sum,
+              values_fill = 0) 
+
+micro_8_plot <- micro_8_plot %>% 
+  pivot_longer(cols = c(Biddulphiales:Chattonella), names_to = "scientificName2",
+               values_to = "species_sum")
+```
+
+```{r}
+micro_8_plot <- arrange(mutate(micro_8_plot,
+                         scientificName2 = factor(scientificName2,
+                                                 levels = spec_ord)))
+
+```
+
+```{r}
+palette_micro2 <- c("#001219", #Bidd
+                   "#005f73", #C.ten.
+                   "#0a9396", #P.n.s.
+                   "#94d2bd", #S.mar.
+                   "#e9d8a6", #Hill
+                   "#ee9b00", #Tel
+                   "#bb3e03", #Olis
+                   "#751628", #P.p.
+                   "#71797E", #OD
+                   "#E5E4E2") #OF
+
+
+```
+
+```{r}
+# micro_8_plot <- micro_8_plot %>% 
+#   left_join(chl) %>% 
+#   left_join(clust)
+```
+```{r}
+#Order locations from fjord to shelf
+# order_loc <- c("F", "C", "S")
+# 
+# micro_8_plot <- arrange(mutate(micro_8_plot,
+#                          location = factor(location, levels = order_loc)))
+# 
+# chem_long <- arrange(mutate(chem_long,
+#                          location = factor(location, levels = order_loc)))
+# 
+# sf_less <- arrange(mutate(sf_less,
+#                          location = factor(location, levels = order_loc)))
+
+#Setting plotting order phytoplankton groups
+
+#Order phytoplankton groups roughly from smallest to largest - create order list
+# order_chem <- c("cyan", "hapt", "GA", "cryp",
+#                    "dino", "raph", "dict", "diat")
+# 
+# #Chemtax spring bloom - Specify order of phyto groups for figures
+# chem_long <- arrange(mutate(chem_long,
+#                                 group = factor(group,
+#                                 levels = order_chem)))
+
+
+```
+
+
+```{r}
+# scale <- 2
+
+micro_8_plot %>%
+  ggplot() +
+  # annotate(geom = "rect",
+  #          xmin = as.Date("2018-03-01"), xmax = as.Date("2018-06-01"),
+  #          ymin = 0, ymax = Inf,
+  #          fill = "darkolivegreen", color = "transparent", alpha = 0.2) +
+  # annotate(geom = "rect",
+  #          xmin = as.Date("2018-06-01"), xmax = as.Date("2018-09-01"),
+  #          ymin = 0, ymax = Inf,
+  #          fill = "red2", color = "transparent", alpha = 0.2) +
+  # annotate(geom = "rect",
+  #          xmin = as.Date("2018-09-01"), xmax = as.Date("2018-12-01"),
+  #          ymin = 0, ymax = Inf,
+  #          fill = "goldenrod1", color = "transparent", alpha = 0.2) +
+  # annotate(geom = "rect",
+  #          xmin = as.Date("2019-03-01"), xmax = as.Date("2019-06-01"),
+  #          ymin = 0, ymax = Inf,
+  #          fill = "darkolivegreen", color = "transparent", alpha = 0.2) +
+  # annotate(geom = "rect",
+  #          xmin = as.Date("2019-06-01"), xmax = as.Date("2019-09-01"),
+  #          ymin = 0, ymax = Inf,
+  #          fill = "red2", color = "transparent", alpha = 0.2) +
+  # annotate(geom = "rect",
+  #          xmin = as.Date("2019-09-01"), xmax = as.Date("2019-12-01"),
+  #          ymin = 0, ymax = Inf,
+  #          fill = "goldenrod1", color = "transparent", alpha = 0.2) +
+  # annotate(geom = "rect",
+  #          xmin = as.Date("2020-03-01"), xmax = as.Date("2020-06-01"),
+  #          ymin = 0, ymax = Inf,
+  #          fill = "darkolivegreen", color = "transparent", alpha = 0.2) +
+  # annotate(geom = "rect",
+  #          xmin = as.Date("2020-06-01"), xmax = as.Date("2020-09-01"),
+  #          ymin = 0, ymax = Inf,
+  #          fill = "red2", color = "transparent", alpha = 0.2) +
+  # annotate(geom = "rect",
+  #          xmin = as.Date("2020-09-01"), xmax = as.Date("2020-12-01"),
+  #          ymin = 0, ymax = Inf,
+  #          fill = "goldenrod1", color = "transparent", alpha = 0.2) +
+  geom_bar(aes(x = date, y = species_sum/100000,
+           fill = scientificName2), stat = "identity", position = "stack",
+           color = "black") +
+  # geom_line(data = filter(micro_8_plot, date > "2018-01-01" & 
+  #                           date < "2019-01-01" ),
+  #          aes(x = month_date, y = tchla*scale), size = 1.5) +
+  # geom_line(data = filter(micro_8_plot, date > "2019-01-01" & 
+  #                           date < "2020-01-01"),
+  #          aes(x = month_date, y = tchla*scale), size = 1.5) +
+  # geom_line(data = filter(micro_8_plot, date > "2020-01-01" & 
+  #                           date < "2021-01-01" ),
+  #          aes(x = month_date, y = tchla*scale), size = 1.5) +
+  # geom_point(data = filter(micro_8_plot, date > "2018-01-01" & 
+  #                           date < "2019-01-01" ),
+  #          aes(x = month_date, y = tchla*scale),
+  #          fill = "white", pch = 21, size = 3) +
+  # geom_point(data = filter(micro_8_plot, date > "2019-01-01" & 
+  #                           date < "2020-01-01"),
+  #          aes(x = month_date, y = tchla*scale), fill = "white",
+  #          fill = "white", pch = 21, size = 3) +
+  # geom_point(data = filter(micro_8_plot, date > "2020-01-01" & 
+  #                           date < "2021-01-01" ),
+  #          aes(x = month_date, y = tchla*scale), fill = "white",
+  #          fill = "white", pch = 21, size = 3) +
+  # geom_point(aes(x = month_date, y = 30, color = as.factor(cluster)),
+  #            size = 8) +
+  # geom_point(aes(x = month_date, y = 30),
+  #            size = 8, color = "black", fill = "transparent", pch = 21,
+  #            stroke = 1.5) +
+  # scale_y_continuous(sec.axis = sec_axis(~./scale,
+  #                                        name = bquote("TChla (mg"~m^-3*")"))) +
+  scale_fill_manual(values = palette_micro2) +
+  ggsci::scale_color_npg() +
+  scale_x_date(breaks = seq(as.Date("2018-01-01"), as.Date("2025-01-01"),
+                            by = "6 months"), date_minor_breaks = "1 month",
+               date_labels = "%b%y",
+               limits = c(as.Date("2018-01-01"), as.Date("2025-01-01"))) +
+  # facet_grid(location ~ .) +
+  # facet_wrap( ~ location, ncol = 1,
+  #             labeller = labeller(location = c(`F` = "A - FJORD", 
+  #            `C` = "B - CHANNEL", `S` = "C - SHELF"))) +
+  labs(y = bquote("Abundance ("*10^5 ~ cells ~ L^-1*")"),
+       fill = NULL,
+       color = "Cluster") +
+  theme_bw() +
+  theme(text = element_text(size = 35),
+        axis.title.x = element_blank(),
+        axis.text = element_text(colour = "black"),
+        legend.position = "top",
+        legend.direction = "horizontal",
+        # legend.title = element_blank(),
+        legend.box = "vertical",
+        strip.background.y = element_blank(),
+        strip.background.x = element_blank(),
+        strip.text.y = element_blank(),
+        strip.text.x = element_text(hjust = -0.003)) +
+  guides(color = guide_legend(nrow = 1, order = 1),
+         fill = guide_legend(nrow = 2, order = 2))
+
+ggsave(here("figures", "kc10_dom_species_date.png"),
+       width = 20, height = 7, dpi = 300)
+```
+
+```{r}
+test <- micro %>% 
+  filter(date == "2022-07-28")
+```
+
+
+
+
+```{r}
+chem_long %>%
+  ggplot() +
+  annotate(geom = "rect",
+           xmin = as.Date("2018-03-01"), xmax = as.Date("2018-06-01"),
+           ymin = 0, ymax = Inf,
+           fill = "darkolivegreen", color = "transparent", alpha = 0.2) +
+  annotate(geom = "rect",
+           xmin = as.Date("2018-06-01"), xmax = as.Date("2018-09-01"),
+           ymin = 0, ymax = Inf,
+           fill = "red2", color = "transparent", alpha = 0.2) +
+  annotate(geom = "rect",
+           xmin = as.Date("2018-09-01"), xmax = as.Date("2018-12-01"),
+           ymin = 0, ymax = Inf,
+           fill = "goldenrod1", color = "transparent", alpha = 0.2) +
+  annotate(geom = "rect",
+           xmin = as.Date("2019-03-01"), xmax = as.Date("2019-06-01"),
+           ymin = 0, ymax = Inf,
+           fill = "darkolivegreen", color = "transparent", alpha = 0.2) +
+  annotate(geom = "rect",
+           xmin = as.Date("2019-06-01"), xmax = as.Date("2019-09-01"),
+           ymin = 0, ymax = Inf,
+           fill = "red2", color = "transparent", alpha = 0.2) +
+  annotate(geom = "rect",
+           xmin = as.Date("2019-09-01"), xmax = as.Date("2019-12-01"),
+           ymin = 0, ymax = Inf,
+           fill = "goldenrod1", color = "transparent", alpha = 0.2) +
+  annotate(geom = "rect",
+           xmin = as.Date("2020-03-01"), xmax = as.Date("2020-06-01"),
+           ymin = 0, ymax = Inf,
+           fill = "darkolivegreen", color = "transparent", alpha = 0.2) +
+  annotate(geom = "rect",
+           xmin = as.Date("2020-06-01"), xmax = as.Date("2020-09-01"),
+           ymin = 0, ymax = Inf,
+           fill = "red2", color = "transparent", alpha = 0.2) +
+  annotate(geom = "rect",
+           xmin = as.Date("2020-09-01"), xmax = as.Date("2020-12-01"),
+           ymin = 0, ymax = Inf,
+           fill = "goldenrod1", color = "transparent", alpha = 0.2) +
+  geom_bar(aes(x = month_date, y = tchla, fill = fct_rev(group)),
+           stat = "identity", position = "stack",
+           color = "black") +
+  ggsci::scale_fill_lancet() +
+  scale_x_date(breaks = seq(as.Date("2018-01-01"), as.Date("2021-01-01"),
+                            by = "4 months"), date_minor_breaks = "1 month",
+               date_labels = "%b%y",
+               limits = c(as.Date("2018-01-01"), as.Date("2021-01-01"))) +
+  # facet_grid(location ~ .) +
+  facet_wrap( ~ location, ncol = 1,
+              labeller = labeller(location = c(`F` = "A - FJORD", 
+             `C` = "B - CHANNEL", `S` = "C - SHELF"))) +
+  labs(y = bquote("Phyto Contribution (mg"~m^-3*")"),
+       fill = NULL) +
+  theme_bw() +
+  theme(text = element_text(size = 35),
+        axis.title.x = element_blank(),
+        axis.text = element_text(colour = "black"),
+        legend.position = "top",
+        legend.direction = "horizontal",
+        # legend.title = element_blank(),
+        legend.box = "vertical",
+        strip.background.y = element_blank(),
+        strip.background.x = element_blank(),
+        strip.text.y = element_blank(),
+        strip.text.x = element_text(hjust = -0.003)) +
+  guides(fill = guide_legend(nrow = 1))
+
+ggsave(here("figures", "Supp_timeseries_chemtax.png"),
+       width = 20, height = 14, dpi = 300)
+```
+```{r}
+my_lab <- c(expression(Chla['MICRO']),
+        expression(Chla['NANO']), 
+        expression(Chla['PICO']))
+
+sf_less %>%
+  ggplot() +
+  annotate(geom = "rect",
+           xmin = as.Date("2018-03-01"), xmax = as.Date("2018-06-01"),
+           ymin = 0, ymax = Inf,
+           fill = "darkolivegreen", color = "transparent", alpha = 0.2) +
+  annotate(geom = "rect",
+           xmin = as.Date("2018-06-01"), xmax = as.Date("2018-09-01"),
+           ymin = 0, ymax = Inf,
+           fill = "red2", color = "transparent", alpha = 0.2) +
+  annotate(geom = "rect",
+           xmin = as.Date("2018-09-01"), xmax = as.Date("2018-12-01"),
+           ymin = 0, ymax = Inf,
+           fill = "goldenrod1", color = "transparent", alpha = 0.2) +
+  annotate(geom = "rect",
+           xmin = as.Date("2019-03-01"), xmax = as.Date("2019-06-01"),
+           ymin = 0, ymax = Inf,
+           fill = "darkolivegreen", color = "transparent", alpha = 0.2) +
+  annotate(geom = "rect",
+           xmin = as.Date("2019-06-01"), xmax = as.Date("2019-09-01"),
+           ymin = 0, ymax = Inf,
+           fill = "red2", color = "transparent", alpha = 0.2) +
+  annotate(geom = "rect",
+           xmin = as.Date("2019-09-01"), xmax = as.Date("2019-12-01"),
+           ymin = 0, ymax = Inf,
+           fill = "goldenrod1", color = "transparent", alpha = 0.2) +
+  annotate(geom = "rect",
+           xmin = as.Date("2020-03-01"), xmax = as.Date("2020-06-01"),
+           ymin = 0, ymax = Inf,
+           fill = "darkolivegreen", color = "transparent", alpha = 0.2) +
+  annotate(geom = "rect",
+           xmin = as.Date("2020-06-01"), xmax = as.Date("2020-09-01"),
+           ymin = 0, ymax = Inf,
+           fill = "red2", color = "transparent", alpha = 0.2) +
+  annotate(geom = "rect",
+           xmin = as.Date("2020-09-01"), xmax = as.Date("2020-12-01"),
+           ymin = 0, ymax = Inf,
+           fill = "goldenrod1", color = "transparent", alpha = 0.2) +
+  geom_bar(aes(x = month_date, y = chla, fill = filter_type),
+           stat = "identity", position = "stack",
+           color = "black") +
+  ggsci::scale_fill_jama(labels =c(my_lab[1], 
+                                   my_lab[2],
+                                   my_lab[3])) +
+  scale_x_date(breaks = seq(as.Date("2018-01-01"), as.Date("2021-01-01"),
+                            by = "4 months"), date_minor_breaks = "1 month",
+               date_labels = "%b%y",
+               limits = c(as.Date("2018-01-01"), as.Date("2021-01-01"))) +
+  # facet_grid(location ~ .) +
+  facet_wrap( ~ location, ncol = 1,
+              labeller = labeller(location = c(`F` = "A - FJORD", 
+             `C` = "B - CHANNEL", `S` = "C - SHELF"))) +
+  labs(y = bquote("Phyto Contribution (mg"~m^-3*")"),
+       fill = NULL) +
+  theme_bw() +
+  theme(text = element_text(size = 35),
+        axis.title.x = element_blank(),
+        axis.text = element_text(colour = "black"),
+        legend.position = "top",
+        legend.direction = "horizontal",
+        # legend.title = element_blank(),
+        legend.box = "vertical",
+        strip.background.y = element_blank(),
+        strip.background.x = element_blank(),
+        strip.text.y = element_blank(),
+        strip.text.x = element_text(hjust = -0.003)) +
+  guides(fill = guide_legend(nrow = 1))
+
+ggsave(here("figures", "Supp_timeseries_size_fractionated.png"),
+       width = 20, height = 14, dpi = 300)
+```
+
+```{r}
+distinct_date_sf <- sf_less %>% 
+  distinct(date, site_id)
+
+
+test <- sf_less %>% 
+  distinct(month_date) %>% 
+  mutate(month = lubridate::month(month_date),
+         year = lubridate::year(month_date)) %>% 
+  complete(year, month)
+  
+months <- c(1:12)
+years <- c(2018,2019,2020)
+location <- c("F", "C", "S")
+df <- data.frame(months, years, location)
+df2 <- df %>% 
+  complete(years, months, location)
+
+df2 <- df2 %>% 
+  mutate(month_mid = 15) %>% 
+  unite(month_date, c("years", "months", "month_mid"), sep = "-") %>% 
+  mutate(month_date = lubridate::ymd(month_date))
+  
+
+sf_date <- sf_less %>% 
+  distinct(month_date, location) %>% 
+  mutate(sf_data = T)
+
+chem_date <- chem
+
+df2 %>% 
+  left_join(sf_date) %>% 
+  mutate(is.na(sf_data) == F) %>% 
+  ggplot(aes(x = month_date, y = location, fill = sf_data)) +
+  geom_tile(color = "black") +
+  ggsci::scale_fill_npg() +
+
+  theme_bw()
+```
+
+
+
+
+```{r}
+
+distinct_species <- micro %>% 
+  distinct(scientificName)
+
+species_median <- micro %>% 
+  group_by(scientificName) %>% 
+  summarise(med = median(species_sum/10^4),
+            min = min(species_sum/10^4),
+            max = max(species_sum/10^4),
+            n = n()) %>% 
+  ungroup() %>% 
+  filter(n > 10)
+
+group_median <- micro %>% 
+  group_by(group) %>% 
+  summarise(med = median(species_sum/10^4),
+            min = min(species_sum/10^4),
+            max = max(species_sum/10^4),
+            n = n()) %>% 
+  ungroup()
+```
+
+
+
+
+
+
+
+
+
+
+
+

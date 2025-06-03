@@ -1,0 +1,566 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+This worksheet works on created a corrected chlorophyll fluorometer time-series through comparison with discrete chlorophyll samples.
+
+```{r}
+#Upload packages
+library(tidyverse) #wrangling
+library(here) #file management
+library(readxl) #reading excel files
+library(lubridate) #working with dates and time
+
+#Plotting
+library(ggsci) #Nice color schemes
+library(patchwork) #plotting panels
+library(egg) #Similar to patchwork but better with right y-axis
+
+#Interpolation
+# library(rioja) # add fits to discrete data
+
+
+# library(MBA)
+# library(mgcv)
+# library(FNN)
+# library(zoo)
+# library(reshape2)
+
+# library(egg)
+
+```
+
+```{r}
+c <- read_csv(here("files", "2025-06-02_HakaiData_chlorophyll.csv"))
+
+#Upload data from my master data standardization sheet
+micro <- read_csv(here("files", "research_kc10_2025-05-28_2.csv")) 
+
+#POMs
+pom <- read_csv(here("files", "2025-06-03_HakaiData_poms.csv")) 
+
+#fecal
+fec <- read_csv(here("files", "fecal.csv")) 
+
+#CHEMTAX
+chem <- read_csv(here("files", "chemtax_kc10_2024.csv"))
+
+```
+```{r}
+#Removing cyanobacteria from the counts.
+micro <- micro %>%
+  filter(!scientificName_accepted == "Cyanobacteria")
+
+micro <- micro %>%
+  filter(!scientificName_accepted == "Protozoa")
+
+micro <- micro %>% 
+  filter(!orig_name == "Leptocylindrus danicus_sum")
+```
+
+```{r}
+fec_id <- micro %>% 
+  select(hakai_id, date) %>% 
+  distinct()
+
+fec <- fec %>% 
+  left_join(fec_id)
+
+fec <- fec %>% 
+  mutate(month = month(date))
+```
+
+```{r}
+#Working with chemtax data to make it easy to plot
+
+#Making the date column a date format
+chem <- chem %>% 
+  mutate(date2 = lubridate::mdy(Date)) 
+
+#Selecting appropriate columns and renaming to easy to work with names
+chem <- chem %>%
+  select(date = date2, cyan = Cyanobacteria, hapt = Hapto, 
+         GA = `Prasinophytes-3`, cryp = Cryptophytes,
+         dino = `Dinoflagellates-1`, raph = Raphido,
+         dict = Dictyo, diat = `Diatoms-1`)
+
+#Pivoting to long/tidy for plotting in ggplot
+chem <- chem %>% 
+  pivot_longer(c(cyan:diat), names_to = "group", values_to = "contribution")
+
+```
+
+
+```{r}
+#Working with the discrete chlorophyll dataset
+
+#Pulling out bulk data with appropriate flags and running a daily mean in case there are duplicates
+c_qc <- c %>% 
+  select(date, station = site_id, line_out_depth, filter_type, chla, chla_flag, phaeo) %>% 
+  filter(filter_type == "Bulk GF/F") %>% 
+  filter(chla_flag == "AV" | chla_flag == "SVC" | chla_flag == "ADL" | is.na(chla_flag)) 
+
+#Calculating a daily mean value in case of duplicates and setting the 0m sampling depth to 1m to match with the closest CTD fluorometer record
+c_dm <- c_qc %>% 
+  group_by(date, station, line_out_depth) %>% 
+  summarise(chl_dm = mean(chla),
+            phaeo_dm = mean(phaeo)) %>% 
+  ungroup() %>% 
+  mutate(pres = round(line_out_depth)) %>%
+  drop_na() %>% 
+  group_by(date, station) %>% 
+  mutate(n_dep = n()) %>% 
+  ungroup() %>% 
+  filter(n_dep >= 5) %>% 
+  mutate(year = year(date)) %>% 
+  mutate(pres = case_when(pres == 0 ~ 1,
+                          TRUE ~ as.numeric(pres)))
+
+pom_dm <- pom %>% 
+  filter(acidification_method == "Immersion") %>% 
+  group_by(date, line_out_depth) %>% 
+  summarise(pom_dm = mean(ug_c)) %>% 
+  ungroup() %>% 
+  mutate(pres = round(line_out_depth)) %>%
+  drop_na() %>% 
+  group_by(date) %>% 
+  mutate(n_dep = n()) %>% 
+  ungroup() %>% 
+  filter(n_dep == 2) %>% 
+  mutate(year = year(date)) %>% 
+  mutate(pres = case_when(pres == 0 ~ 1,
+                          TRUE ~ as.numeric(pres)))
+```
+
+```{r}
+#working with the size-fractionated dataset to create a size-fractionated sum value where we are missing bulk samples
+
+#Pulling out size-fractionated data
+c_sf <- c %>% 
+  select(date, station = site_id, line_out_depth, filter_type, chla, chla_flag, phaeo) %>% 
+  filter(!filter_type == "Bulk GF/F") %>% 
+  filter(chla_flag == "AV" | chla_flag == "SVC" | chla_flag == "ADL" | is.na(chla_flag))
+
+#Calculating a daily mean value where there are three filters available to complete the set.
+c_sf_dm <- c_sf %>% 
+  filter(!is.na(chla)) %>%
+  filter(chla > 0) %>% 
+  group_by(date, station, line_out_depth, filter_type) %>% 
+  summarise(avg_chla = mean(chla),
+            avg_phaeo = mean(phaeo)) %>%
+  ungroup() %>% 
+  group_by(date, station, line_out_depth) %>% 
+  mutate(n_filt = n()) %>% 
+  ungroup() %>% 
+  group_by(date, station, line_out_depth, filter_type) %>% 
+  mutate(n_type = n()) %>% 
+  ungroup() %>% 
+  filter(n_filt == 3 & n_type == 1) %>% 
+  group_by(date, station, line_out_depth) %>% 
+  mutate(sum = sum(avg_chla),
+         sum_phaeo = sum(avg_phaeo)) %>% 
+  ungroup() %>% 
+  mutate(perc = avg_chla/sum,
+         perc_phaeo = avg_phaeo/sum_phaeo) %>% 
+  select(date, station, pres = line_out_depth, filter_type, avg_chla, sum, perc,
+         avg_phaeo, sum_phaeo, perc_phaeo) %>% 
+  mutate(filter_type2 = case_when(filter_type == "2um" ~ "3um",
+                                  TRUE ~ as.character(filter_type))) %>% 
+  mutate(pres = case_when(pres == 0 ~ 1,
+                          TRUE ~ as.numeric(pres)))
+
+#Setting the 0m sampling depth to 1m
+c_sum <- c_sf_dm %>% 
+  distinct(sum, .keep_all = T) %>% 
+  select(date, station, pres, sum, sum_phaeo) %>% 
+  mutate(pres = case_when(pres == 0 ~ 1,
+                          TRUE ~ as.numeric(pres)))
+```
+
+```{r}
+#Joining the bulk and size-fractionated sum and then creating combined column where the size-fractionated value is used where there are NA's for the bulk.
+c_join <- c_dm %>% 
+  full_join(c_sum) %>% 
+  mutate(chl_comb = case_when(is.na(chl_dm) ~ sum,
+                              !is.na(chl_dm) ~ chl_dm),
+         phaeo_comb = case_when(is.na(phaeo_dm) ~ sum_phaeo,
+                              !is.na(phaeo_dm) ~ phaeo_dm)) %>% 
+  select(date, station, pres, chl_dm, chl_comb, phaeo_dm, phaeo_comb) %>% 
+  mutate(month = month(date)) %>% 
+  mutate(ph_chl = phaeo_comb/chl_comb)
+
+#A comparison of the bulk and SF sum should be plotted and offset applied if needed.
+```
+```{r}
+c_3d <- c_join %>% 
+  filter(pres < 31) %>%
+  group_by(date) %>% 
+  mutate(n = n()) %>% 
+  ungroup() %>% 
+  filter(n == 5)
+
+c_sf_3d <- c_sf_dm %>% 
+  filter(pres < 31) %>%
+  group_by(date) %>% 
+  mutate(n = n()) %>% 
+  ungroup() %>% 
+  filter(n == 15) %>% 
+  mutate(month = month(date))
+
+c_d_mm <- c_3d %>% 
+  group_by(month, pres) %>% 
+  summarise(chl_mm = mean(chl_comb),
+            sd_mm = sd(chl_comb),
+            phaeo_mm = mean(phaeo_comb),
+            phaeo_sd_mm = sd(phaeo_comb),
+            ph_chl_mm = mean(ph_chl),
+            ph_chl_sd_mm = sd(ph_chl)) %>% 
+  ungroup()
+
+
+c_sf_mm <- c_sf_3d %>% 
+  group_by(month, pres, filter_type2) %>% 
+  summarise(perc_mm = mean(perc),
+            perc_sd_mm = sd(perc),
+            chl_mm = mean(avg_chla),
+            chl_sd_mm = sd(avg_chla)) %>% 
+  ungroup()
+
+pom_mm <- pom_dm %>% 
+  mutate(month = month(date)) %>% 
+  group_by(month, pres) %>% 
+  summarise(pom_mm = mean(pom_dm),
+            pom_sd = sd(pom_dm)) %>% 
+  ungroup()
+
+fec_mm <- fec %>% 
+  group_by(month) %>% 
+  summarise(fec_mm = mean(fecal),
+            fec_sd = sd(fecal)) %>% 
+  ungroup()
+
+chem_mm <- chem %>% 
+  mutate(month = month(date)) %>% 
+  group_by(month, group) %>% 
+  summarise(chem_mm = mean(contribution),
+            chem_sd = sd(contribution)) %>% 
+  ungroup()
+```
+```{r}
+group_mm <- micro %>% 
+  group_by(date, group) %>% 
+  summarise(count = sum(count)) %>% 
+  ungroup() %>% 
+  mutate(month = month(date)) %>%
+  group_by(month, group) %>% 
+  summarise(mean_count = mean(count),
+            sd_count = sd(count)) %>% 
+  ungroup() %>% 
+  filter(group == "Bacillariophyta") 
+
+ds_mm <- micro %>% 
+  mutate(month = month(date)) %>%
+  filter(scientificName == "Chaetoceros radicans" | 
+           scientificName == "Rhizosolenia setigera" |
+           scientificName == "Skeletonema marinoi" |
+           scientificName == "Pyramimonas grossii") %>% 
+  group_by(month, scientificName) %>% 
+  summarise(mean_count = mean(count),
+            sd_count = sd(count)) %>% 
+  ungroup() %>% 
+  rename(group = scientificName)
+
+d_abund <- rbind(group_mm, ds_mm)
+
+gz <- micro %>% 
+  group_by(date, group) %>% 
+  summarise(count = sum(count)) %>% 
+  ungroup() %>% 
+  mutate(month = month(date)) %>%
+  group_by(month, group) %>% 
+  summarise(mean_count = mean(count),
+            sd_count = sd(count)) %>% 
+  ungroup() %>% 
+  filter(group == "Ciliophora")
+```
+
+```{r}
+f1 <- c_d_mm %>%
+  filter(pres < 11 | pres == 30) %>%
+  ggplot(aes(x = month, y = chl_mm, color = as.factor(pres))) +
+  geom_ribbon(aes( y = chl_mm, ymin = chl_mm + sd_mm, ymax = chl_mm - sd_mm,
+                  fill = as.factor(pres)), alpha = 0.2, color = "transparent") +
+  geom_line(size = 3) +
+  scale_color_npg() +
+  scale_fill_npg() +
+  labs(fill = "Depth (m)",
+       color = "Depth (m)",
+       y = bquote(Chl~"(mg" ~ m^-3*")"),
+       x = NULL) +
+  scale_x_continuous(breaks = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+                     limits = c(1,12),
+                     labels = c("J", "F", "M", "A", "M", "J",
+                                "J", "A", "S", "O", "N", "D")) +
+  # facet_wrap(~as.factor(pres), ncol = 1) +
+  theme_bw() +
+  theme(legend.position = c(0.8, 0.8),
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"))
+  
+```
+
+```{r}
+f2 <- c_sf_mm %>%
+  filter(pres < 11 | pres == 30) %>%
+  filter(filter_type2 == "20um") %>% 
+  ggplot(aes(x = month, y = perc_mm, color = as.factor(pres))) +
+  geom_ribbon(aes(y = perc_mm, ymin = perc_mm + perc_sd_mm,
+                  ymax = perc_mm - perc_sd_mm,
+                  fill = as.factor(pres)),
+              alpha = 0.2, color = "transparent") +
+  geom_line(size = 3) +
+  scale_color_npg() +
+  scale_fill_npg() +
+  labs(y = bquote(Chl[MICRO]~"(%)"),
+       x = NULL) +
+  scale_x_continuous(breaks = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+                     limits = c(1,12),
+                     labels = c("J", "F", "M", "A", "M", "J",
+                                "J", "A", "S", "O", "N", "D")) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"))
+```
+
+```{r}
+f3 <- pom_mm %>%
+  ggplot(aes(x = month, y = pom_mm, color = as.factor(pres))) +
+  geom_ribbon(aes( y = pom_mm, ymin = pom_mm + pom_sd, ymax = pom_mm - pom_sd,
+                  fill = as.factor(pres)), alpha = 0.2, color = "transparent") +
+  geom_line(size = 3) +
+  scale_color_npg() +
+  scale_fill_npg() +
+  labs(fill = "Depth (m)",
+       color = "Depth (m)",
+       y = bquote(POC~"(mg" ~ m^-3*")"),
+       x = NULL) +
+  scale_x_continuous(breaks = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+                     limits = c(1,12),
+                     labels = c("J", "F", "M", "A", "M", "J",
+                                "J", "A", "S", "O", "N", "D")) +
+  # facet_wrap(~as.factor(pres), ncol = 1) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"))
+  
+
+```
+
+```{r}
+f4 <- c_d_mm %>%
+  filter(pres < 11 | pres == 30) %>%
+  ggplot(aes(x = month, y = ph_chl_mm, color = as.factor(pres))) +
+  geom_ribbon(aes( y = ph_chl_mm, ymin = ph_chl_mm + ph_chl_sd_mm,
+                   ymax = ph_chl_mm - ph_chl_sd_mm,
+                  fill = as.factor(pres)), alpha = 0.2, color = "transparent") +
+  geom_line(size = 3) +
+  scale_color_npg() +
+  scale_fill_npg() +
+  labs(y = "Phaeo:Chl (%)",
+       x = NULL) +
+  scale_x_continuous(breaks = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+                     limits = c(1,12),
+                     labels = c("J", "F", "M", "A", "M", "J",
+                                "J", "A", "S", "O", "N", "D")) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"))
+```
+
+
+
+
+
+
+
+
+
+```{r}
+fig <- f1 + f2 + f3 + f4
+
+ggsave(here("figures", "clim_phyto.png"), fig,
+        width = 24, height = 14, dpi = 300)
+```
+```{r}
+f5 <- gz %>%
+  ggplot(aes(x = month, y = mean_count)) +
+  geom_ribbon(aes(y = mean_count,
+                  ymin = mean_count + sd_count,
+                  ymax = mean_count - sd_count,
+                  fill = as.factor(group)),
+              alpha = 0.2, color = "transparent", fill = "#56B4E9") +
+  geom_line(size = 3, color = "#56B4E9") +
+  scale_color_tron() +
+  labs(y = bquote("Ciliates"~"(cells"~L^-1*")"),
+       x = NULL,
+       color = NULL,
+       fill = NULL) +
+  scale_x_continuous(breaks = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+                     limits = c(1,12),
+                     labels = c("J", "F", "M", "A", "M", "J",
+                                "J", "A", "S", "O", "N", "D")) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"))
+```
+```{r}
+f6 <- fec_mm %>%
+  ggplot(aes(x = month, y = fec_mm)) +
+  geom_ribbon(aes(y = fec_mm,
+                  ymin = fec_mm + fec_sd,
+                  ymax = fec_mm - fec_sd),
+              alpha = 0.2, color = "transparent", fill = "#56B4E9") +
+  geom_line(size = 3, color = "#56B4E9") +
+  labs(y = bquote("Fecal"~"(pellets"~L^-1*")"),
+       x = NULL,
+       color = NULL,
+       fill = NULL) +
+  scale_x_continuous(breaks = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+                     limits = c(1,12),
+                     labels = c("J", "F", "M", "A", "M", "J",
+                                "J", "A", "S", "O", "N", "D")) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"))
+```
+
+```{r}
+fig_graz <- f1 + f2 + f3 + f4 + f5 + f6 + plot_layout(ncol = 2)
+
+ggsave(here("figures", "clim_phyto_graz.png"), fig_graz,
+        width = 24, height = 18, dpi = 300)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+# f4 <- 
+
+d_abund %>%
+  # filter(group == "Bacillariophyta" | group == "Skeletonema marinoi") %>% 
+  ggplot(aes(x = month, y = log1p(mean_count), color = as.factor(group))) +
+  # geom_ribbon(aes(y = log1p(mean_count), 
+  #                 ymin = log1p(mean_count) + log1p(sd_count),
+  #                 ymax = log1p(mean_count) - log1p(sd_count),
+  #                 fill = as.factor(group)),
+  #             alpha = 0.2, color = "transparent") +
+  geom_line(size = 3) +
+  scale_color_tron() +
+  labs(y = bquote("Abundance"~"(Log cells"~L^1*")"),
+       x = NULL,
+       color = NULL) +
+  scale_x_continuous(breaks = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+                     limits = c(1,12),
+                     labels = c("J", "F", "M", "A", "M", "J",
+                                "J", "A", "S", "O", "N", "D")) +
+  scale_color_discrete(labels = c("Diatoms",
+                                 "C.rad",
+                                 "P.gross",
+                                 "R.set",
+                                 "S.mar")) +
+  theme_bw() +
+  theme(legend.position = c(0.098, 0.83),
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black")) 
+```
+
+```{r}
+d_abund %>%
+  filter(group == "Bacillariophyta" | group == "Skeletonema marinoi") %>%
+  ggplot(aes(x = month, y = mean_count/10^5, color = as.factor(group))) +
+  geom_ribbon(aes(y = mean_count/10^5,
+                  ymin = mean_count/10^5 + sd_count/10^5,
+                  ymax = mean_count/10^5 - sd_count/10^5,
+                  fill = as.factor(group)),
+              alpha = 0.2, color = "transparent") +
+  geom_line(size = 3) +
+  scale_color_tron() +
+  labs(y = bquote("Abundance"~"(cells"~L^1*")"),
+       x = NULL,
+       color = NULL,
+       fill = NULL) +
+  scale_x_continuous(breaks = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+                     limits = c(1,12),
+                     labels = c("J", "F", "M", "A", "M", "J",
+                                "J", "A", "S", "O", "N", "D")) +
+  # scale_color_discrete(labels = c("Diatoms",
+  #                                "C.rad",
+  #                                "P.gross",
+  #                                "R.set",
+  #                                "S.mar")) +
+  theme_bw() +
+  theme(legend.position = c(0.9, 0.83),
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black")) 
+```
+```{r}
+chem_mm %>%
+  filter(group == "GA") %>%
+  ggplot(aes(x = month, y = chem_mm, color = as.factor(group))) +
+  geom_ribbon(aes(y = chem_mm,
+                  ymin = chem_mm + chem_sd,
+                  ymax = chem_mm - chem_sd,
+                  fill = as.factor(group)),
+              alpha = 0.2, color = "transparent") +
+  geom_line(size = 3) +
+  scale_color_tron() +
+  labs(y = bquote("Abundance"~"(cells"~L^1*")"),
+       x = NULL,
+       color = NULL,
+       fill = NULL) +
+  scale_x_continuous(breaks = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+                     limits = c(1,12),
+                     labels = c("J", "F", "M", "A", "M", "J",
+                                "J", "A", "S", "O", "N", "D")) +
+  # scale_color_discrete(labels = c("Diatoms",
+  #                                "C.rad",
+  #                                "P.gross",
+  #                                "R.set",
+  #                                "S.mar")) +
+  theme_bw() +
+  theme(legend.position = c(0.9, 0.83),
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black")) 
+```
+
+
+
+```{r}
+#add nutrients, stratification, temperature, salinity.
+
+#Can I standardize into a single plot?
+#1) Chlorophyll by depth
+#2) Micro-contribution by depth
+#3) Diatom abundance and Chemtax diatom by depth - maybe contribution? 5m
+#Or Skeletonema and diatom - need to assess variability
+#4) Nutrients by depth
+#5) Temp/Sal by depth?
+#6) Stratification?
+```
+

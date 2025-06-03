@@ -54,6 +54,8 @@ chem <- read_csv(here("files", "chemtax_kc10_2024.csv"))
 
 weath <- read_csv(here("outputs", "enviro_weather_2025-04-14.csv"))
 
+up <- read_csv(here("files_big", "up_2025-04-24.csv"))
+
 ```
 
 ```{r}
@@ -1111,6 +1113,38 @@ ggsave(here("figures", "buoy_wind_flu.png"), fwfig,
         width = 8, height = 12, dpi = 300)
 ```
 
+```{r}
+up_dm <- up %>% 
+  mutate(date = date(time),
+         upwelling_index = as.numeric(upwelling_index)) %>% 
+  group_by(date) %>% 
+  summarise(up_dm = mean(upwelling_index)) %>% 
+  ungroup()
+
+b22 <- b22 %>% 
+  left_join(up_dm)
+
+b24 <- b24 %>% 
+  left_join(up_dm)
+
+b24 %>% 
+  mutate(month = month(date)) %>%
+  ggplot(aes(x = up_dm, y = mean_sal)) +
+  geom_point(aes(color = as.factor(month)), size = 4) +
+  scale_color_viridis_d(option = "turbo") +
+  labs(x = bquote(WS[LO-3-AVG]~"("*m~s^-1*")"),
+       y = bquote(flu[Buoy]~"("*mg~m^-3*")"),
+       color = "Month") +
+  # xlim(0, 15) +
+  # ylim(0, 22) +
+  ggtitle("2022") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        legend.position = "right",
+        axis.text = element_text(color = 'black'),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+```
 
 
 
