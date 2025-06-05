@@ -437,7 +437,105 @@ b22_long %>%
         axis.text = element_text(color = "black"),
         axis.title.x = element_blank())
 ```
+```{r}
+b22_long %>% 
+  filter(par == "fl_med_day") %>% 
+  mutate(month = month(date)) %>% 
+  ggplot(aes(x = date, y = val, color = par)) +
+  geom_point() +
+  geom_line(size = 2) +
+  ylim(0, 10) +
+  # geom_line(data = filter(b22_long,
+  #                         par == "fl_med_day"),
+  #           size = 2) +
+  # geom_line(data = filter(b22_long,
+  #                         par == "mean_sal"),
+  #           size = 2) +
+  # geom_line(data = filter(b22_long,
+  #                         par == "mean_temp"),
+  #           size = 2) +
+  # geom_point(data = filter(b22_long,
+  #                         par == "chla"),
+  #           size = 4, pch = 8, stroke = 2) +
+  scale_x_date(limits = as_date(c("2022-07-01", "2022-07-31")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  # ylab(expression(atop(Chl~"(mg" ~ m^-3*")",
+  #                      paste("Salinity,"~"Temp")))) +
+  # facet_wrap(~par, ncol = 1, scales = "free") +
+  labs(color = NULL) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
 
+ggsave(here("figures", "test.png"),
+        width = 24, height = 16, dpi = 300)
+```
+```{r}
+b22_long %>% 
+  filter(par == "mean_temp") %>% 
+  mutate(month = month(date)) %>% 
+  ggplot(aes(x = date, y = val, color = par)) +
+  geom_point() +
+  geom_line(size = 2) +
+  ylim(8, 18) +
+  # geom_line(data = filter(b22_long,
+  #                         par == "fl_med_day"),
+  #           size = 2) +
+  # geom_line(data = filter(b22_long,
+  #                         par == "mean_sal"),
+  #           size = 2) +
+  # geom_line(data = filter(b22_long,
+  #                         par == "mean_temp"),
+  #           size = 2) +
+  # geom_point(data = filter(b22_long,
+  #                         par == "chla"),
+  #           size = 4, pch = 8, stroke = 2) +
+  scale_x_date(limits = as_date(c("2022-07-01", "2022-07-31")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  # ylab(expression(atop(Chl~"(mg" ~ m^-3*")",
+  #                      paste("Salinity,"~"Temp")))) +
+  # facet_wrap(~par, ncol = 1, scales = "free") +
+  labs(color = NULL) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+```
+```{r}
+b22_long %>% 
+  filter(par == "mean_sal") %>% 
+  mutate(month = month(date)) %>% 
+  ggplot(aes(x = date, y = val, color = par)) +
+  geom_point() +
+  geom_line(size = 2) +
+  ylim(16, 28) +
+  # geom_line(data = filter(b22_long,
+  #                         par == "fl_med_day"),
+  #           size = 2) +
+  # geom_line(data = filter(b22_long,
+  #                         par == "mean_sal"),
+  #           size = 2) +
+  # geom_line(data = filter(b22_long,
+  #                         par == "mean_temp"),
+  #           size = 2) +
+  # geom_point(data = filter(b22_long,
+  #                         par == "chla"),
+  #           size = 4, pch = 8, stroke = 2) +
+  scale_x_date(limits = as_date(c("2022-07-01", "2022-07-31")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  # ylab(expression(atop(Chl~"(mg" ~ m^-3*")",
+  #                      paste("Salinity,"~"Temp")))) +
+  # facet_wrap(~par, ncol = 1, scales = "free") +
+  labs(color = NULL) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+```
 
 
 ```{r}

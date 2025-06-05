@@ -403,7 +403,8 @@ scm_correlate %>%
   ylim(0, 20)
 ```
 ```{r}
-test_sn <- scm_correlate %>% 
+test_sn <- scm_correlate %>%
+  mutate(year = year(date)) %>% 
   group_by(year) %>% 
   summarise(mean_sn = mean(dsi_1 - din_1, na.rm = T)) %>% 
   ungroup()
@@ -1134,6 +1135,27 @@ ggsave(here("figures", "panel_max_int_rat.jpg"), fig_mf,
        width = 20, height = 6, dpi = 300)
 ```
 
+```{r}
+scm_correlate %>% 
+  mutate(month = month(date)) %>% 
+  # filter(month > 4 & month < 9) %>% 
+  ggplot(aes(x = max_int, y = dr_dm, fill = int_50)) +
+  geom_point(size = 6, pch = 21) +
+  scale_fill_viridis_c(option = "turbo") +
+  labs(x = bquote("Flu"[MAX]:"Flu"[0-50*"m"]~"(%)"),
+       y = bquote("Temp"[SURF]~"(°C)"), 
+       color = "Year") +
+  theme_bw() +
+  theme(text = element_text(size = 30),
+        # legend.position = "none",
+        axis.text = element_text(color = 'black'),
+        # axis.text.x = element_blank(),
+        # axis.title.y = element_blank(),
+        # axis.text.y = element_blank(),
+        strip.background = element_blank(),
+        strip.text.x = element_blank())
+
+```
 
 
 

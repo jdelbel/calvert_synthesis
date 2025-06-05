@@ -60,71 +60,81 @@ ctd2 <- read_csv(here("outputs", "enviro_ctd_nut_2025-04-15.csv"))
 f <- read_csv(here("outputs", "corrected_flu_2025-05-09.csv"))
 
 ```
+
 ```{r}
-#Removing cyanobacteria from the counts.
-micro <- micro %>%
-  filter(!scientificName_accepted == "Cyanobacteria")
+int50 <- f %>% 
+  filter(pres < 51) %>% 
+  group_by(id, date, station) %>% 
+  summarise(int_50 = sum(f_npq)) %>% 
+  ungroup()
 
-micro <- micro %>%
-  filter(!scientificName_accepted == "Protozoa")
+int50_dm <- int50 %>%
+  mutate(month = month(date),
+         year = year(date)) %>% 
+  group_by(year, month) %>% 
+  summarise(int_50 = mean(int_50)) %>% 
+  ungroup() 
 
-micro <- micro %>% 
-  filter(!orig_name == "Leptocylindrus danicus_sum")
+stats_month <- int50_dm %>% 
+  group_by(month) %>% 
+  summarise(n = n()) %>% 
+  ungroup()
+
+stats_year <- int50_dm %>% 
+  group_by(year) %>% 
+  summarise(n = n()) %>% 
+  ungroup()
+
+decomp <- int50_dm %>% 
+  filter(year > 2015)
 ```
 
 ```{r}
-fec_id <- micro %>% 
-  select(hakai_id, date) %>% 
-  distinct()
-
-fec <- fec %>% 
-  left_join(fec_id)
-
-fec <- fec %>% 
-  mutate(month = month(date))
-```
-
-```{r}
-#Working with chemtax data to make it easy to plot
-
-#Making the date column a date format
-chem <- chem %>% 
-  mutate(date2 = lubridate::mdy(Date)) 
-
-#Selecting appropriate columns and renaming to easy to work with names
-chem <- chem %>%
-  select(date = date2, cyan = Cyanobacteria, hapt = Hapto, 
-         GA = `Prasinophytes-3`, cryp = Cryptophytes,
-         dino = `Dinoflagellates-1`, raph = Raphido,
-         dict = Dictyo, diat = `Diatoms-1`)
-
-#Pivoting to long/tidy for plotting in ggplot
-chem <- chem %>% 
-  pivot_longer(c(cyan:diat), names_to = "group", values_to = "contribution")
-
-```
-
-```{r}
-par_check <- par %>% 
-  filter(depth == 1) %>% 
-  mutate(check = par_dr == max_par)
-
-zeu <- par %>% 
-  filter(!castpk == "1089") %>% 
-  group_by(castpk) %>% 
-  slice_max(depth) %>% 
+ac <- decomp %>% 
+  mutate(ltm = mean(int_50)) %>% 
+  group_by(year) %>% 
+  mutate(am = mean(int_50)) %>% 
   ungroup() %>% 
-  select(date, zeu = depth)
+  select(year, am, ltm) %>% 
+  distinct() %>% 
+  mutate(ac = am/ltm)
 
-zeu %>% 
-  group_by(date) %>% 
-  summarise(zeu = mean(zeu)) %>% 
+mc <- decomp %>% 
+  mutate(ltm = mean(int_50)) %>% 
+  group_by(year) %>% 
+  mutate(am = mean(int_50)) %>% 
+  mutate(month_dev = int_50/am) %>%
   ungroup() %>% 
-  ggplot(aes(x = date, y = zeu)) +
-  geom_point()
+  group_by(month) %>%
+  summarise(seasonal_factor = mean(month_dev, na.rm = TRUE), .groups = 'drop')
+
+ev <- decomp %>% 
+  mutate(ltm = mean(int_50)) %>% 
+  group_by(year) %>% 
+  mutate(am = mean(int_50)) %>% 
+  mutate(month_dev = int_50/am) %>%
+  ungroup() %>% 
+  group_by(month) %>%
+  mutate(month_mean = mean(month_dev, na.rm = TRUE), .groups = 'drop') %>% 
+  ungroup() %>% 
+  group_by(year, month) %>% 
+  summarise(resids = month_dev/month_mean)
+  
 ```
+```{r}
+ac %>% 
+  ggplot(aes(x = as.factor(year), y = ac)) +
+  geom_col()
 
+mc %>% 
+  ggplot(aes(x = as.factor(month), y = seasonal_factor)) +
+  geom_col()
 
+ev %>% 
+  ggplot(aes(x = as.factor(month), y = resids)) +
+  geom_col() +
+  facet_wrap(~year)
+```
 
 ```{r}
 #Working with the discrete chlorophyll dataset
@@ -147,21 +157,6 @@ c_dm <- c_qc %>%
   mutate(n_dep = n()) %>% 
   ungroup() %>% 
   filter(n_dep >= 5) %>% 
-  mutate(year = year(date)) %>% 
-  mutate(pres = case_when(pres == 0 ~ 1,
-                          TRUE ~ as.numeric(pres)))
-
-pom_dm <- pom %>% 
-  filter(acidification_method == "Immersion") %>% 
-  group_by(date, line_out_depth) %>% 
-  summarise(pom_dm = mean(ug_c)) %>% 
-  ungroup() %>% 
-  mutate(pres = round(line_out_depth)) %>%
-  drop_na() %>% 
-  group_by(date) %>% 
-  mutate(n_dep = n()) %>% 
-  ungroup() %>% 
-  filter(n_dep == 2) %>% 
   mutate(year = year(date)) %>% 
   mutate(pres = case_when(pres == 0 ~ 1,
                           TRUE ~ as.numeric(pres)))
@@ -211,11 +206,6 @@ c_sum <- c_sf_dm %>%
   mutate(pres = case_when(pres == 0 ~ 1,
                           TRUE ~ as.numeric(pres)))
 ```
-
-
-
-
-
 ```{r}
 #Joining the bulk and size-fractionated sum and then creating combined column where the size-fractionated value is used where there are NA's for the bulk.
 c_join <- c_dm %>% 
@@ -228,61 +218,47 @@ c_join <- c_dm %>%
   mutate(month = month(date)) %>% 
   mutate(ph_chl = phaeo_comb/chl_comb)
 
-#A comparison of the bulk and SF sum should be plotted and offset applied if needed.
-```
-```{r}
-test1 <- c_join %>% 
-  mutate(year = year(date),
-         month = month(date)) %>% 
-  filter(pres == 5 & year > 2016) %>% 
-  group_by(month) %>% 
-  summarise(n = n()) %>% 
-  ungroup()
-
-test2 <- c_join %>% 
-  mutate(year = year(date),
-         month = month(date)) %>%
-  filter(pres == 5 & year > 2016) %>% 
-  mutate(year = year(date),
-         month = month(date)) %>% 
-  group_by(year) %>% 
-  summarise(n = n()) %>% 
-  ungroup()
-
 c5 <- c_join %>% 
-  mutate(year = year(date),
-         month = month(date)) %>% 
-  filter(pres == 5) %>%
-  filter(year > 2016 & year < 2025)
+  mutate(month = month(date),
+         year = year(date)) %>% 
+  filter(pres == 5) %>% 
+  group_by(year, month) %>%
+  summarise(chl = mean(chl_comb)) %>% 
+  ungroup()
+    
+c5 <- c5 %>% 
+  group_by(year) %>% 
+  mutate(n = n()) %>% 
+  ungroup() %>% 
+  filter(n >= 8)
 
-
-
+#A comparison of the bulk and SF sum should be plotted and offset applied if needed.
 ```
 
 ```{r}
 ac <- c5 %>% 
-  mutate(ltm = mean(chl_comb)) %>% 
+  mutate(ltm = mean(chl)) %>% 
   group_by(year) %>% 
-  mutate(am = mean(chl_comb)) %>% 
+  mutate(am = mean(chl)) %>% 
   ungroup() %>% 
   select(year, am, ltm) %>% 
   distinct() %>% 
   mutate(ac = am/ltm)
 
 mc <- c5 %>% 
-  mutate(ltm = mean(chl_comb)) %>% 
+  mutate(ltm = mean(chl)) %>% 
   group_by(year) %>% 
-  mutate(am = mean(chl_comb)) %>% 
-  mutate(month_dev = chl_comb/am) %>%
+  mutate(am = mean(chl)) %>% 
+  mutate(month_dev = chl/am) %>%
   ungroup() %>% 
   group_by(month) %>%
   summarise(seasonal_factor = mean(month_dev, na.rm = TRUE), .groups = 'drop')
 
 ev <- c5 %>% 
-  mutate(ltm = mean(chl_comb)) %>% 
+  mutate(ltm = mean(chl)) %>% 
   group_by(year) %>% 
-  mutate(am = mean(chl_comb)) %>% 
-  mutate(month_dev = chl_comb/am) %>%
+  mutate(am = mean(chl)) %>% 
+  mutate(month_dev = chl/am) %>%
   ungroup() %>% 
   group_by(month) %>%
   mutate(month_mean = mean(month_dev, na.rm = TRUE), .groups = 'drop') %>% 
@@ -294,16 +270,15 @@ ev <- c5 %>%
 
 ```{r}
 ac %>% 
-  ggplot(aes(x = year, y = ac)) +
+  ggplot(aes(x = as.factor(year), y = ac)) +
   geom_col()
 
-
 mc %>% 
-  ggplot(aes(x = month, y = seasonal_factor)) +
+  ggplot(aes(x = as.factor(month), y = seasonal_factor)) +
   geom_col()
 
 ev %>% 
-  ggplot(aes(x = month, y = resids)) +
+  ggplot(aes(x = as.factor(month), y = resids)) +
   geom_col() +
   facet_wrap(~year)
 ```
