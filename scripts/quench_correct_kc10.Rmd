@@ -167,6 +167,12 @@ c_join <- c_dm %>%
 ```
 
 ```{r}
+write.csv(c_join, here("outputs", "chl_combined_fzh_kc10.csv"))
+```
+
+
+
+```{r}
 #Plotting where we have data available - can switch out KC10 for FZH01 in filtering
 c_join %>% 
   filter(pres < 51 & station == "FZH01") %>% 
@@ -190,10 +196,16 @@ f_fit <- f_dm %>%
   filter(!(id == "2019-02-14-KC10" & pres == 30)) %>%
   filter(!(id == "2019-05-11-KC10" & pres < 6)) %>% 
   filter(!(id == "2023-05-14-KC10" & pres == 10)) 
-         
+
+
+     
 ```
 
 Need to go through and proide rationale why I'm removing things above.
+
+
+
+
 
 ```{r}
 #For each profile, determining the linear model between chlorophyll and fluorescence data.
@@ -511,6 +523,14 @@ f_slope_quench <- f_slope_join %>%
          diff = f_slope - chl_comb,
          diff = round(diff, 2))
 
+f_slope_quench2 <- f_slope_join %>% 
+  # drop_na() %>% #I think this is an issue.
+  # filter(!is.na(slope_best)) %>%
+  # filter(!is.na(chl_comb)) %>% 
+  mutate(f_slope = f_dm*slope_best,
+         fc_rat = f_slope/chl_comb,
+         diff = f_slope - chl_comb,
+         diff = round(diff, 2))
 
 quench <- f_slope_quench %>% 
   filter(diff <= -0.9 & pres <= 5)
@@ -522,6 +542,75 @@ quench_id <- quench$id
 #2022-07-22 - Pretty confident all samples from this day are bad - QC
 
 ```
+
+```{r}
+
+test_data <- f_slope_quench 
+
+correct_npq_single <- function(data) {
+  # Objective function
+  objective_func <- function(params, depth, fluor, chl_a) {
+    npq_factor <- exp(params[1] * exp(-depth/params[2]))
+    corrected_fluor <- fluor * npq_factor
+    sum((corrected_fluor - chl_a)^2, na.rm = TRUE)
+  }
+  
+  # Remove NA values for optimization
+  clean_data <- data %>% 
+    filter(!is.na(depth), !is.na(fluorescence_raw), !is.na(chl_a_concentration))
+  
+  if(nrow(clean_data) < 3) {
+    # Return original data with uncorrected fluorescence if insufficient data
+    return(data %>% 
+           mutate(fluorescence_corrected = fluorescence_raw,
+                  npq_param1 = NA,
+                  npq_param2 = NA,
+                  convergence = 1))
+  }
+  
+  # Optimize using only clean data
+  result <- optim(c(0.5, 10), objective_func,
+                  depth = clean_data$depth,
+                  fluor = clean_data$fluorescence_raw,
+                  chl_a = clean_data$chl_a_concentration,
+                  method = "L-BFGS-B",
+                  lower = c(-2, 1),
+                  upper = c(2, 100))
+  
+  # Apply correction to ALL data points (including those with NAs)
+  corrected_data <- data %>%
+    mutate(
+      npq_factor = exp(result$par[1] * exp(-depth/result$par[2])),
+      fluorescence_corrected = fluorescence_raw * npq_factor,
+      npq_param1 = result$par[1],
+      npq_param2 = result$par[2],
+      convergence = result$convergence
+    )
+  
+  return(corrected_data)
+}
+
+# Apply to your data
+your_data <- f_slope_quench2 %>%
+  filter(date == "2024-04-12") %>% 
+  select(depth = pres, fluorescence_raw = f_slope, chl_a_concentration = chl_comb) 
+
+# Calculate corrected fluorescence
+corrected_profile <- correct_npq_single(your_data)
+
+```
+
+```{r}
+corrected_profile %>%
+  filter(depth < 31) %>% 
+  ggplot(aes(y = depth)) +
+  geom_line(aes(x = fluorescence_raw), orientation = "y", color = "black") +
+  geom_line(aes(x = fluorescence_corrected), orientation = "y", color = "red") +
+  geom_point(aes(x = chl_a_concentration), color = "green") +
+  scale_y_reverse()
+```
+
+
 
 ```{r}
 #Now plot out by histograms of the difference by depth
@@ -897,6 +986,33 @@ test <- f_slope_join %>%
   filter(is.na(slope_best)) %>% 
   mutate(fc_rat = f_dm/chl_comb)
 ```
+
+```{r}
+#So care needs to be taken in using the ratio in situations with SCM and potential CTD bottle mismatch.
+f_slope_join %>% 
+  filter(date == "2016-06-15") %>% 
+  ggplot() +
+  geom_line(aes(x = f_dm, y = pres),
+            orientation = "y",
+            color = "black",
+            size = 2) +
+  geom_line(aes(x = f_slope, y = pres),
+            orientation = "y",
+            color = "blue", size = 2) +
+ geom_line(aes(x = f_npq, y = pres),
+            orientation = "y",
+            color = "green", size = 2) +
+  geom_point(aes(x = chl_comb, y = pres),
+             size = 6,
+             pch = 8,
+             stroke = 2) +
+  scale_y_reverse() +
+  facet_wrap(~station) +
+  ylim(31, 0)
+
+```
+
+
 
 ```{r}
 #Looking at profiles where the npq_correction was performed.
