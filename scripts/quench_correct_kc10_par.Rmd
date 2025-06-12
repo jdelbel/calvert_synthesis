@@ -39,6 +39,7 @@ p <- read_csv(here("files_big", "8_binAvg-1743715163197.csv"))
 
 pa <- read_csv(here("files_big", "par_hour.csv"))
 ```
+
 ```{r}
 #Need to cut profiles where sun angle was <2 degrees
 #Need to figure out the normality test and cut each profile where the dark count starts.
