@@ -36,6 +36,8 @@ library(castr)
 ```{r}
 c <- read_csv(here("files", "2025-06-02_HakaiData_chlorophyll.csv"))
 
+c_join2 <- read_csv(here("outputs", "chl_combined_fzh_kc10.csv"))
+
 #Upload data from my master data standardization sheet
 micro <- read_csv(here("files", "research_kc10_2025-05-28_2.csv")) 
 
@@ -89,6 +91,9 @@ decomp <- int50_dm %>%
   filter(year > 2015)
 ```
 
+
+
+
 ```{r}
 ac <- decomp %>% 
   mutate(ltm = mean(int_50)) %>% 
@@ -99,6 +104,9 @@ ac <- decomp %>%
   distinct() %>% 
   mutate(ac = am/ltm)
 
+sd_ac <- ac %>% 
+  summarise(sd = sd(ac))
+
 mc <- decomp %>% 
   mutate(ltm = mean(int_50)) %>% 
   group_by(year) %>% 
@@ -107,6 +115,9 @@ mc <- decomp %>%
   ungroup() %>% 
   group_by(month) %>%
   summarise(seasonal_factor = mean(month_dev, na.rm = TRUE), .groups = 'drop')
+
+sd_mc <- mc %>% 
+  summarise(sd = sd(seasonal_factor))
 
 ev <- decomp %>% 
   mutate(ltm = mean(int_50)) %>% 
@@ -135,6 +146,247 @@ ev %>%
   geom_col() +
   facet_wrap(~year)
 ```
+```{r}
+c_join2 <- c_join2 %>%
+  mutate(month = month(date),
+         year = year(date)) %>% 
+  mutate(month = case_when(date == "2022-07-28" ~ 8,
+                               date == "2017-08-31" ~ 9,
+                               date == "2017-04-28" ~ 5,
+                               T ~ as.numeric(month)))
+
+c_stat <- c_join2 %>%
+  filter(pres < 11) %>%
+  group_by(month, year, pres) %>% 
+  summarise(chl_comb = mean(chl_comb)) %>% 
+  ungroup() %>% 
+  group_by(year, pres) %>% 
+  summarise(n = n()) %>% 
+  ungroup()
+```
+
+```{r}
+
+decomp_c <- c_join2 %>% 
+  filter(year > 2014)
+
+```
+
+
+```{r}
+ac_c <- decomp_c %>%
+  filter(pres < 11) %>% 
+  group_by(pres) %>% 
+  mutate(ltm = mean(chl_comb)) %>% 
+  ungroup() %>% 
+  group_by(year, pres) %>% 
+  mutate(am = mean(chl_comb)) %>% 
+  ungroup() %>% 
+  select(year, pres, am, ltm) %>% 
+  distinct() %>% 
+  mutate(ac = am/ltm)
+
+mc_c <- decomp_c %>%
+  filter(pres < 11) %>% 
+  group_by(pres) %>%
+  mutate(ltm = mean(chl_comb)) %>% 
+  ungroup() %>% 
+  group_by(year, pres) %>% 
+  mutate(am = mean(chl_comb)) %>% 
+  mutate(month_dev = chl_comb/am) %>%
+  ungroup() %>% 
+  group_by(month, pres) %>%
+  summarise(seasonal_factor = mean(month_dev, na.rm = TRUE), .groups = 'drop')
+
+ev_c <- decomp_c %>% 
+  filter(pres < 11) %>% 
+  group_by(pres) %>%
+  mutate(ltm = mean(chl_comb)) %>% 
+  ungroup() %>%  
+  group_by(year, pres) %>% 
+  mutate(am = mean(chl_comb)) %>% 
+  mutate(month_dev = chl_comb/am) %>%
+  ungroup() %>% 
+  group_by(month, pres) %>%
+  mutate(month_mean = mean(month_dev, na.rm = TRUE), .groups = 'drop') %>% 
+  ungroup() %>% 
+  group_by(year, month, pres) %>% 
+  summarise(resids = month_dev/month_mean)
+  
+```
+```{r}
+ac_c %>% 
+  ggplot(aes(x = as.factor(year), y = ac, fill = as.factor(pres))) +
+  geom_col() +
+  facet_wrap(~pres, ncol = 1) +
+  scale_fill_npg() +
+  labs(y = "Annual Component",
+       x = NULL,
+       fill = "Depth (m)") +
+  theme_light() +
+  theme(
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+
+ggsave(here("figures", "annual_component.png"),
+        width = 16, height = 10, dpi = 300)
+```
+
+
+```{r}
+mc_c %>% 
+  ggplot(aes(x = as.factor(month), y = seasonal_factor, fill = as.factor(pres))) +
+  geom_col() +
+  facet_wrap(~pres, ncol = 1) +
+  scale_fill_npg() +
+  labs(y = "Seasonal Component",
+       x = NULL,
+       fill = "Depth (m)") +
+  theme_light() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+
+ggsave(here("figures", "seasonal_component.png"),
+        width = 16, height = 10, dpi = 300)
+```
+
+
+```{r}
+ev_c %>% 
+  filter(pres == 5) %>% 
+  ggplot(aes(x = as.factor(month), y = resids, fill = as.factor(pres))) +
+  geom_col() +
+  facet_wrap(~year)
+```
+
+
+```{r}
+d_dr <- ctd2 %>% 
+  select(date, dr_dm) %>% 
+  distinct() %>% 
+  mutate(year = year(date),
+         month = month(date)) %>% 
+  group_by(month, year) %>% 
+  summarise(dr_dm = mean(dr_dm, na.rm = T)) %>% 
+  ungroup()
+
+
+ac_dr <- d_dr %>%
+  mutate(ltm = mean(dr_dm, na.rm = T)) %>% 
+  ungroup() %>% 
+  group_by(year) %>% 
+  mutate(am = mean(dr_dm, na.rm = T)) %>% 
+  ungroup() %>% 
+  select(year, am, ltm) %>% 
+  distinct() %>% 
+  mutate(ac = am/ltm)
+
+mc_dr <- d_dr %>%
+  mutate(ltm = mean(dr_dm)) %>% 
+  group_by(year) %>% 
+  mutate(am = mean(dr_dm)) %>% 
+  mutate(month_dev = dr_dm/am) %>%
+  ungroup() %>% 
+  group_by(month) %>%
+  summarise(seasonal_factor = mean(month_dev, na.rm = TRUE), .groups = 'drop')
+
+ev_dr <- d_dr %>% 
+  mutate(ltm = mean(dr_dm)) %>% 
+  group_by(year) %>% 
+  mutate(am = mean(dr_dm)) %>% 
+  mutate(month_dev = dr_dm/am) %>%
+  ungroup() %>% 
+  group_by(month) %>%
+  mutate(month_mean = mean(month_dev, na.rm = TRUE), .groups = 'drop') %>% 
+  ungroup() %>% 
+  group_by(year, month) %>% 
+  summarise(resids = month_dev/month_mean)
+  
+```
+
+```{r}
+ac_dr %>% 
+  ggplot(aes(x = as.factor(year), y = ac)) +
+  geom_col()
+
+mc_dr %>% 
+  ggplot(aes(x = as.factor(month), y = seasonal_factor)) +
+  geom_col()
+
+ev_dr %>% 
+  ggplot(aes(x = as.factor(month), y = resids)) +
+  geom_col() +
+  facet_wrap(~year)
+```
+
+
+```{r}
+d_t <- ctd2 %>% 
+  select(date, pres, sal) %>% 
+  filter(pres < 3) %>% 
+  group_by(date) %>% 
+  summarise(temp = mean(sal)) %>% 
+  ungroup() %>% 
+  mutate(year = year(date),
+         month = month(date)) %>% 
+  group_by(month, year) %>% 
+  summarise(t_dm = mean(temp, na.rm = T)) %>% 
+  ungroup()
+
+
+ac_t <- d_t %>%
+  mutate(ltm = mean(t_dm, na.rm = T)) %>% 
+  ungroup() %>% 
+  group_by(year) %>% 
+  mutate(am = mean(t_dm, na.rm = T)) %>% 
+  ungroup() %>% 
+  select(year, am, ltm) %>% 
+  distinct() %>% 
+  mutate(ac = am/ltm)
+
+mc_t <- d_t %>%
+  mutate(ltm = mean(t_dm)) %>% 
+  group_by(year) %>% 
+  mutate(am = mean(t_dm)) %>% 
+  mutate(month_dev = t_dm/am) %>%
+  ungroup() %>% 
+  group_by(month) %>%
+  summarise(seasonal_factor = mean(month_dev, na.rm = TRUE), .groups = 'drop')
+
+ev_t <- d_t %>% 
+  mutate(ltm = mean(t_dm)) %>% 
+  group_by(year) %>% 
+  mutate(am = mean(t_dm)) %>% 
+  mutate(month_dev = t_dm/am) %>%
+  ungroup() %>% 
+  group_by(month) %>%
+  mutate(month_mean = mean(month_dev, na.rm = TRUE), .groups = 'drop') %>% 
+  ungroup() %>% 
+  group_by(year, month) %>% 
+  summarise(resids = month_dev/month_mean)
+```
+```{r}
+ac_t %>% 
+  ggplot(aes(x = as.factor(year), y = ac)) +
+  geom_col()
+
+mc_t %>% 
+  ggplot(aes(x = as.factor(month), y = seasonal_factor)) +
+  geom_col()
+
+ev_t %>% 
+  ggplot(aes(x = as.factor(month), y = resids)) +
+  geom_col() +
+  facet_wrap(~year)
+```
+
+
+
+
+
 
 ```{r}
 #Working with the discrete chlorophyll dataset

@@ -47,6 +47,8 @@ cs <- read_csv(here("files", "chl_2022-09-09.csv"))
   
 wind <- read_csv(here("files", "wind_all.csv"))
 
+wind_hour <- read_csv(here("files", "2025-06-09.1hourSamples.all.csv"))
+
 wind_anom <- read.csv(here("outputs", "wind_anom_day_2025-04-25.csv"))
 
 #CHEMTAX
@@ -54,6 +56,9 @@ chem <- read_csv(here("files", "chemtax_kc10_2024.csv"))
 
 weath <- read_csv(here("outputs", "enviro_weather_2025-04-14.csv"))
 
+par <- read_csv(here("files", "2025-06-06.1hourSamples.2022.csv"))
+
+ctd <- read_csv(here("outputs", "enviro_ctd_nut_2025-04-14.csv"))
 ```
 
 
@@ -69,6 +74,13 @@ q <- weath %>%
   mutate(year = year(date))
 ```
 
+```{r}
+p <- par %>% 
+  mutate(date = mdy_hm(measurementTime))
+
+wh <- wind_hour %>% 
+  mutate(date = mdy_hm(measurementTime))
+```
 
 
 ```{r}
@@ -437,105 +449,7 @@ b22_long %>%
         axis.text = element_text(color = "black"),
         axis.title.x = element_blank())
 ```
-```{r}
-b22_long %>% 
-  filter(par == "fl_med_day") %>% 
-  mutate(month = month(date)) %>% 
-  ggplot(aes(x = date, y = val, color = par)) +
-  geom_point() +
-  geom_line(size = 2) +
-  ylim(0, 10) +
-  # geom_line(data = filter(b22_long,
-  #                         par == "fl_med_day"),
-  #           size = 2) +
-  # geom_line(data = filter(b22_long,
-  #                         par == "mean_sal"),
-  #           size = 2) +
-  # geom_line(data = filter(b22_long,
-  #                         par == "mean_temp"),
-  #           size = 2) +
-  # geom_point(data = filter(b22_long,
-  #                         par == "chla"),
-  #           size = 4, pch = 8, stroke = 2) +
-  scale_x_date(limits = as_date(c("2022-07-01", "2022-07-31")),
-               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
-  # ylab(expression(atop(Chl~"(mg" ~ m^-3*")",
-  #                      paste("Salinity,"~"Temp")))) +
-  # facet_wrap(~par, ncol = 1, scales = "free") +
-  labs(color = NULL) +
-  theme_bw() +
-  theme(legend.position = "none",
-        text = element_text(size = 35), #35
-        axis.text = element_text(color = "black"),
-        axis.title.x = element_blank())
 
-ggsave(here("figures", "test.png"),
-        width = 24, height = 16, dpi = 300)
-```
-```{r}
-b22_long %>% 
-  filter(par == "mean_temp") %>% 
-  mutate(month = month(date)) %>% 
-  ggplot(aes(x = date, y = val, color = par)) +
-  geom_point() +
-  geom_line(size = 2) +
-  ylim(8, 18) +
-  # geom_line(data = filter(b22_long,
-  #                         par == "fl_med_day"),
-  #           size = 2) +
-  # geom_line(data = filter(b22_long,
-  #                         par == "mean_sal"),
-  #           size = 2) +
-  # geom_line(data = filter(b22_long,
-  #                         par == "mean_temp"),
-  #           size = 2) +
-  # geom_point(data = filter(b22_long,
-  #                         par == "chla"),
-  #           size = 4, pch = 8, stroke = 2) +
-  scale_x_date(limits = as_date(c("2022-07-01", "2022-07-31")),
-               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
-  # ylab(expression(atop(Chl~"(mg" ~ m^-3*")",
-  #                      paste("Salinity,"~"Temp")))) +
-  # facet_wrap(~par, ncol = 1, scales = "free") +
-  labs(color = NULL) +
-  theme_bw() +
-  theme(legend.position = "none",
-        text = element_text(size = 35), #35
-        axis.text = element_text(color = "black"),
-        axis.title.x = element_blank())
-```
-```{r}
-b22_long %>% 
-  filter(par == "mean_sal") %>% 
-  mutate(month = month(date)) %>% 
-  ggplot(aes(x = date, y = val, color = par)) +
-  geom_point() +
-  geom_line(size = 2) +
-  ylim(16, 28) +
-  # geom_line(data = filter(b22_long,
-  #                         par == "fl_med_day"),
-  #           size = 2) +
-  # geom_line(data = filter(b22_long,
-  #                         par == "mean_sal"),
-  #           size = 2) +
-  # geom_line(data = filter(b22_long,
-  #                         par == "mean_temp"),
-  #           size = 2) +
-  # geom_point(data = filter(b22_long,
-  #                         par == "chla"),
-  #           size = 4, pch = 8, stroke = 2) +
-  scale_x_date(limits = as_date(c("2022-07-01", "2022-07-31")),
-               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
-  # ylab(expression(atop(Chl~"(mg" ~ m^-3*")",
-  #                      paste("Salinity,"~"Temp")))) +
-  # facet_wrap(~par, ncol = 1, scales = "free") +
-  labs(color = NULL) +
-  theme_bw() +
-  theme(legend.position = "none",
-        text = element_text(size = 35), #35
-        axis.text = element_text(color = "black"),
-        axis.title.x = element_blank())
-```
 
 
 ```{r}
@@ -791,12 +705,12 @@ f4 <- chem_tchla %>%
 ```
 
 ```{r}
-test2 <- ggarrange(f1, f2, f3, f4, ncol = 1)
-
-  
-
-ggsave(here("figures", "panel_kc10_2022_CHEMTAX_2.png"), test2,
-        width = 16, height = 16, dpi = 300)
+# test2 <- ggarrange(f1, f2, f3, f4, ncol = 1)
+# 
+#   
+# 
+# ggsave(here("figures", "panel_kc10_2022_CHEMTAX_2.png"), test2,
+#         width = 16, height = 16, dpi = 300)
 ```
 ```{r}
 wind_22_24 <- wind %>% 
@@ -861,12 +775,12 @@ f5 <- q %>%
 ```
 
 ```{r}
-test3 <- ggarrange(f1, f2, f5, ncol = 1)
-
-  
-
-ggsave(here("figures", "panel_kc10_2022_CHEMTAX_2_FW.png"), test3,
-        width = 16, height = 12, dpi = 300)
+# test3 <- ggarrange(f1, f2, f5, ncol = 1)
+# 
+#   
+# 
+# ggsave(here("figures", "panel_kc10_2022_CHEMTAX_2_FW.png"), test3,
+#         width = 16, height = 12, dpi = 300)
 ```
 ```{r}
 
@@ -913,3 +827,702 @@ b22 %>%
   scale_color_viridis_b()
 ```
 
+```{r}
+b22_long %>% 
+  filter(par == "fl_med_day") %>% 
+  mutate(month = month(date)) %>% 
+  ggplot(aes(x = date, y = val, color = par)) +
+  geom_point() +
+  geom_line(size = 2) +
+  ylim(0, 10) +
+  # geom_line(data = filter(b22_long,
+  #                         par == "fl_med_day"),
+  #           size = 2) +
+  # geom_line(data = filter(b22_long,
+  #                         par == "mean_sal"),
+  #           size = 2) +
+  # geom_line(data = filter(b22_long,
+  #                         par == "mean_temp"),
+  #           size = 2) +
+  # geom_point(data = filter(b22_long,
+  #                         par == "chla"),
+  #           size = 4, pch = 8, stroke = 2) +
+  scale_x_date(limits = as_date(c("2022-07-01", "2022-07-31")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  # ylab(expression(atop(Chl~"(mg" ~ m^-3*")",
+  #                      paste("Salinity,"~"Temp")))) +
+  # facet_wrap(~par, ncol = 1, scales = "free") +
+  labs(color = NULL) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+
+ggsave(here("figures", "test.png"),
+        width = 24, height = 16, dpi = 300)
+```
+```{r}
+b22_long %>% 
+  filter(par == "mean_temp") %>% 
+  mutate(month = month(date)) %>% 
+  ggplot(aes(x = date, y = val, color = par)) +
+  geom_point() +
+  geom_line(size = 2) +
+  ylim(8, 18) +
+  # geom_line(data = filter(b22_long,
+  #                         par == "fl_med_day"),
+  #           size = 2) +
+  # geom_line(data = filter(b22_long,
+  #                         par == "mean_sal"),
+  #           size = 2) +
+  # geom_line(data = filter(b22_long,
+  #                         par == "mean_temp"),
+  #           size = 2) +
+  # geom_point(data = filter(b22_long,
+  #                         par == "chla"),
+  #           size = 4, pch = 8, stroke = 2) +
+  scale_x_date(limits = as_date(c("2022-07-01", "2022-07-31")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  # ylab(expression(atop(Chl~"(mg" ~ m^-3*")",
+  #                      paste("Salinity,"~"Temp")))) +
+  # facet_wrap(~par, ncol = 1, scales = "free") +
+  labs(color = NULL) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+```
+```{r}
+b22_long %>% 
+  filter(par == "mean_sal") %>% 
+  mutate(month = month(date)) %>% 
+  ggplot(aes(x = date, y = val, color = par)) +
+  geom_point() +
+  geom_line(size = 2) +
+  ylim(16, 28) +
+  # geom_line(data = filter(b22_long,
+  #                         par == "fl_med_day"),
+  #           size = 2) +
+  # geom_line(data = filter(b22_long,
+  #                         par == "mean_sal"),
+  #           size = 2) +
+  # geom_line(data = filter(b22_long,
+  #                         par == "mean_temp"),
+  #           size = 2) +
+  # geom_point(data = filter(b22_long,
+  #                         par == "chla"),
+  #           size = 4, pch = 8, stroke = 2) +
+  scale_x_date(limits = as_date(c("2022-07-01", "2022-07-31")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  # ylab(expression(atop(Chl~"(mg" ~ m^-3*")",
+  #                      paste("Salinity,"~"Temp")))) +
+  # facet_wrap(~par, ncol = 1, scales = "free") +
+  labs(color = NULL) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+```
+
+```{r}
+s1 <- b22_long %>% 
+  filter(par == "fl_med_day") %>% 
+  mutate(month = month(date)) %>% 
+  ggplot(aes(x = date, y = val)) +
+  geom_point() +
+  geom_line(size = 3) +
+  geom_vline(xintercept = as.Date("2022-07-03")) +
+  geom_vline(xintercept = as.Date("2022-07-28")) +
+  ylim(0, 10) +
+  scale_x_date(limits = as_date(c("2022-07-01", "2022-08-05")),
+               expand = c(0, 0), date_breaks = "1 week",
+               date_labels = "%b%d") +
+  labs(y = bquote(Chl[BUOY]~"(mg" ~ m^-3*")"),
+                  color = NULL) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank())
+```
+
+```{r}
+s2 <- b22_long %>% 
+  filter(par == "mean_temp") %>% 
+  mutate(month = month(date)) %>% 
+  ggplot(aes(x = date, y = val)) +
+  geom_point() +
+  geom_line(size = 3) +
+  geom_vline(xintercept = as.Date("2022-07-03")) +
+  geom_vline(xintercept = as.Date("2022-07-28")) +
+  ylim(11, 18) +
+  scale_x_date(limits = as_date(c("2022-07-01", "2022-08-05")),
+               expand = c(0, 0), date_breaks = "1 week",
+               date_labels = "%b%d") +
+  labs(y = "Temp",
+       color = NULL) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank())
+```
+```{r}
+s3 <- b22_long %>% 
+  filter(par == "mean_sal") %>% 
+  mutate(month = month(date)) %>% 
+  ggplot(aes(x = date, y = val)) +
+  geom_point() +
+  geom_line(size = 3) +
+  geom_vline(xintercept = as.Date("2022-07-03")) +
+  geom_vline(xintercept = as.Date("2022-07-28")) +
+  ylim(16, 28) +
+  scale_x_date(limits = as_date(c("2022-07-01", "2022-08-05")),
+               expand = c(0, 0), date_breaks = "1 week",
+               date_labels = "%b%d") +
+    labs(y = "Salinity",
+       color = NULL) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank())
+```
+```{r}
+s4 <- wh %>%
+  ggplot() + 
+  geom_point(aes(x = date, y = WindSpd_Avg, fill = WindDir_Avg),
+            pch = 21, size = 6, color = "transparent") +
+  scale_fill_viridis_b() +
+  geom_vline(xintercept = as_datetime("2022-07-03")) +
+  geom_vline(xintercept = as_datetime("2022-07-28")) +
+  ylim(0, 12) +
+  labs(y = bquote(Wind~"("*m*s^-1*")"),
+       fill = "Dir.") +
+  scale_x_datetime(limits = as_datetime(c("2022-07-01", "2022-08-05")),
+               expand = c(0, 0), date_breaks = "1 week",
+               date_labels = "%b%d") +
+  theme_bw() +
+  theme(legend.position = c(0.95, 0.75),
+        legend.background = element_blank(),
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank())
+```
+```{r}
+s5 <- q %>% 
+  filter(year == 2022) %>% 
+  ggplot(aes(x = date, y = Q/10^3, fill = Watershed_group)) +
+  geom_area() +
+  geom_vline(xintercept = as.Date("2022-07-03")) +
+  geom_vline(xintercept = as.Date("2022-07-28")) +
+  scale_fill_uchicago() +
+  scale_x_date(limits = as_date(c("2022-07-01", "2022-08-05")),
+               expand = c(0, 0), date_breaks = "1 week",
+               date_labels = "%b%d") +
+  theme_bw() +
+  labs(y = bquote("Dis." ~ "("*10^3~m^3*~s^-1*")"),
+       fill = NULL) +
+  ylim(0, 5) +
+  theme(
+        legend.position = "none",
+        # legend.position = c(1.02, 0.5),
+        legend.key.height = unit(0.5, "cm"),
+        # legend.text = element_text(size = 25),
+        legend.title = element_blank(),
+        text = element_text(size = 38), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank())
+```
+```{r}
+
+s6 <- p %>% 
+  ggplot(aes(x = date, y = `1hourPAR`)) +
+  geom_point() +
+  geom_line(size = 3) +
+  geom_vline(xintercept = as_datetime("2022-07-03")) +
+  geom_vline(xintercept = as_datetime("2022-07-28")) +
+  scale_x_datetime(limits = as_datetime(c("2022-07-01", "2022-08-05")),
+               expand = c(0, 0), date_breaks = "1 week",
+               date_labels = "%b%d") +
+    labs(y = bquote("PAR" ~ "("*mol~m^2*")"),
+       color = NULL) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+
+```
+```{r}
+s_fig <- s1 / s2 / s3 / s4 / s5 / s6
+
+ggsave(here("figures", "panel_kc10_2022_July.png"), s_fig,
+        width = 16, height = 24, dpi = 300)
+```
+
+```{r}
+f <- f %>% 
+  mutate(year = year(date),
+         month = month(date))
+
+p1 <- f %>% 
+  filter(year == 2022 & month == 7 & station == "KC10") %>% 
+  ggplot(aes(x = f_npq, y = pres, color = as.factor(date))) +
+  geom_line(size = 3, orientation = "y") +
+      labs(x = bquote("FL" ~ "("*mg~m^3*")"),
+           y = "Depth (m)",
+           color = NULL) +
+  scale_y_reverse() +
+  ylim(30, 0) +
+  scale_color_npg() +
+  theme_bw() +
+  theme(legend.position = c(0.7, 0.2),
+        text = element_text(size = 40), #35
+        axis.text = element_text(color = "black"))
+  
+```
+```{r}
+ctd2 <- ctd %>% 
+  mutate(date = mdy(date),
+         year = year(date),
+         month = month(date))
+
+p2 <- ctd2 %>% 
+  filter(year == 2022 & month == 7) %>% 
+  ggplot(aes(x = temp, y = pres, color = as.factor(date))) +
+  geom_line(size = 3, orientation = "y") +
+      labs(x = "Temp",
+           y = "Depth (m)",
+       color = NULL) +
+  scale_y_reverse() +
+  ylim(30, 0) +
+  scale_color_npg() +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 40), #35
+        axis.text = element_text(color = "black"))
+  
+```
+```{r}
+p3 <- ctd2 %>% 
+  filter(year == 2022 & month == 7) %>% 
+  ggplot(aes(x = sal, y = pres, color = as.factor(date))) +
+  geom_line(size = 3, orientation = "y") +
+      labs(x = "Salinity",
+           y = "Depth (m)",
+       color = NULL) +
+  scale_y_reverse() +
+  ylim(30, 0) +
+  scale_color_npg() +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 40), #35
+        axis.text = element_text(color = "black"))
+```
+```{r}
+p4 <- ctd2 %>% 
+  filter(year == 2022 & month == 7) %>% 
+  ggplot(aes(x = N2, y = pres, color = as.factor(date))) +
+  geom_line(size = 3, orientation = "y") +
+      labs(x = "N2",
+           y = "Depth (m)",
+       color = NULL) +
+  scale_y_reverse() +
+  ylim(30, 0) +
+  scale_color_npg() +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 40), #35
+        axis.text = element_text(color = "black"))
+```
+```{r}
+fig_prof <- p1 + p2 + p3 + p4
+
+ggsave(here("figures", "panel_profiles_July_2022.png"), fig_prof,
+        width = 16, height = 22, dpi = 300)
+```
+
+
+
+```{r}
+sal_max <- b22_long %>%
+  mutate(month = month(date),
+         year = year(date)) %>% 
+  filter(year == 2022 & month == 7) %>% 
+  filter(par == "mean_sal") 
+```
+
+```{r}
+# Calculate halocline depth based on maximum salinity gradient
+# Assumes data frame with columns: cast_id, depth, salinity
+
+library(tidyverse)
+
+# Function to calculate halocline depth for a single cast
+calculate_halocline <- function(df, max_depth = 20, min_gradient = -0.1) {
+  # Sort by depth and limit search to upper water column
+  df <- df %>% 
+    arrange(depth) %>%
+    filter(depth <= max_depth)
+  
+  # Need at least 3 points to calculate meaningful gradients
+  if(nrow(df) < 3) {
+    return(tibble(halocline_depth = NA_real_, max_sal_gradient = NA_real_))
+  }
+  
+  # Calculate salinity gradient (dS/dz)
+  df <- df %>%
+    mutate(
+      depth_diff = lead(depth) - depth,
+      salinity_diff = lead(salinity) - salinity,
+      sal_gradient = salinity_diff / depth_diff
+    ) %>%
+    # Remove last row (NA from lead()) and any infinite values
+    filter(!is.na(sal_gradient), is.finite(sal_gradient))
+  
+  # Check if we have any data left
+  if(nrow(df) == 0) {
+    return(tibble(halocline_depth = NA_real_, max_sal_gradient = NA_real_))
+  }
+  
+  # Find depths with significant negative gradients (halocline indicators)
+  strong_gradients <- df %>%
+    filter(sal_gradient <= min_gradient)
+  
+  if(nrow(strong_gradients) > 0) {
+    # Take the strongest gradient among the significant ones
+    halocline_idx <- which.min(strong_gradients$sal_gradient)
+    halocline_depth <- strong_gradients$depth[halocline_idx]
+    gradient_strength <- strong_gradients$sal_gradient[halocline_idx]
+  } else {
+    # No strong halocline found - return the strongest available gradient
+    max_grad_idx <- which.min(df$sal_gradient)
+    halocline_depth <- df$depth[max_grad_idx]
+    gradient_strength <- df$sal_gradient[max_grad_idx]
+  }
+  
+  return(tibble(
+    halocline_depth = halocline_depth,
+    max_sal_gradient = gradient_strength
+  ))
+}
+
+# Apply to multiple casts (searching top 20m)
+ctd_haloclines <- ctd2 %>%
+  select(date, depth = pres, salinity = sal) %>% 
+  group_by(date) %>%
+  do(calculate_halocline(., max_depth = 20, min_gradient = -0.1)) %>%
+  ungroup()
+
+
+# If you want to add halocline info back to original data
+# ctd_with_halocline <- ctd_data %>%
+#   left_join(ctd_haloclines, by = "cast_id")
+
+# Quality control: flag weak haloclines or missing data
+ctd_haloclines_qc <- ctd_haloclines %>%
+  mutate(
+    halocline_strength = case_when(
+      is.na(max_sal_gradient) ~ "no_data",
+      max_sal_gradient > -0.05 ~ "weak",    # adjusted for your salinity range
+      max_sal_gradient <= -0.05 ~ "strong"
+    )
+  )
+
+# Summary by halocline strength
+halocline_summary <- ctd_haloclines_qc %>%
+  group_by(halocline_strength) %>%
+  summarise(
+    n_casts = n(),
+    mean_depth = mean(halocline_depth, na.rm = TRUE),
+    sd_depth = sd(halocline_depth, na.rm = TRUE),
+    .groups = "drop"
+  )
+```
+
+```{r}
+ctd_haloclines %>% 
+  mutate(month  = month(date),
+         year = year(date)) %>% 
+  ggplot(aes(x = as.factor(month), y = halocline_depth)) +
+  geom_boxplot() +
+  geom_point(aes(fill = as.factor(year)), pch = 21, size = 4) +
+  scale_y_reverse()
+```
+```{r}
+# Simple BC Wind Stress Calculator - Start to Finish
+# Using Smith et al. (1991) HEXOS drag coefficient
+
+library(dplyr)
+
+# Function to calculate wind components from speed and direction
+calculate_wind_components <- function(wind_speed, wind_direction_deg) {
+  wind_dir_rad <- wind_direction_deg * pi / 180
+  
+  u_wind <- -wind_speed * sin(wind_dir_rad)  # east-west component
+  v_wind <- -wind_speed * cos(wind_dir_rad)  # north-south component
+  
+  return(data.frame(u_wind = u_wind, v_wind = v_wind))
+}
+
+# Function to calculate wind stress using Smith drag coefficient
+calculate_wind_stress <- function(u_wind, v_wind) {
+  # BC air density
+  rho_air <- 1.24  # kg/m³
+  
+  # Wind speed
+  wind_speed <- sqrt(u_wind^2 + v_wind^2)
+  
+  # Smith et al. (1991) drag coefficient
+  CD <- (0.61 + 0.063 * wind_speed) * 1e-3
+  
+  # Wind stress components (N/m²)
+  tau_x <- rho_air * CD * wind_speed * u_wind  # east-west stress
+  tau_y <- rho_air * CD * wind_speed * v_wind  # north-south stress
+  
+  return(data.frame(tau_x = tau_x, tau_y = tau_y))
+}
+
+# Main processing function
+process_wind_data <- function(data) {
+  
+  # Sort data by datetime to ensure proper time order
+  data <- data %>% arrange(datetime)
+  
+  # Calculate wind components
+  wind_components <- calculate_wind_components(data$wind_speed, data$wind_direction)
+  
+  # Calculate wind stress
+  wind_stress <- calculate_wind_stress(wind_components$u_wind, wind_components$v_wind)
+  
+  # Combine everything
+  results <- data %>%
+    bind_cols(wind_components) %>%
+    bind_cols(wind_stress) %>%
+    mutate(
+      # Convert to hourly wind stress (multiply by seconds per hour)
+      hourly_tau_y = tau_y * 3600,
+      
+      # Add year for grouping
+      year = format(datetime, "%Y"),
+      
+      # Calculate cumulative north-south wind stress (overall)
+      cumulative_tau_y = cumsum(hourly_tau_y)
+    ) %>%
+    
+    # Calculate annual cumulative wind stress (resets each year)
+    group_by(year) %>%
+    mutate(
+      annual_cumulative_tau_y = cumsum(hourly_tau_y)
+    ) %>%
+    ungroup()
+  
+  return(results)
+}
+
+# ===== APPLY TO YOUR DATA =====
+
+# Load your hourly data (adjust filename and column names as needed)
+# your_data <- read.csv("your_hourly_wind_file.csv")
+# your_data$datetime <- as.POSIXct(your_data$datetime)
+
+# Example with multi-year hourly sample data (replace with your actual data)
+# Uncomment the lines below and replace with your data loading
+
+# Sample multi-year hourly data for demonstration
+sample_data <- wh %>% 
+  select(datetime = date, wind_speed = WindSpd_Avg, wind_direction = WindDir_Avg)
+
+# Process the data
+results <- process_wind_data(sample_data)
+
+
+```
+
+
+
+```{r}
+results %>%
+  ggplot() + 
+  geom_line(aes(x = datetime, y = tau_y)) +
+  # geom_vline(xintercept = as_date("2024-07-03")) +
+  # geom_vline(xintercept = as_date("2024-07-28")) +
+  # labs(y = bquote(Wind Stress~"("*m*s^-1*")"),
+  #      fill = "Dir.") +
+  scale_x_datetime(limits = as_datetime(c("2024-01-01", "2024-12-01")),
+               expand = c(0, 0), date_breaks = "1 week",
+               date_labels = "%b%d") +
+  theme_bw() +
+  theme(legend.position = c(0.95, 0.75),
+        legend.background = element_blank(),
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank())
+```
+```{r}
+ws_cs <- results %>% 
+  filter(!is.na(hourly_tau_y)) %>% 
+  mutate(year = year(datetime)) %>% 
+  group_by(year) %>% 
+  mutate(cs = cumsum(tau_y)) %>%
+  ungroup()
+
+ws_cs %>% 
+  filter(year == 2022) %>% 
+  mutate(yday = yday(datetime)) %>% 
+  ggplot(aes(x = datetime, y = cs, color = as.factor(year))) +
+  geom_line() 
+
+```
+
+```{r}
+s24_1 <- b24_long %>% 
+  filter(par == "fl_med_day") %>% 
+  mutate(month = month(date)) %>% 
+  ggplot(aes(x = date, y = val)) +
+  geom_point() +
+  geom_line(size = 3) +
+  geom_vline(xintercept = as.Date("2022-07-03")) +
+  geom_vline(xintercept = as.Date("2022-07-28")) +
+  ylim(0, 12) +
+  scale_x_date(limits = as_date(c("2024-07-01", "2024-08-05")),
+               expand = c(0, 0), date_breaks = "1 week",
+               date_labels = "%b%d") +
+  labs(y = bquote(Chl[BUOY]~"(mg" ~ m^-3*")"),
+                  color = NULL) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank())
+```
+
+```{r}
+s24_2 <- b24_long %>% 
+  filter(par == "mean_temp") %>% 
+  mutate(month = month(date)) %>% 
+  ggplot(aes(x = date, y = val)) +
+  geom_point() +
+  geom_line(size = 3) +
+  geom_vline(xintercept = as.Date("2022-07-03")) +
+  geom_vline(xintercept = as.Date("2022-07-28")) +
+  ylim(10, 18) +
+  scale_x_date(limits = as_date(c("2024-07-01", "2024-08-05")),
+               expand = c(0, 0), date_breaks = "1 week",
+               date_labels = "%b%d") +
+  labs(y = "Temp",
+       color = NULL) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank())
+```
+```{r}
+s24_3 <- b24_long %>% 
+  filter(par == "mean_sal") %>% 
+  mutate(month = month(date)) %>% 
+  ggplot(aes(x = date, y = val)) +
+  geom_point() +
+  geom_line(size = 3) +
+  geom_vline(xintercept = as.Date("2022-07-03")) +
+  geom_vline(xintercept = as.Date("2022-07-28")) +
+  ylim(16, 31) +
+  scale_x_date(limits = as_date(c("2024-07-01", "2024-08-05")),
+               expand = c(0, 0), date_breaks = "1 week",
+               date_labels = "%b%d") +
+    labs(y = "Salinity",
+       color = NULL) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank())
+```
+```{r}
+s24_4 <- wh %>%
+  ggplot() + 
+  geom_point(aes(x = date, y = WindSpd_Avg, fill = WindDir_Avg),
+            pch = 21, size = 6, color = "transparent") +
+  scale_fill_viridis_b() +
+  geom_vline(xintercept = as_datetime("2022-07-03")) +
+  geom_vline(xintercept = as_datetime("2022-07-28")) +
+  ylim(0, 12) +
+  labs(y = bquote(Wind~"("*m*s^-1*")"),
+       fill = "Dir.") +
+  scale_x_datetime(limits = as_datetime(c("2024-07-01", "2024-08-05")),
+               expand = c(0, 0), date_breaks = "1 week",
+               date_labels = "%b%d") +
+  theme_bw() +
+  theme(legend.position = c(0.95, 0.75),
+        legend.background = element_blank(),
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank())
+```
+```{r}
+s24_5 <- q %>% 
+  filter(year == 2024) %>% 
+  ggplot(aes(x = date, y = Q/10^3, fill = Watershed_group)) +
+  geom_area() +
+  geom_vline(xintercept = as.Date("2022-07-03")) +
+  geom_vline(xintercept = as.Date("2022-07-28")) +
+  scale_fill_uchicago() +
+  scale_x_date(limits = as_date(c("2024-07-01", "2024-08-05")),
+               expand = c(0, 0), date_breaks = "1 week",
+               date_labels = "%b%d") +
+  theme_bw() +
+  labs(y = bquote("Dis." ~ "("*10^3~m^3*~s^-1*")"),
+       fill = NULL) +
+  ylim(0, 5) +
+  theme(
+        legend.position = "none",
+        # legend.position = c(1.02, 0.5),
+        legend.key.height = unit(0.5, "cm"),
+        # legend.text = element_text(size = 25),
+        legend.title = element_blank(),
+        text = element_text(size = 38), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank())
+```
+```{r}
+
+s24_6 <- p %>% 
+  ggplot(aes(x = date, y = `1hourPAR`)) +
+  geom_point() +
+  geom_line(size = 3) +
+  geom_vline(xintercept = as_datetime("2022-07-03")) +
+  geom_vline(xintercept = as_datetime("2022-07-28")) +
+  scale_x_datetime(limits = as_datetime(c("2024-07-01", "2024-08-05")),
+               expand = c(0, 0), date_breaks = "1 week",
+               date_labels = "%b%d") +
+    labs(y = bquote("PAR" ~ "("*mol~m^2*")"),
+       color = NULL) +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+
+```
+```{r}
+s24_fig <- s24_1 / s24_2 / s24_3 / s24_4 / s24_5 / s24_6
+
+ggsave(here("figures", "panel_kc10_2024_July.png"), s24_fig,
+        width = 16, height = 24, dpi = 300)
+```

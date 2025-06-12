@@ -59,6 +59,8 @@ ctd2 <- read_csv(here("outputs", "enviro_ctd_nut_2025-04-15.csv"))
 
 f <- read_csv(here("outputs", "corrected_flu_2025-05-09.csv"))
 
+c_join2 <- read_csv(here("outputs", "chl_combined_fzh_kc10.csv"))
+
 ```
 ```{r}
 #Removing cyanobacteria from the counts.
@@ -360,17 +362,17 @@ decomp.mult(c5$chl_comb)
 
 
 ```{r}
-c_join %>% 
-  filter(pres == 10 | pres == 5) %>% 
-  ggplot(aes(x = date, y = chl_comb, color = as.factor(pres))) +
-  geom_line()
-
-test <- c_join %>% 
-  filter(pres == 10)
-
-test %>% 
-  ggplot(aes(x = chl_comb, y = temp)) +
-  geom_point()
+# c_join %>% 
+#   filter(pres == 10 | pres == 5) %>% 
+#   ggplot(aes(x = date, y = chl_comb, color = as.factor(pres))) +
+#   geom_line()
+# 
+# test <- c_join %>% 
+#   filter(pres == 10)
+# 
+# test %>% 
+#   ggplot(aes(x = chl_comb, y = temp)) +
+#   geom_point()
 ```
 
 
@@ -621,6 +623,77 @@ f1 <- c_d_mm %>%
         axis.text = element_text(color = "black"))
   
 ```
+```{r}
+c_d_mm %>%
+  filter(pres < 11 | pres == 30) %>%
+  ggplot(aes(x = month, y = chl_mm, color = as.factor(pres))) +
+  geom_ribbon(aes( y = chl_mm, ymin = chl_mm + sd_mm, ymax = chl_mm - sd_mm,
+                  fill = as.factor(pres)), alpha = 0.2, color = "transparent") +
+  geom_line(size = 3) +
+  scale_color_npg() +
+  scale_fill_npg() +
+  labs(fill = "Depth (m)",
+       color = "Depth (m)",
+       y = bquote(Chl~"(mg" ~ m^-3*")"),
+       x = NULL) +
+  scale_x_continuous(breaks = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+                     limits = c(1,12),
+                     labels = c("J", "F", "M", "A", "M", "J",
+                                "J", "A", "S", "O", "N", "D")) +
+  # facet_wrap(~as.factor(pres), ncol = 1) +
+  theme_bw() +
+  theme(legend.position = c(0.8, 0.8),
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"))
+```
+
+```{r}
+c2 <- c_join2 %>% 
+  filter(pres < 31) %>%
+  group_by(date, station) %>% 
+  mutate(n = n()) %>% 
+  ungroup() %>% 
+  filter(n >= 4)
+
+c2_mm <- c2 %>% 
+  mutate(month = month(date)) %>% 
+  group_by(month, pres) %>% 
+  summarise(chl_mm = mean(chl_comb, na.rm = T),
+            sd_mm = sd(chl_comb, na.rm = T)) %>% 
+  ungroup()
+```
+```{r}
+f2 <- c2_mm %>%
+  filter(pres < 11 | pres == 30) %>%
+  ggplot(aes(x = month, y = chl_mm, color = as.factor(pres))) +
+  geom_ribbon(aes( y = chl_mm, ymin = chl_mm + sd_mm, ymax = chl_mm - sd_mm,
+                  fill = as.factor(pres)), alpha = 0.2, color = "transparent") +
+  geom_line(size = 3) +
+  scale_color_npg() +
+  scale_fill_npg() +
+  labs(fill = "Depth (m)",
+       color = "Depth (m)",
+       y = bquote(Chl~"(mg" ~ m^-3*")"),
+       x = NULL) +
+  scale_x_continuous(breaks = c(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12),
+                     limits = c(1,12),
+                     labels = c("J", "F", "M", "A", "M", "J",
+                                "J", "A", "S", "O", "N", "D")) +
+  # facet_wrap(~as.factor(pres), ncol = 1) +
+  theme_bw() +
+  theme(legend.position = c(0.8, 0.8),
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"))
+```
+```{r}
+c2 %>% 
+  ggplot(aes(x = date, y = chl_comb, color = station)) +
+  geom_line() +
+  geom_point() +
+  facet_wrap(~pres)
+```
+
+
 
 ```{r}
 f2 <- c_sf_mm %>%
