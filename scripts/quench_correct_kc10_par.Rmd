@@ -569,6 +569,7 @@ par_0_join %>%
 ggsave(here("figures", "validate_par2.png"), 
         width = 20, height = 5, dpi = 300)
 ```
+
 ```{r}
 write.csv(p6, here("outputs", "corrected_par_2025-06-03.csv"))
 ```
