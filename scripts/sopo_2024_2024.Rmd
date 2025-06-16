@@ -174,7 +174,7 @@ f1 <- ggplot() +
            size = 10) +
   scale_fill_manual(values = c("blue", "red"), guide = FALSE) +
   ggsci::scale_color_futurama() +
-  labs(y = bquote(Wind~"("*m^-3*s^-3*")")) +
+  labs(y = bquote(Wind~"("*m^3~s^-3*")")) +
   scale_x_date(limits = as_date(c("2024-01-01", "2024-12-31")),
                expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
   theme_bw() +
@@ -330,6 +330,29 @@ b24 %>%
 #Convert to a datetime so I can plot months.
 ```
 
+```{r}
+# Option 3: Viridis-inspired but with dark blue start
+fluor_palette_v3 <- colorRampPalette(c(
+  "#08306b",  # Deep navy blue
+  "#1f4e7a",  # Dark blue
+  "#2e6b89",  # Medium blue
+  "#4d8fc7",  # Bright blue
+  "#2fb3d4",  # Vivid cyan-blue (bloom threshold)
+  "#00a693",  # Bright teal
+  "#4daf4a",  # Vibrant green
+  "#8cc152",  # Lime green
+  "#ffd23f",  # Bright yellow
+  "#ff8c42",  # Vivid orange
+  "#e74c3c"   # Bold red-orange
+))
+
+colors_v3 <- fluor_palette_v3(50)
+
+create_fluor_breaks <- function(max_val = 50, bloom_threshold = 5) {
+  # More breaks in the 0-10 range to capture bloom dynamics
+  c(0, 1, 2, 3, 4, bloom_threshold, 7, 10, 15, 20, 30, 40, max_val)
+}
+```
 
 
 ```{r}
@@ -359,8 +382,10 @@ f4 <- f24 %>%
   # cmocean::scale_fill_cmocean(name = "delta",
   #                             limits = c(0, 20),
   #                             oob = scales::squish) +
-  scale_fill_viridis_c(limits = c(0, 10),
-                       oob = scales::squish) +
+  # scale_fill_viridis_c(limits = c(0, 10),
+  #                      oob = scales::squish) +
+  scale_fill_gradientn(colors = colors_v3,
+                       values = scales::rescale(c(0, 2, 5, 10, 20, 50))) +
   labs(fill = bquote(CTD[FLU]~"(mg" ~ m^-3*")"),
        y = "Depth") +
   scale_x_date(limits = as_date(c("2024-01-01", "2024-12-31")),
@@ -412,7 +437,23 @@ chem_tchla <- arrange(mutate(chem_tchla,
                                 group = factor(group,
                                 levels = order_chem)))
 
+# Alternative version with more distinct colors (no similar reds)
+npg_distinct_colors <- c(
+  "#E64B35",  # Red
+  "#4DBBD5",  # Light blue  
+  "#00A087",  # Teal
+  "#3C5488",  # Dark blue
+  "#F39B7F",  # Orange
+  "#8491B4",  # Purple
+  "#91D1C2",  # Light teal
+  "#FFC107",  # Golden yellow (replacing second red)
+  "#7E6148",  # Brown
+  "#B09C85"   # Light brown
+)
 
+scale_fill_npg_distinct <- function(...) {
+  ggplot2::scale_fill_manual(values = npg_distinct_colors, ...)
+}
 ```
 
 ```{r}
@@ -431,7 +472,7 @@ f5 <- chem_tchla %>%
   annotate("text", x = as.Date("2024-12-15"), y = 5.4,
            label = "5m",
            size = 10) +
-  ggsci::scale_fill_npg() +
+  scale_fill_npg_distinct() +
   # lims(y = c(0, 5)) +
   scale_x_date(limits = as.Date(c("2024-01-01", "2024-12-31")),
                expand = c(0, 0),
@@ -456,7 +497,7 @@ test2 <- ggarrange(f1, f3, f4, f5, ncol = 1)
 
   
 
-ggsave(here("figures", "panel_qu39_2024_CHEMTAX_2.png"), test2,
+ggsave(here("figures", "panel_qu39_2024_CHEMTAX_2_color_v1.png"), test2,
         width = 16, height = 16, dpi = 300)
 ```
 
