@@ -18,6 +18,8 @@ library(ggsci)
 ```{r}
 t <- read_csv(here("files", "8_binAvg-1749754037389.csv")) 
 
+q <- read_csv(here("outputs", "flagged_turbidity_casts.csv")) 
+
 ```
 
 ```{r}
@@ -37,11 +39,16 @@ t1 <- t %>%
 num_cast <- t1 %>% 
   select(castpk) %>% 
   distinct()
+
+#Using the results of the QC script to filter out bad casts.
+t2 <- t1 %>% 
+  left_join(q) %>% 
+  filter(!flag_type == "bad_cast")
 ```
 
 ```{r}
 #Selecting cast 10 minimum values and calculating mean and standard deviation of minimum values. Removing surface data as sometimes there are downspikes at the surface
-dark_10 <- t1 %>%
+dark_10 <- t2 %>%
   filter(pres > 10) %>% 
   group_by(castpk, date, ctd_num) %>% 
   slice_min(t, n = 10, with_ties = F) %>% 
@@ -50,22 +57,22 @@ dark_10 <- t1 %>%
             n = n()) %>% 
   ungroup()
 
-#Filtering profiles with high dark value standard deviations
+#Filtering profiles with high dark value standard deviations - none exist anymore after bad casts were removed.
 check_dev <- dark_10 %>% 
   filter(min_std > 0.1)
 
 #Plotting casts with high dark value standard deviations
-t1 %>% 
-  filter(castpk %in% check_dev$castpk) %>% 
-  ggplot(aes(x = t, y = pres)) +
-  geom_line(orientation = "y") +
-  scale_y_reverse() +
-  facet_grid(~castpk, scales = "free")
+# t2 %>% 
+#   filter(castpk %in% check_dev$castpk) %>% 
+#   ggplot(aes(x = t, y = pres)) +
+#   geom_line(orientation = "y") +
+#   scale_y_reverse() +
+#   facet_grid(~castpk, scales = "free")
 ```
 ```{r}
 #removing casts with high dark value standard deviations from the main data sheet
-t2 <- t1 %>% 
-  filter(!castpk %in% check_dev$castpk) %>% 
+t3 <- t2 %>% 
+  # filter(!castpk %in% check_dev$castpk) %>% 
   left_join(dark_10)
 ```
 
@@ -76,172 +83,53 @@ dark_10 %>%
   ggplot(aes(x = date, y = min_mean, color = as.factor(ctd_num))) +
   geom_point(size = 3) +
   facet_grid(ctd_num~., scales = "free_y") +
-  scale_color_npg()
+  scale_color_npg() +
+  theme_bw()
 
-#some clear deviations and drift - is this natural variability or is it an issue with the sensor
-#I think 18066 and 80217 show big jumps while the other might be more of consistent drift?
+#Some massive differences especially 18066 in 2024 - why?
 ```
 ```{r}
-t2 %>% 
+t3 %>% 
   mutate(year = year(date)) %>% 
-  filter(year > 2020 & ctd_num == 80217) %>% 
+  filter(year == 2014 & ctd_num == 18066 & min_mean < 1) %>% 
   ggplot(aes(x = t, y = pres)) +
   geom_line(orientation = "y") +
   scale_y_reverse() +
-  facet_grid(~castpk, scales = "free")
+  facet_wrap(~castpk, scales = "free")
 
 #Clearly some issues here with this sensor - I think I need to go through and visually inspect - not much way around it.
 ```
 
 ```{r}
-# Turbidity Profile Inspector
-# Interactive tool to visually inspect turbidity profiles and flag bad ones
-
-# Initialize flagged casts vector
-flagged_casts <- c()
-
-# Function to plot and inspect individual profiles
-inspect_profile <- function(data, cast_id) {
-  # Filter data for specific cast
-  profile_data <- data[data$castpk == cast_id, ]
-  
-  # Create the plot
-  p <- ggplot(profile_data, aes(x = t, y = -pres)) +
-    geom_line(color = "darkblue", size = 1) +
-    geom_point(color = "darkblue", size = 0.8, alpha = 0.7) +
-    labs(
-      title = paste("Cast ID:", cast_id),
-      x = "Turbidity",
-      y = "Depth (negative pressure)",
-      subtitle = paste("n =", nrow(profile_data), "observations")
-    ) +
-    theme_bw() +
-    theme(
-      plot.title = element_text(size = 14, face = "bold"),
-      axis.text = element_text(size = 11),
-      axis.title = element_text(size = 12)
-    )
-  
-  print(p)
-  
-  # Interactive flagging
-  cat("\n")
-  cat("Cast ID:", cast_id, "\n")
-  cat("Profile range: Turbidity", round(min(profile_data$t, na.rm = TRUE), 3), 
-      "to", round(max(profile_data$t, na.rm = TRUE), 3), "\n")
-  cat("Depth range:", round(min(profile_data$pres, na.rm = TRUE), 1), 
-      "to", round(max(profile_data$pres, na.rm = TRUE), 1), "\n")
-  
-  response <- readline(prompt = "Flag this profile? (y/n/q to quit): ")
-  
-  if (tolower(response) == "y") {
-    flagged_casts <<- c(flagged_casts, cast_id)
-    cat("Cast", cast_id, "flagged!\n\n")
-  } else if (tolower(response) == "q") {
-    return("quit")
-  } else {
-    cat("Cast", cast_id, "accepted.\n\n")
-  }
-  
-  return("continue")
-}
-
-# Main inspection function
-inspect_all_profiles <- function(data, start_from = 1) {
-  unique_casts <- unique(data$castpk)
-  total_casts <- length(unique_casts)
-  
-  cat("Starting turbidity profile inspection...\n")
-  cat("Total profiles to inspect:", total_casts, "\n")
-  cat("Currently flagged:", length(flagged_casts), "profiles\n\n")
-  
-  for (i in start_from:total_casts) {
-    cast_id <- unique_casts[i]
-    
-    cat("Progress:", i, "of", total_casts, "\n")
-    
-    result <- inspect_profile(data, cast_id)
-    
-    if (result == "quit") {
-      cat("Inspection stopped at cast", i, "of", total_casts, "\n")
-      break
-    }
-  }
-  
-  # Summary
-  cat("\n=== INSPECTION COMPLETE ===\n")
-  cat("Total profiles inspected:", i, "\n")
-  cat("Flagged profiles:", length(flagged_casts), "\n")
-  
-  if (length(flagged_casts) > 0) {
-    cat("Flagged cast IDs:", paste(flagged_casts, collapse = ", "), "\n")
-  }
-}
-
-# Utility functions
-show_flagged <- function() {
-  if (length(flagged_casts) == 0) {
-    cat("No profiles currently flagged.\n")
-  } else {
-    cat("Flagged cast IDs (", length(flagged_casts), "):\n")
-    cat(paste(flagged_casts, collapse = ", "), "\n")
-  }
-}
-
-unflag_cast <- function(cast_id) {
-  if (cast_id %in% flagged_casts) {
-    flagged_casts <<- flagged_casts[flagged_casts != cast_id]
-    cat("Cast", cast_id, "unflagged.\n")
-  } else {
-    cat("Cast", cast_id, "was not flagged.\n")
-  }
-}
-
-clear_flags <- function() {
-  flagged_casts <<- c()
-  cat("All flags cleared.\n")
-}
-
-# Quick preview function to see multiple profiles at once
-preview_profiles <- function(data, n_profiles = 9) {
-  unique_casts <- unique(data$castpk)
-  selected_casts <- sample(unique_casts, min(n_profiles, length(unique_casts)))
-  
-  plot_list <- list()
-  for (i in 1:length(selected_casts)) {
-    profile_data <- data[data$castpk == selected_casts[i], ]
-    plot_list[[i]] <- ggplot(profile_data, aes(x = t, y = -pres)) +
-      geom_line(color = "darkblue") +
-      geom_point(color = "darkblue", size = 0.5, alpha = 0.7) +
-      labs(title = paste("Cast", selected_casts[i]), x = "Turbidity", y = "Depth") +
-      theme_bw() +
-      theme(axis.text = element_text(size = 8),
-            plot.title = element_text(size = 10))
-  }
-  
-  # Arrange plots (requires gridExtra)
-  if (requireNamespace("gridExtra", quietly = TRUE)) {
-    gridExtra::grid.arrange(grobs = plot_list, ncol = 3)
-  } else {
-    cat("Install gridExtra package for multi-panel preview: install.packages('gridExtra')\n")
-    for (p in plot_list) print(p)
-  }
-}
-
-# Usage instructions
-cat("=== TURBIDITY PROFILE INSPECTOR ===\n")
-cat("Usage:\n")
-cat("1. inspect_all_profiles(t1)           - Start inspection from beginning\n")
-cat("2. inspect_all_profiles(t1, start_from = 50) - Resume from cast 50\n")
-cat("3. preview_profiles(t1)               - Quick preview of random profiles\n")
-cat("4. show_flagged()                     - Show currently flagged casts\n")
-cat("5. unflag_cast(cast_id)               - Remove flag from specific cast\n")
-cat("6. clear_flags()                      - Clear all flags\n")
-cat("\nDuring inspection: 'y' = flag, 'n' = accept, 'q' = quit\n")
+#For now, just going to subtract the dark value from each cast.
+t3 <- t3 %>% 
+  mutate(t_cor = t - min_mean)
 ```
+
 ```{r}
-preview_profiles(t1)
-inspect_all_profiles(t1)
+t3 %>% 
+  mutate(year = year(date),
+         month = month(date)) %>%
+  filter(pres == 5 | pres == 10 | pres == 30) %>% 
+  group_by(month, pres) %>% 
+  summarise(t_cor = mean(t_cor)) %>% 
+  ungroup() %>% 
+  ggplot(aes(x = month, y = t_cor, color = as.factor(pres))) +
+  geom_line(size = 2)
 ```
 
+```{r}
+t3 %>% 
+  mutate(year = year(date),
+         month = month(date)) %>%
+  filter(month == 7 & pres > 4 & station == "KC10") %>% 
+  ggplot(aes(x = t_cor, y = pres)) +
+  geom_point(alpha = 0.1) +
+  geom_smooth(orientation = "y", span = 0.1) +
+  scale_y_reverse() +
+  facet_wrap(~year) +
+  theme_bw()
+    
+
+```
 
