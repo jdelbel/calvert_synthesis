@@ -1550,14 +1550,17 @@ gam.check(best_model)
 ```
 
 ```{r}
-improved_model <- gam(f ~ s(ws, k = 10) + s(t, k = 15) + s(s, k = 10) + 
-                     te(doy, ws, k = c(4, 6)) + 
-                     te(doy, t, k = c(8, 12)),
+improved_model <- gam(f ~ s(ws, k = 20) + s(t, k = 20) + s(s, k = 20) + 
+                     te(doy, ws, k = c(20, 20)) + 
+                     te(doy, t, k = c(20, 20)),
                      family = Gamma(link = "log"),
                      data = b22)
 
 gam.check(improved_model)
 ```
+
+
+
 ```{r}
 # Create individual smooth plots with ggplot styling
 p1 <- draw(improved_model, select = "s(ws)") + 
