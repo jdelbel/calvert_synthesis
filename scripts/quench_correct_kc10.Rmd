@@ -15,20 +15,10 @@ library(lubridate) #working with dates and time
 #Plotting
 library(ggsci) #Nice color schemes
 library(patchwork) #plotting panels
-library(egg)
+library(egg) #I think this is for panel plotting as well.
 
 #Interpolation
 library(rioja) # add fits to discrete data
-
-
-# library(MBA)
-# library(mgcv)
-# library(FNN)
-# library(zoo)
-# library(reshape2)
-
-# library(egg)
-
 ```
 
 ```{r}
@@ -40,10 +30,18 @@ c <- read_csv(here("files", "2025-03-25_HakaiData_chlorophyll.csv"))
 #Downloading PAR data from pruth and Koeye
 par <- read_csv(here("files", "par_pruth_koeye.csv"))
 
-par_c <- read_csv(here("files", "8_binAvg-1743715163197.csv")) 
-  
-  
+# par_c <- read_csv(here("files", "8_binAvg-1743715163197.csv")) 
+
 ```
+
+```{r}
+#What stations have I done baseline correction on?
+
+station <- f %>% 
+  distinct(station)
+```
+
+
 
 ```{r}
 #Working with CTD fluorescence datasets
@@ -934,7 +932,7 @@ cor_npq_prof %>%
         text = element_text(size = 35), #35
         axis.text = element_text(color = "black"))
 
-ggsave(here("figures", "check_npq_prof.png"),
+ggsave(here("figures", "check_npq_prof_2025-06-30-orig.png"),
         width = 20, height = 24, dpi = 300)
 
 #2023-05-14 is quite interesting as greatly downscaling the raw profile - why?
