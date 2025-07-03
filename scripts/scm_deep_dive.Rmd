@@ -11,12 +11,23 @@ library(readxl)
 library(patchwork)
 library(lubridate)
 library(zoo)
+library(ggsci)
 ```
 
 ```{r}
 #Slope and NPQ Corrected CTD data
 f <- read_csv(here("outputs", "corrected_flu_2025-04-10.csv"))
+
+e <- read_csv(here("outputs", "enviro_ctd_nut_2025-04-15.csv"))
+
+w <- read_csv(here("outputs", "enviro_weather_2025-04-14.csv"))
 ```
+```{r}
+#add surface bottle chl?
+```
+
+
+
 
 ```{r}
 # Detect subsurface chlorophyll accumulations that surface measurements miss
@@ -48,7 +59,7 @@ detect_subsurface_accumulation <- function(data) {
       profile_mean = mean(f_npq[pres <= 50], na.rm = TRUE), #profile mean chl
       
       # Biomass distribution metrics
-      subsurface_fraction = subsurface_integrated / integrated_chl,  # Fraction below 5m
+      subsurface_integrated_fraction = subsurface_integrated / integrated_chl,  # Fraction below 5m
       surface_fraction = surface_integrated / integrated_chl,
       surface_representation = surface_chl / profile_mean,  # How well surface represents profile
       
@@ -58,53 +69,75 @@ detect_subsurface_accumulation <- function(data) {
     
     mutate(
       # Calculate enhancement ratios
-      subsurface_enhancement = subsurface_max / surface_chl,
-      buoy_enhancement = subsurface_max / near_surface_chl,
+      subsurface_max_surface_ratio = subsurface_max / surface_chl,
+      subsurface_max_near_surface_ratio = subsurface_max / near_surface_chl,
       
       # Key criteria for subsurface accumulation
       has_subsurface_accumulation = case_when(
         # High biomass cases where surface misses significant chlorophyll
         subsurface_max > 5.0 &  # Substantial chlorophyll maximum
-        subsurface_enhancement > 1.5 &  # Surface underestimates
-        subsurface_fraction > 0.4 &  # Significant subsurface biomass
+        (subsurface_max_surface_ratio > 1.5 | subsurface_max_near_surface_ratio > 1.5) &  # Surface underestimates
+        subsurface_integrated_fraction > 0.4 &  # Significant subsurface biomass
         subsurface_max_depth > 5 ~ TRUE,  # Clearly subsurface
         
         # Moderate biomass but strong subsurface signal
         subsurface_max > 2.0 &
-        subsurface_enhancement > 2.0 &
-        subsurface_fraction > 0.5 &
+        subsurface_max_surface_ratio > 2.0 &
+        subsurface_integrated_fraction > 0.5 &
         surface_representation < 0.7 ~ TRUE,  # Surface poorly represents profile
         
         # Lower biomass but very strong subsurface concentration
-        subsurface_enhancement > 3.0 &
-        subsurface_fraction > 0.6 &
+        subsurface_max_surface_ratio > 3.0 &
+        subsurface_integrated_fraction > 0.6 &
         subsurface_max_depth > 3 ~ TRUE,
         
         TRUE ~ FALSE
       ),
       
-      # Classify type of subsurface accumulation
+  # Classify type of subsurface accumulation
       accumulation_type = case_when(
-        !has_subsurface_accumulation ~ "none",
-        subsurface_max > 10 ~ "high_biomass",
-        subsurface_max > 5 ~ "moderate_biomass", 
-        subsurface_enhancement > 3 ~ "low_biomass", #was strong_subsurface, but changed to low biomass as SCM present
+        !has_subsurface_accumulation & integrated_chl > 100 ~ "surface_bloom",
+        !has_subsurface_accumulation ~ "no bloom",
+        subsurface_max > 10 ~ "high_biomass_scm",
+        subsurface_max > 5 ~ "moderate_biomass_scm", 
+        subsurface_max_surface_ratio > 3 ~ "low_biomass_scm", #was strong_subsurface, but changed to low biomass as SCM present, but at low concentrations
         TRUE ~ "weak_subsurface"
       ),
       
       # Estimate how much surface measurements underestimate
-      surface_underestimation = (subsurface_max - surface_chl) / subsurface_max,
-      buoy_underestimation = (subsurface_max - near_surface_chl) / subsurface_max,
+      subsurface_max_surface_perc_change = (subsurface_max - surface_chl) / subsurface_max,
+      subsurface_max_near_surface_perc_change = (subsurface_max - near_surface_chl) / subsurface_max,
       
       # Depth characteristics
-      accumulation_depth = ifelse(has_subsurface_accumulation, subsurface_max_depth, NA)
+      subsurface_max_depth = ifelse(has_subsurface_accumulation, subsurface_max_depth, NA)
     ) %>%
     
-    select(date, station, has_subsurface_accumulation, accumulation_type, 
-           accumulation_depth, subsurface_max, surface_chl, near_surface_chl,
-           subsurface_enhancement, buoy_enhancement, subsurface_fraction,
-           surface_underestimation, buoy_underestimation, integrated_chl,
-           surface_integrated, subsurface_integrated, month)
+    mutate(
+      season = case_when(
+        month %in% c(12, 1, 2) ~ "Winter",
+        month %in% c(3, 4, 5) ~ "Spring", 
+        month %in% c(6, 7, 8) ~ "Summer",
+        month %in% c(9, 10, 11) ~ "Fall"
+      )) %>% 
+    
+    select(date,
+           station,
+           season,
+           has_subsurface_accumulation,
+           accumulation_type, 
+           subsurface_max_depth,
+           subsurface_max,
+           surface_chl,
+           near_surface_chl,
+           subsurface_max_surface_ratio,
+           subsurface_max_near_surface_ratio,
+           subsurface_max_surface_perc_change,
+           subsurface_max_near_surface_perc_change,
+           integrated_chl,
+           surface_integrated,
+           subsurface_integrated, 
+           subsurface_integrated_fraction,
+           month)
 }
 
 # 
@@ -127,7 +160,7 @@ debug_subsurface_accumulation <- function(data, target_date = NULL, target_stati
       
       cat("DETECTION RESULT:", target_result$has_subsurface_accumulation, "\n")
       cat("Type:", target_result$accumulation_type, "\n")
-      cat("Depth:", target_result$accumulation_depth, "m\n\n")
+      cat("Depth:", target_result$subsurface_max_depth, "m\n\n")
       
       cat("BIOMASS METRICS:\n")
       cat("Surface chl (0-2m):", round(target_result$surface_chl, 2), "\n")
@@ -136,13 +169,13 @@ debug_subsurface_accumulation <- function(data, target_date = NULL, target_stati
       cat("Integrated chl:", round(target_result$integrated_chl, 2), "\n\n")
       
       cat("SURFACE MISS ANALYSIS:\n")
-      cat("Surface underestimation:", round(target_result$surface_underestimation * 100, 1), "%\n")
-      cat("Buoy underestimation:", round(target_result$buoy_underestimation * 100, 1), "%\n")
-      cat("Subsurface biomass fraction:", round(target_result$subsurface_fraction * 100, 1), "%\n\n")
+      cat("Surface underestimation <2m:", round(target_result$subsurface_max_surface_ratio * 100, 1), "%\n")
+      cat("Surface underestimation <5m:", round(target_result$subsurface_max_near_surface_ratio * 100, 1), "%\n")
+      cat("Subsurface biomass fraction:", round(target_result$subsurface_integrated_fraction * 100, 1), "%\n\n")
       
       cat("ENHANCEMENT RATIOS:\n")
-      cat("vs Surface:", round(target_result$subsurface_enhancement, 2), "x\n")
-      cat("vs Buoy depth:", round(target_result$buoy_enhancement, 2), "x\n\n")
+      cat("vs <2m:", round(target_result$subsurface_max_surface_ratio, 2), "x\n")
+      cat("vs <5m:", round(target_result$subsurface_max_near_surface_ratio, 2), "x\n\n")
       
       cat("PROFILE SUMMARY:\n")
       cat("Depth range:", min(profile_data$pres), "-", max(profile_data$pres), "m\n")
@@ -183,9 +216,9 @@ summarize_subsurface_events <- function(detection_results) {
     group_by(accumulation_type, season) %>% #Add station here if not including 
     summarise(
       count = n(),
-      mean_depth = round(mean(accumulation_depth, na.rm = TRUE), 1),
+      mean_depth = round(mean(subsurface_max_depth, na.rm = TRUE), 1),
       mean_max_chl = round(mean(subsurface_max, na.rm = TRUE), 1),
-      mean_surface_miss = round(mean(surface_underestimation * 100, na.rm = TRUE), 1),
+      mean_surface_miss = round(mean(subsurface_max_surface_ratio * 100, na.rm = TRUE), 1),
       mean_integrated = round(mean(integrated_chl, na.rm = TRUE), 1),
       mean_surface_integrated = round(mean(surface_integrated, na.rm = TRUE), 1),
       .groups = 'drop'
@@ -197,13 +230,13 @@ summarize_subsurface_events <- function(detection_results) {
 ```{r}
 # Example usage:
 subsurface_results <- detect_subsurface_accumulation(f)
-debug_example <- debug_subsurface_accumulation(f, "2022-07-28", "KC10")
+debug_example <- debug_subsurface_accumulation(f, "2021-06-05", "KC10")
 event_summary <- summarize_subsurface_events(subsurface_results)
 ```
 
 ```{r}
 f %>% 
-  filter(date == "2017-08-14" & station == "KC10" & pres < 51) %>% 
+  filter(date == "2021-06-05" & station == "KC10" & pres < 51) %>% 
   ggplot(aes(x = f_npq, y = pres)) +
   geom_line(orientation = "y") +
   scale_y_reverse()
@@ -218,15 +251,64 @@ Compile a list and then:
 ```{r}
 event_summary %>% 
   ggplot(aes(x = as.factor(season), y = count, fill = accumulation_type)) +
-  geom_col(position = "dodge")
+  geom_col(position = "stack", color = "black") +
+  scale_fill_npg()
 ```
 
 ```{r}
+# 2023-05-14
+# 2016-05-26
+# 2018-05-23
+```
+
+
+
+```{r}
 subsurface_results %>% 
-  ggplot(aes(x = as.factor(month), y = surface_underestimation)) +
+  ggplot(aes(x = as.factor(month), y = surface_integrated)) +
   geom_boxplot()
 ```
 
+```{r}
+# Convert wind direction from degrees to radians
+w$wd_rad <- w$wd_dm * pi / 180
+
+# Calculate u and v components
+w$u_component <- w$w_dm * sin(w$wd_rad)  # eastward component
+w$v_component <- w$w_dm * cos(w$wd_rad)  # northward component
+
+w <- w %>% 
+  select(-...1)
+
+e1 <- e %>% 
+  filter(pres == 1) %>% 
+  select(-...1)
+
+
+scm_driver <- subsurface_results %>% 
+  left_join(w) %>% 
+  left_join(e1)
+
+
+```
+
+
+```{r}
+scm_driver %>%
+  filter(month == 5) %>% 
+  mutate(year = year(date)) %>% 
+    ggplot(aes(x = as.factor(accumulation_type), y = v_component)) +
+  geom_boxplot() +
+  geom_point(aes(fill = as.factor(year)), pch = 21, size = 4) +
+  scale_fill_viridis_d(option = "H") +
+  facet_wrap(~season)
+```
+
+```{r}
+scm_driver %>% 
+  ggplot(aes(x = subsurface_max_surface_perc_change, y = temp)) +
+  geom_point()
+```
 
 
 
