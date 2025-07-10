@@ -27,39 +27,51 @@ library(ggsci)
 ```
 
 ```{r}
-# 2024 corrected buoy data
+#QC'd Buoy fluorescence data
+
+#2022
 b22 <- read.csv(here("outputs", "buoy_corr_dm_2022.csv"))
+#2024
 b24 <- read.csv(here("outputs", "buoy_corr_dm_2024.csv"))
 
-bsal <- read.csv(here("files", "buoy_ts_all.csv"))
+#Buoy salinity data
+buoy_ts <- read.csv(here("files", "buoy_ts_all.csv"))
 
-#Corrected CTD data
+#Corrected CTD fluorescence data
 f <- read_csv(here("outputs", "corrected_flu_2025-05-09.csv"))
 
+#I'm not sure what this is and I need to see where it is used.
 fm <- read_csv(here("files", "flu_2022-03-09.csv"))
 
-
-#Downloading discrete chlorophyll samples
+#Downloading discrete chlorophyll samples - This could be done using the API
 cd <- read_csv(here("files", "2024-12-05_HakaiData_chlorophyll.csv"))
 
+#I think these are discrete depth bottle profiles from two dates where the flourometer data failed.
+
+#cm = chlorophylly march 
 cm <- read_csv(here("files", "chl_2022-03-09.csv")) 
+#cs = chlorophyll september
 cs <- read_csv(here("files", "chl_2022-09-09.csv")) 
-  
+
+#I think here I am downloading all of the wind data from the lookout?
 wind <- read_csv(here("files", "wind_all.csv"))
 
-wind_anom <- read.csv(here("outputs", "wind_anom_day_2025-04-25.csv"))
+#This is a daily wind anomaly file that I calculated elsewhere. Don't think I need
+# wind_anom <- read.csv(here("outputs", "wind_anom_day_2025-04-25.csv"))
 
-#CHEMTAX
+#CHEMTAX outputs
 chem <- read_csv(here("files", "chemtax_kc10_2024.csv"))
 
+#This is daily mean and lagged data? Why do I have a separate wind file??? Something is funny here as it is very different than the values from the other file.
 weath <- read_csv(here("outputs", "enviro_weather_2025-04-14.csv"))
 
+#This is upwelling data.
 up <- read_csv(here("files_big", "up_2025-04-24.csv"))
 
 ```
 
 ```{r}
-#Pulling out discharge model outputs for each watershed type and pivoting to long format for plotting.
+#Pulling out discharge model outputs for each watershed type and pivoting to long format for plotting
 q <- weath %>% 
   select(date, Q_GM, Q_SM, Q_RA) %>% 
   pivot_longer(c(Q_GM:Q_RA), names_to = "Watershed_group", values_to = "Q") %>% 
@@ -70,120 +82,125 @@ q <- weath %>%
   mutate(year = year(date))
 ```
 
-
-
 ```{r}
+#Pulling out the median nightly buoy fluorescence value from my QC process
+
+#2022
 b22 <- b22 %>% 
   select(date_corr, fl_med_day) %>% 
   distinct()
 
+#2024
 b24 <- b24 %>% 
   select(date_corr, fl_med_day) %>% 
   distinct()
 
-bsal2 <- bsal %>% 
+buoy_fl <- rbind(b22, b24)
+```
+
+```{r}
+#Pulling out buoy salinity data without flags for 2022 and 2024 and calculating daily mean
+buoy_ts <- buoy_ts %>% 
   mutate(measurementTime = mdy_hm(measurementTime),
          date = date(measurementTime)) %>% 
-  filter(WaterSalinity_UQL == 2 & (year == 2022 | year == 2024)) %>% 
+  filter(year %in% c(2022, 2024)) %>% 
   group_by(date) %>% 
-  summarise(mean_sal = mean(WaterSalinity)) %>% 
-  ungroup()
+  summarise(mean_sal = mean(WaterSalinity[WaterSalinity_UQL == 2], na.rm = TRUE),
+            mean_temp = mean(WaterTemp[WaterTemp_UQL == 2], na.rm = TRUE),
+            .groups = "drop")
+```
 
-btemp <- bsal %>% 
-  mutate(measurementTime = mdy_hm(measurementTime),
-         date = date(measurementTime)) %>% 
-  filter(WaterTemp_UQL == 2 & (year == 2022 | year == 2024)) %>% 
-  group_by(date) %>% 
-  summarise(mean_temp = mean(WaterTemp)) %>% 
-  ungroup()
 
-bsal2 <- bsal2 %>% 
-  left_join(btemp)
-
+```{r}
+#Pulling out 2022 profiles from the corrected CTD data - This isn't needed here I dont think - I think I do this so I can pull in the interpolated profiles elsewhere.
 f22 <- f %>% 
   mutate(year = year(date)) %>% 
   filter(year == 2022)
+```
+
+
+```{r}
+#Setting the date format for the daily mean wind data and then pulling out each year separated.
+#Why do they need to be separated?
 
 wind <- wind %>% 
   mutate(date = mdy(date))
 
+#2022
 wind22 <- wind %>% 
   filter(year == 2022)
 
+#2024
 wind24 <- wind %>% 
   filter(year == 2024)
 ```
 
 ```{r}
+#Pulling out the Bulk chlorophyll data for 2022, setting the 0m depth to 1m to join with the CTD fluorometer data and then changing an issue sample with the size-fractionated sum concentration
 cd <- cd %>% 
   filter(filter_type == "Bulk GF/F" & line_out_depth == 0) %>% 
   select(date, chla) %>% 
   mutate(chla = case_when(date == "2022-05-05" ~ 1.41,
                           TRUE ~ as.numeric(chla)))
 
+#Wrangling the March 2022 discrete chlorophyll fluorescence profile
 cm <- cm %>% 
   filter(filter_type == "Bulk GF/F") %>% 
   select(date, pres = line_out_depth, chla) %>% 
   mutate(pres = case_when(pres == 0 ~ 1,
                           TRUE ~ as.numeric(pres)))
-
+#Wrangling the September 2022 discrete chlorophyll fluorescence profile
 cs <- cs %>% 
   filter(filter_type == "Bulk GF/F") %>% 
   select(date, pres = line_out_depth, chla) %>% 
   mutate(pres = case_when(pres == 0 ~ 1,
                           TRUE ~ as.numeric(pres)))
 
-c2 <- rbind(cm, cs)
+#Combining the MArch and September discrete chlorophyll profile
+c_interp <- rbind(cm, cs)
 
-c2_wide <- c2 %>% 
+#Converting discrete chlorophyll profiles to wide format.
+c_interp <- c_interp %>% 
   pivot_wider(names_from = "date", values_from = "chla")
 ```
 
-```{r}
-# fm <- fm %>% 
-#   select(pres = `Pressure (dbar)`, flu = `Fluorometry Chlorophyll (ug/L)`)
-# 
-# fmc <- fm %>% 
-#   left_join(cm) 
-```
-```{r}
-#lets just interpolate the chlorophyll bottle data rather than "fix" the fluorometer
-spec <- c2_wide %>% 
-  select(2:3)
 
-# spec <- as.data.frame(chl_mm_wide$chl_dm)
-depth <- c2_wide$pres
+```{r}
+# Select chlorophyll data and depths
+spec <- c_interp %>%
+  select(`2022-03-09`, `2022-09-09`)
 
-# interpolate new dataset to every 0.5 cm
-# using default method (linear)
-x.new <- seq(1, 101, by = 1)
+depth <- c_interp$pres
+
+# Interpolate to 1m intervals covering full depth range
+x.new <- seq(1, max(depth), by = 1)  # Goes to 325m now
 sp.interp <- interp.dataset(y = spec, x = depth, xout = x.new,
-                               method = "loess", span = 0.5)
+                           method = "loess", span = 0.8)
 
-interp <- as.data.frame(sp.interp)
-
-interp <- interp %>% 
+# Create interpolated dataframe
+interp <- as.data.frame(sp.interp) %>% 
   mutate(pres = x.new) %>% 
-  pivot_longer(cols = (1:2), names_to = "date", values_to = "f_npq") %>% 
-  # mutate(date = date(date)) %>% 
-  mutate_at(vars(f_npq), funs(round(., 2))) %>% 
-  # mutate(date = as.Date("2022-03-09")) %>% 
-  select(date, pres, f_npq) %>% 
-  mutate(date = date(date))
+  pivot_longer(cols = 1:2, names_to = "date", values_to = "f_npq") %>% 
+  mutate(date = as.Date(date),
+         f_npq = round(f_npq, 2)) %>% 
+  select(date, pres, f_npq)
 ```
 
 
 
 ```{r}
+#Wrangling the buoy fluorometer data and joining 2022 and 2024 with both
 b22 <- b22 %>% 
   mutate(date = lubridate::ymd(date_corr),
          year = lubridate::year(date),
          yday = lubridate::yday(date)) 
 
+#2022 data joins
 b22 <- b22 %>% 
   left_join(cd) %>% 
-  left_join(bsal2)
+  left_join(buoy_ts)
 
+#2024 data
 b24 <- b24 %>% 
   mutate(date = lubridate::ymd(date_corr),
          year = lubridate::year(date),
@@ -191,7 +208,9 @@ b24 <- b24 %>%
 
 b24 <- b24 %>% 
   left_join(cd) %>% 
-  left_join(bsal2)
+  left_join(buoy_ts)
+
+#It would probably be less verbose if I just joined this within in single dataframe earlier
 ```
 
 
@@ -235,33 +254,13 @@ chem_dup <- chem_tchla %>%
 #Good to move forward
 ```
 
-
-
 ```{r}
-# f1 <- wind24 %>% 
-#   ggplot(aes(x = date, y = WindSpd_Med^3, color = as.factor(year))) +
-#   geom_line(size = 2) +
-#   ggsci::scale_color_futurama() +
-#   scale_x_date(limits = as_date(c("2024-01-01", "2024-12-31")),
-#                expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
-#   labs(y = bquote(Wind~"("*m^-3*")")) +
-#   theme_bw() +
-#   theme(legend.position = "none",
-#         text = element_text(size = 35), #35
-#         axis.text = element_text(color = "black"),
-#         axis.title.x = element_blank(),
-#         axis.text.x = element_blank())
-```
-
-
-```{r}
-# f1 <- 
-  
+#Creating the 2022 wind speed cubed plot - what if i added wind direction or vector here?
 f1_22 <-   ggplot() + 
   geom_line(data = wind22, aes(x = date, y = WindSpd_Med^3),
             size = 2) +
   ylim(0, 6000) +
-  labs(y = bquote(Wind~"("*m^-3*s^-3*")")) +
+  labs(y = bquote(Wind~"("*m^3*s^-3*")")) +
   scale_x_date(limits = as_date(c("2022-01-01", "2022-12-31")),
                expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
   theme_bw() +
@@ -272,9 +271,9 @@ f1_22 <-   ggplot() +
 ```
 
 ```{r}
-# f1 <- 
-  
-f1_24 <-   ggplot() + 
+#Creating the 2024 wind speed cubed plot
+f1_24 <-   
+  ggplot() + 
   geom_line(data = wind24, aes(x = date, y = WindSpd_Med^3),
             size = 2) +
   ylim(0, 6000) +
@@ -291,18 +290,20 @@ f1_24 <-   ggplot() +
 ```
 
 ```{r}
-# Order locations from fjord to shelf
+# Ordering watershed discharge types for plotting 
 riv_loc <- c("Q_GM",
              "Q_SM",
              "Q_RA",
              "Q_tot")
 
+#Setting the order in the discharge dataframe.
 q <- arrange(mutate(q, 
                       Watershed_group = factor(Watershed_group,
                                                levels = riv_loc)))
 ```
 
 ```{r}
+#Creating the 2022 freshwater discharge plot.
 fd_22 <- q %>% 
   filter(year == 2022) %>% 
   ggplot(aes(x = date, y = Q/10^3, fill = Watershed_group)) +
@@ -329,6 +330,7 @@ fd_22 <- q %>%
 ```
 
 ```{r}
+#Creating the 2024 freshwater discharge plot
 fd_24 <- q %>% 
   filter(year == 2024) %>% 
   ggplot(aes(x = date, y = Q/10^3, fill = Watershed_group)) +
@@ -357,15 +359,14 @@ fd_24 <- q %>%
 ```
 
 ```{r}
+#Setting up the joined buoy surface discrete chlorophyll 2m nightly median fluorescence and 2m daily mean salinity/temperature for plotting - pivoting long.
 b22_long <- b22 %>%
   select(date_corr, chla, fl_med_day, mean_sal, mean_temp) %>% 
   pivot_longer(c(chla, fl_med_day, mean_sal, mean_temp),
               names_to = "par", values_to = "val") %>% 
   mutate(date = date(date_corr))
-```
 
-```{r}
-
+#Same for 2024
 b24_long <- b24 %>%
   select(date_corr, chla, fl_med_day, mean_sal, mean_temp) %>% 
   pivot_longer(c(chla, fl_med_day, mean_sal, mean_temp),
@@ -375,6 +376,7 @@ b24_long <- b24 %>%
 ```
 
 ```{r}
+#Creating buoy figure for 2022 - discrete surface chlorophyll, daily fluorescence/temp/sal
 f2_22 <-
   b22_long %>% 
   ggplot(aes(x = date, y = val, color = par)) +
@@ -410,43 +412,7 @@ f2_22 <-
 ```
 
 ```{r}
-b22_long %>% 
-  mutate(month = month(date)) %>% 
-  ggplot(aes(x = date, y = val, color = par)) +
-  annotate("rect", xmin = date("2024-03-05"), xmax = date("2024-04-30"),
-           ymin = 0, ymax = Inf, fill = 'darkgreen', alpha = 0.2) +
-  geom_line(data = filter(b22_long,
-                          par == "fl_med_day"),
-            size = 2) +
-  geom_line(data = filter(b22_long,
-                          par == "mean_sal"),
-            size = 2) +
-  geom_line(data = filter(b22_long,
-                          par == "mean_temp"),
-            size = 2) +
-  geom_point(data = filter(b22_long,
-                          par == "chla"),
-            size = 4, pch = 8, stroke = 2) +
-  ggsci::scale_color_jama(labels = c(expression(Chl[Discrete]),
-                                         expression(Chl[BUOY]),
-                                         expression(Salinity[BUOY]),
-                                     expression(Temp[BUOY]))) +
-  scale_x_date(limits = as_date(c("2022-01-01", "2023-01-01")),
-               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
-  ylab(expression(atop(Chl~"(mg" ~ m^-3*")",
-                       paste("Salinity,"~"Temp")))) +
-  labs(color = NULL) +
-  theme_bw() +
-  theme(legend.position = "none",
-        text = element_text(size = 35), #35
-        axis.text = element_text(color = "black"),
-        axis.title.x = element_blank(),
-        axis.text.x = element_blank())
-```
-
-
-
-```{r}
+#Same buoy plot for 2024
 f2_24 <-
   b24_long %>% 
   ggplot(aes(x = date, y = val, color = par)) +
@@ -484,18 +450,16 @@ f2_24 <-
 ```
 
 ```{r}
-wfb <- ggarrange(f1_22, f1_24, fd_22, fd_24, f2_22, f2_24, ncol = 2)
-
-  
-
-ggsave(here("figures", "panel_kc10_w_f_b.png"), wfb,
-        width = 24, height = 12, dpi = 300)
+#This makes a plot with wind, freshwater and buoy data with 2022 and 2024 side by side. Not super useful, but does show how different each year is.
+# wfb <- ggarrange(f1_22, f1_24, fd_22, fd_24, f2_22, f2_24, ncol = 2)
+# 
+# ggsave(here("figures", "panel_kc10_w_f_b.png"), wfb,
+#         width = 24, height = 12, dpi = 300)
 ```
 
 
 
 ```{r}
-
 #Setting plotting order phytoplankton groups
 
 #Order phytoplankton groups roughly from smallest to largest - create order list
@@ -507,12 +471,11 @@ chem_tchla <- arrange(mutate(chem_tchla,
                                 group = factor(group,
                                 levels = order_chem)))
 
-
+#Brign over color palette from SOPO
 ```
 
 ```{r}
-# f5 <- 
-  
+#Plot of the full CHEMTAX time-series
 chem_tchla %>%
   ggplot() +
   geom_bar(aes(date, contribution, fill = fct_rev(group)),
@@ -539,40 +502,12 @@ chem_tchla %>%
 ggsave(here("figures", "chemtax_19-24.png"),
         width = 16, height = 6, dpi = 300)
 ```
-```{r}
-test <- weath %>% 
-  select(date, Q_Total) %>% 
-  filter(!is.na(Q_Total)) %>% 
-  mutate(yday = yday(date),
-         year = year(date)) %>% 
-  group_by(yday) %>% 
-  mutate(mean = mean(Q_Total)) %>% 
-  ungroup()
 
-test %>% 
-  filter(year == 2020) %>% 
-  ggplot() +
-  geom_line(aes(x = yday, y = mean)) +
-  geom_line(aes(x = yday, y = Q_Total, color = as.factor(year)))
-
-```
 
 
 
 
 ```{r}
-#Now plot 2024 CTD profiles
-# f2 <- 
-  
-# f4 <- 
-  
-# f3 <-  
-# https://cran.r-project.org/web/packages/palr/vignettes/nasa_chla.html
-maxrange <- c(0.01, 35)
-pal <- chl_pal(palette = TRUE)
-sb <- which(pal$breaks >= maxrange[1] & pal$breaks <= maxrange[2])
-
-
 f22_plot <- f22 %>% 
   select(date, pres, f_npq)
 
@@ -641,7 +576,9 @@ create_fluor_breaks <- function(max_val = 50, bloom_threshold = 5) {
 
 
 ```{r}
-f3 <-
+# f3 <-
+  
+  
   f22_plot %>% 
   filter(pres < 51) %>% 
   mutate(day = 15,

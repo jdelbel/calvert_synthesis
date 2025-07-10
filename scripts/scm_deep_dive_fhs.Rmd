@@ -1,0 +1,1189 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+#Upload packages
+library(tidyverse)
+library(here)
+library(readxl)
+library(patchwork)
+library(lubridate)
+library(zoo)
+library(ggsci)
+library(scales)
+library(akima)
+library(viridis)
+library(fields)
+```
+
+---
+Functions
+---
+
+```{r}
+# Detect subsurface chlorophyll accumulations that surface measurements miss
+detect_subsurface_accumulation <- function(data) {
+  data %>%
+    group_by(castpk, date, station) %>%
+    filter(pres >= 1, pres <= 50, !is.na(f_npq)) %>%
+    arrange(pres) %>%
+    filter(n() >= 6, max(pres) >= 8) %>%  # cast has at least 7 depths and max >8m
+    summarise(
+      # Surface reference (what a buoy/satellite would see)
+      surface_chl = mean(f_npq[pres <= 2], na.rm = TRUE),  # give the mean of only <2m
+      near_surface_chl = mean(f_npq[pres <= 5], na.rm = TRUE),  # Buoy depth
+      
+      # Subsurface characteristics
+      subsurface_max = max(f_npq[pres > 2], na.rm = TRUE),  # Below surface measurement
+      subsurface_max_depth = pres[pres > 2][which.max(f_npq[pres > 2])], #finds max flu below 2m depth
+      
+      # Integrated characteristics (key for biomass assessment)
+      integrated_chl = sum(f_npq[pres <= 50] * c(diff(pres[pres <= 50])[1],
+                                                 diff(pres[pres <= 50])),
+                           na.rm = TRUE),  # Rough integration
+      surface_integrated = sum(f_npq[pres <= 5] * diff(pres)[1], na.rm = TRUE),  # Surface layer only
+      subsurface_integrated = integrated_chl - surface_integrated,  # Below surface layer
+      
+      # Profile characteristics
+      max_chl_overall = max(f_npq, na.rm = TRUE), #profile max chl
+      max_depth_overall = pres[which.max(f_npq)], #profile max depth
+      profile_mean = mean(f_npq[pres <= 50], na.rm = TRUE), #profile mean chl
+      
+      # Biomass distribution metrics
+      subsurface_integrated_fraction = subsurface_integrated / integrated_chl,  # Fraction below 5m
+      surface_fraction = surface_integrated / integrated_chl,
+      surface_representation = surface_chl / profile_mean,  # How well surface represents profile
+      
+      month = month(first(date)),
+      .groups = 'drop'
+    ) %>%
+    
+    mutate(
+      # Calculate enhancement ratios
+      subsurface_max_surface_ratio = subsurface_max / surface_chl,
+      subsurface_max_near_surface_ratio = subsurface_max / near_surface_chl,
+      
+      # Key criteria for subsurface accumulation
+      has_subsurface_accumulation = case_when(
+        # High biomass cases where surface misses significant chlorophyll
+        subsurface_max > 5.0 &  # Substantial chlorophyll maximum
+        (subsurface_max_surface_ratio > 1.5 | subsurface_max_near_surface_ratio > 1.5) &  # Surface underestimates
+        subsurface_integrated_fraction > 0.4 &  # Significant subsurface biomass
+        subsurface_max_depth > 5 ~ TRUE,  # Clearly subsurface
+        
+        # Moderate biomass but strong subsurface signal
+        subsurface_max > 2.0 &
+        subsurface_max_surface_ratio > 2.0 &
+        subsurface_integrated_fraction > 0.5 &
+        surface_representation < 0.7 ~ TRUE,  # Surface poorly represents profile
+        
+        # Lower biomass but very strong subsurface concentration
+        subsurface_max_surface_ratio > 3.0 &
+        subsurface_integrated_fraction > 0.6 &
+        subsurface_max_depth > 3 ~ TRUE,
+        
+        TRUE ~ FALSE
+      ),
+      
+  # Classify type of subsurface accumulation
+      accumulation_type = case_when(
+        !has_subsurface_accumulation & integrated_chl > 100 ~ "surface_bloom",
+        !has_subsurface_accumulation ~ "no bloom",
+        subsurface_max > 10 ~ "high_biomass_scm",
+        subsurface_max > 5 ~ "moderate_biomass_scm", 
+        subsurface_max_surface_ratio > 3 ~ "low_biomass_scm", #was strong_subsurface, but changed to low biomass as SCM present, but at low concentrations
+        TRUE ~ "weak_subsurface"
+      ),
+      
+      # Estimate how much surface measurements underestimate
+      subsurface_max_surface_perc_change = (subsurface_max - surface_chl) / subsurface_max,
+      subsurface_max_near_surface_perc_change = (subsurface_max - near_surface_chl) / subsurface_max,
+      
+      # Depth characteristics
+      subsurface_max_depth = ifelse(has_subsurface_accumulation, subsurface_max_depth, NA)
+    ) %>%
+    
+    mutate(
+      season = case_when(
+        month %in% c(12, 1, 2) ~ "Winter",
+        month %in% c(3, 4, 5) ~ "Spring", 
+        month %in% c(6, 7, 8) ~ "Summer",
+        month %in% c(9, 10, 11) ~ "Fall"
+      )) %>% 
+    
+    select(castpk,
+           date,
+           station,
+           season,
+           has_subsurface_accumulation,
+           accumulation_type, 
+           subsurface_max_depth,
+           subsurface_max,
+           surface_chl,
+           near_surface_chl,
+           subsurface_max_surface_ratio,
+           subsurface_max_near_surface_ratio,
+           subsurface_max_surface_perc_change,
+           subsurface_max_near_surface_perc_change,
+           integrated_chl,
+           surface_integrated,
+           subsurface_integrated, 
+           subsurface_integrated_fraction,
+           month)
+}
+
+# 
+
+# Enhanced debug function for subsurface accumulations
+debug_subsurface_accumulation <- function(data, target_date = NULL, target_station = NULL) {
+  result <- detect_subsurface_accumulation(data)
+  
+  if (!is.null(target_date) && !is.null(target_station)) {
+    target_result <- result %>% 
+      filter(date == target_date, station == target_station)
+    
+    profile_data <- data %>%
+      filter(date == target_date, station == target_station) %>%
+      arrange(pres)
+    
+    if (nrow(target_result) > 0 && nrow(profile_data) > 0) {
+      cat("=== SUBSURFACE ACCUMULATION ANALYSIS ===\n")
+      cat("Station:", target_station, "Date:", target_date, "\n\n")
+      
+      cat("DETECTION RESULT:", target_result$has_subsurface_accumulation, "\n")
+      cat("Type:", target_result$accumulation_type, "\n")
+      cat("Depth:", target_result$subsurface_max_depth, "m\n\n")
+      
+      cat("BIOMASS METRICS:\n")
+      cat("Surface chl (0-2m):", round(target_result$surface_chl, 2), "\n")
+      cat("Near-surface chl (0-5m):", round(target_result$near_surface_chl, 2), "\n")
+      cat("Subsurface maximum:", round(target_result$subsurface_max, 2), "\n")
+      cat("Integrated chl:", round(target_result$integrated_chl, 2), "\n\n")
+      
+      cat("SURFACE MISS ANALYSIS:\n")
+      cat("Surface underestimation <2m:", round(target_result$subsurface_max_surface_ratio * 100, 1), "%\n")
+      cat("Surface underestimation <5m:", round(target_result$subsurface_max_near_surface_ratio * 100, 1), "%\n")
+      cat("Subsurface biomass fraction:", round(target_result$subsurface_integrated_fraction * 100, 1), "%\n\n")
+      
+      cat("ENHANCEMENT RATIOS:\n")
+      cat("vs <2m:", round(target_result$subsurface_max_surface_ratio, 2), "x\n")
+      cat("vs <5m:", round(target_result$subsurface_max_near_surface_ratio, 2), "x\n\n")
+      
+      cat("PROFILE SUMMARY:\n")
+      cat("Depth range:", min(profile_data$pres), "-", max(profile_data$pres), "m\n")
+      cat("Chl range:", round(min(profile_data$f_npq, na.rm = TRUE), 2), "-", 
+          round(max(profile_data$f_npq, na.rm = TRUE), 2), "\n")
+      
+      # Show depth distribution
+      depth_bins <- cut(profile_data$pres, breaks = c(0, 5, 10, 20, 50), 
+                       labels = c("0-5m", "5-10m", "10-20m", "20-50m"))
+      depth_summary <- profile_data %>% 
+        mutate(depth_bin = depth_bins) %>%
+        group_by(depth_bin) %>%
+        summarise(mean_chl = mean(f_npq, na.rm = TRUE), .groups = 'drop') %>%
+        filter(!is.na(depth_bin))
+      
+      cat("Depth distribution:\n")
+      for(i in 1:nrow(depth_summary)) {
+        cat(" ", depth_summary$depth_bin[i], ":", round(depth_summary$mean_chl[i], 2), "\n")
+      }
+    }
+  }
+  
+  return(result)
+}
+
+# Summary function to characterize all subsurface accumulations
+summarize_subsurface_events <- function(detection_results) {
+  detection_results %>%
+    # filter(has_subsurface_accumulation) %>% #Probably worth turning this of as useful to see when not present?
+    mutate(
+      season = case_when(
+        month %in% c(12, 1, 2) ~ "Winter",
+        month %in% c(3, 4, 5) ~ "Spring", 
+        month %in% c(6, 7, 8) ~ "Summer",
+        month %in% c(9, 10, 11) ~ "Fall"
+      )
+    ) %>%
+    group_by(accumulation_type, season) %>% #Add station here if not including 
+    summarise(
+      count = n(),
+      mean_depth = round(mean(subsurface_max_depth, na.rm = TRUE), 1),
+      mean_max_chl = round(mean(subsurface_max, na.rm = TRUE), 1),
+      mean_surface_miss = round(mean(subsurface_max_surface_ratio * 100, na.rm = TRUE), 1),
+      mean_integrated = round(mean(integrated_chl, na.rm = TRUE), 1),
+      mean_surface_integrated = round(mean(surface_integrated, na.rm = TRUE), 1),
+      .groups = 'drop'
+    ) %>%
+    arrange(desc(mean_max_chl))
+}
+
+# Summary function to characterize all subsurface accumulations
+summarize_subsurface_events_month <- function(detection_results) {
+  detection_results %>%
+    # filter(has_subsurface_accumulation) %>% #Probably worth turning this of as useful to see when not present?
+    mutate(
+      month = month(date)
+    ) %>%
+    group_by(accumulation_type, month) %>% #Add station here if not including 
+    summarise(
+      count = n(),
+      mean_depth = round(mean(subsurface_max_depth, na.rm = TRUE), 1),
+      mean_max_chl = round(mean(subsurface_max, na.rm = TRUE), 1),
+      mean_surface_miss = round(mean(subsurface_max_surface_ratio * 100, na.rm = TRUE), 1),
+      mean_integrated = round(mean(integrated_chl, na.rm = TRUE), 1),
+      mean_surface_integrated = round(mean(surface_integrated, na.rm = TRUE), 1),
+      .groups = 'drop'
+    ) %>%
+    arrange(desc(mean_max_chl))
+}
+
+# Summary function to characterize all subsurface accumulations
+summarize_subsurface_events_station <- function(detection_results) {
+  detection_results %>%
+    # filter(has_subsurface_accumulation) %>% #Probably worth turning this of as useful to see when not present?
+    group_by(accumulation_type, station) %>% #Add station here if not including 
+    summarise(
+      count = n(),
+      mean_depth = round(mean(subsurface_max_depth, na.rm = TRUE), 1),
+      mean_max_chl = round(mean(subsurface_max, na.rm = TRUE), 1),
+      mean_surface_miss = round(mean(subsurface_max_surface_ratio * 100, na.rm = TRUE), 1),
+      mean_integrated = round(mean(integrated_chl, na.rm = TRUE), 1),
+      mean_surface_integrated = round(mean(surface_integrated, na.rm = TRUE), 1),
+      .groups = 'drop'
+    ) %>%
+    arrange(desc(mean_max_chl))
+}
+
+# Create publication-quality SCM profile plot with turbidity
+plot_scm_profile <- function(data, target_date, target_station, max_depth = 50) {
+  
+  # Filter data
+  profile_data <- data %>%
+    filter(date == target_date & station == target_station & pres <= max_depth)
+  
+  if(nrow(profile_data) == 0) {
+    stop("No data found for specified date and station")
+  }
+  
+  # Create the plot
+  p <- ggplot(profile_data, aes(y = pres)) +
+    # Chlorophyll profile
+    geom_line(aes(x = f_npq), color = "#2E8B57", size = 1.2, alpha = 0.8) +
+    geom_point(aes(x = f_npq), color = "#2E8B57", size = 2.5, alpha = 0.9) +
+    
+    # Turbidity profile on secondary axis
+    geom_line(aes(x = t * max(profile_data$f_npq, na.rm = TRUE) / max(profile_data$t, na.rm = TRUE)), 
+              color = "#8B4513", size = 1.0, alpha = 0.7, linetype = "dashed") +
+    geom_point(aes(x = t * max(profile_data$f_npq, na.rm = TRUE) / max(profile_data$t, na.rm = TRUE)), 
+               color = "#8B4513", size = 2.0, alpha = 0.8, shape = 17) +
+    
+    # Scales and labels
+    scale_y_reverse(name = "Depth (m)", 
+                    breaks = pretty_breaks(n = 8),
+                    expand = c(0.02, 0)) +
+    scale_x_continuous(name = expression(paste("Chlorophyll fluorescence (", mu, "g L"^{-1}, ")")),
+                       breaks = pretty_breaks(n = 6),
+                       expand = c(0.02, 0),
+                       sec.axis = sec_axis(~ . * max(profile_data$t, na.rm = TRUE) / max(profile_data$f_npq, na.rm = TRUE),
+                                          name = "Turbidity (NTU)",
+                                          breaks = pretty_breaks(n = 5))) +
+    
+    # Theme
+    theme_classic(base_size = 12) +
+    theme(
+      # Axis styling
+      axis.line = element_line(color = "black", size = 0.5),
+      axis.ticks = element_line(color = "black", size = 0.5),
+      axis.text = element_text(color = "black", size = 10),
+      axis.title = element_text(color = "black", size = 12, face = "bold"),
+      axis.title.y.right = element_text(color = "#8B4513", angle = 90),
+      axis.text.y.right = element_text(color = "#8B4513"),
+      axis.ticks.y.right = element_line(color = "#8B4513"),
+      
+      # Panel styling
+      panel.grid.major = element_line(color = "grey90", size = 0.3, linetype = "dotted"),
+      panel.grid.minor = element_blank(),
+      panel.background = element_rect(fill = "white", color = NA),
+      
+      # Legend and labels
+      plot.title = element_text(size = 14, face = "bold", hjust = 0.5, margin = margin(b = 20)),
+      plot.subtitle = element_text(size = 11, hjust = 0.5, color = "grey30"),
+      plot.margin = margin(20, 20, 20, 20),
+      
+      # Strip text for facets if needed
+      strip.background = element_rect(fill = "grey95", color = "black"),
+      strip.text = element_text(size = 11, face = "bold")
+    ) +
+    
+    # Add title and subtitle
+    labs(title = paste("Vertical Profile -", target_station),
+         subtitle = paste("Date:", target_date)) +
+    
+    # Add legend manually
+    annotation_custom(
+      grob = grid::textGrob(
+        label = "Chlorophyll fluorescence\nTurbidity", 
+        x = 0.85, y = 0.15,
+        gp = grid::gpar(col = c("#2E8B57", "#8B4513"), fontsize = 9)
+      )
+    )
+  
+  return(p)
+}
+
+# Alternative version with better legend, spike removal, and replicate averaging
+plot_scm_profile_v2 <- function(data, target_date, target_station, max_depth = 50, 
+                                remove_shallow_spikes = TRUE, spike_depth = 3) {
+  
+  # Filter data
+  profile_data <- data %>%
+    filter(date == target_date & station == target_station & pres <= max_depth)
+  
+  if(nrow(profile_data) == 0) {
+    stop("No data found for specified date and station")
+  }
+  
+  # Remove shallow turbidity spikes if requested
+  if(remove_shallow_spikes) {
+    profile_data <- profile_data %>%
+      mutate(
+        # Remove turbidity spikes in shallow water (1-3m)
+        t_cleaned = case_when(
+          pres <= spike_depth ~ {
+            # Calculate median turbidity below spike zone for reference
+            ref_turbidity <- median(t[pres > spike_depth & pres <= (spike_depth + 5)], na.rm = TRUE)
+            # If turbidity is more than 3x the reference, replace with reference
+            ifelse(t > 3 * ref_turbidity & !is.na(ref_turbidity), ref_turbidity, t)
+          },
+          TRUE ~ t
+        )
+      )
+  } else {
+    profile_data <- profile_data %>%
+      mutate(t_cleaned = t)
+  }
+  
+  # Average replicate casts if castpk column exists
+  if("castpk" %in% colnames(profile_data)) {
+    profile_summary <- profile_data %>%
+      group_by(pres) %>%
+      summarise(
+        f_npq_mean = mean(f_npq, na.rm = TRUE),
+        f_npq_sd = sd(f_npq, na.rm = TRUE),
+        t_mean = mean(t_cleaned, na.rm = TRUE),
+        t_sd = sd(t_cleaned, na.rm = TRUE),
+        n_casts = n(),
+        .groups = 'drop'
+      ) %>%
+      mutate(
+        # Scale turbidity to match chlorophyll range for plotting
+        t_scaled_mean = t_mean * max(f_npq_mean, na.rm = TRUE) / max(t_mean, na.rm = TRUE),
+        t_scaled_sd = t_sd * max(f_npq_mean, na.rm = TRUE) / max(t_mean, na.rm = TRUE)
+      )
+  } else {
+    # No replicates, just process single cast
+    profile_summary <- profile_data %>%
+      group_by(pres) %>%
+      summarise(
+        f_npq_mean = mean(f_npq, na.rm = TRUE),
+        f_npq_sd = 0,
+        t_mean = mean(t_cleaned, na.rm = TRUE),
+        t_sd = 0,
+        n_casts = n(),
+        .groups = 'drop'
+      ) %>%
+      mutate(
+        t_scaled_mean = t_mean * max(f_npq_mean, na.rm = TRUE) / max(t_mean, na.rm = TRUE),
+        t_scaled_sd = 0
+      )
+  }
+  
+  # Reshape for plotting
+  plot_data_mean <- profile_summary %>%
+    select(pres, f_npq_mean, t_scaled_mean) %>%
+    pivot_longer(cols = c(f_npq_mean, t_scaled_mean), 
+                 names_to = "variable", 
+                 values_to = "value") %>%
+    mutate(
+      variable = factor(variable, 
+                       levels = c("f_npq_mean", "t_scaled_mean"),
+                       labels = c("Chlorophyll fluorescence", "Turbidity (scaled)"))
+    )
+  
+  # Prepare error data for shading
+  error_data <- profile_summary %>%
+    select(pres, f_npq_mean, f_npq_sd, t_scaled_mean, t_scaled_sd) %>%
+    pivot_longer(cols = c(f_npq_mean, t_scaled_mean), 
+                 names_to = "variable", 
+                 values_to = "value") %>%
+    mutate(
+      sd_value = case_when(
+        variable == "f_npq_mean" ~ profile_summary$f_npq_sd[match(pres, profile_summary$pres)],
+        variable == "t_scaled_mean" ~ profile_summary$t_scaled_sd[match(pres, profile_summary$pres)]
+      ),
+      variable = factor(variable, 
+                       levels = c("f_npq_mean", "t_scaled_mean"),
+                       labels = c("Chlorophyll fluorescence", "Turbidity (scaled)")),
+      ymin = value - sd_value,
+      ymax = value + sd_value
+    )
+  
+  # Create the plot
+  p <- ggplot(plot_data_mean, aes(x = value, y = pres, color = variable)) +
+    # Add shaded error bands for standard deviation
+    geom_ribbon(data = error_data, 
+                aes(x = value, y = pres, xmin = ymin, xmax = ymax, fill = variable),
+                alpha = 0.2, color = NA, orientation = "y") +
+    geom_line(size = 1.2, alpha = 0.8, orientation = "y") +
+    geom_point(size = 2.5, alpha = 0.9) +
+    
+    scale_y_reverse(name = "Depth (m)", 
+                    breaks = pretty_breaks(n = 8),
+                    expand = c(0.02, 0)) +
+    scale_x_continuous(name = expression(paste("Chlorophyll fluorescence (", mu, "g L"^{-1}, ")")),
+                       breaks = pretty_breaks(n = 6),
+                       expand = c(0.02, 0)) +
+    scale_color_manual(values = c("Chlorophyll fluorescence" = "#2E8B57", 
+                                 "Turbidity (scaled)" = "#8B4513"),
+                       name = "Parameter") +
+    scale_fill_manual(values = c("Chlorophyll fluorescence" = "#2E8B57", 
+                                "Turbidity (scaled)" = "#8B4513"),
+                      guide = "none") +  # Hide fill legend since color legend covers it
+    
+    # Theme
+    theme_classic(base_size = 12) +
+    theme(
+      # Axis styling
+      axis.line = element_line(color = "black", size = 0.5),
+      axis.ticks = element_line(color = "black", size = 0.5),
+      axis.text = element_text(color = "black", size = 10),
+      axis.title = element_text(color = "black", size = 12, face = "bold"),
+      
+      # Panel styling
+      panel.grid.major = element_line(color = "grey90", size = 0.3, linetype = "dotted"),
+      panel.grid.minor = element_blank(),
+      panel.background = element_rect(fill = "white", color = NA),
+      
+      # Legend styling
+      legend.position = "right",
+      legend.background = element_rect(fill = "white", color = "black", size = 0.5),
+      legend.title = element_text(size = 11, face = "bold"),
+      legend.text = element_text(size = 10),
+      legend.key.size = unit(0.8, "cm"),
+      
+      # Title styling
+      plot.title = element_text(size = 14, face = "bold", hjust = 0.5, margin = margin(b = 20)),
+      plot.subtitle = element_text(size = 11, hjust = 0.5, color = "grey30"),
+      plot.margin = margin(20, 20, 20, 20)
+    ) +
+    
+    # Add title and subtitle
+    labs(title = paste("Vertical Profile -", target_station),
+         subtitle = paste("Date:", target_date, 
+                         ifelse(max(profile_summary$n_casts) > 1, 
+                                paste("(", max(profile_summary$n_casts), "replicate casts averaged)"), 
+                                "")))
+  
+  return(p)
+}
+
+# Function to detect high-quality SCMs with turbidity validation
+detect_quality_scm <- function(data, min_depth = 5, max_depth = 50) {
+  
+  data %>%
+    group_by(date, station, castpk) %>%
+    filter(pres >= 1, pres <= max_depth, !is.na(f_npq), !is.na(t)) %>%
+    arrange(pres) %>%
+    filter(n() >= 8) %>%  # Sufficient depth resolution
+    summarise(
+      # Basic SCM metrics
+      surface_chl = mean(f_npq[pres <= 3], na.rm = TRUE),
+      max_chl = max(f_npq, na.rm = TRUE),
+      max_chl_depth = pres[which.max(f_npq)],
+      subsurface_enhancement = max_chl / surface_chl,
+      
+      # Turbidity validation metrics
+      surface_turbidity = mean(t[pres <= 3], na.rm = TRUE),
+      max_turbidity = max(t, na.rm = TRUE),
+      max_turbidity_depth = pres[which.max(t)],
+      
+      # Co-variation between chlorophyll and turbidity
+      chl_turb_correlation = cor(f_npq, t, use = "complete.obs"),
+      
+      # Depth alignment between maxima
+      depth_alignment = abs(max_chl_depth - max_turbidity_depth),
+      
+      # Profile shape similarity
+      chl_profile_range = max(f_npq, na.rm = TRUE) - min(f_npq, na.rm = TRUE),
+      turb_profile_range = max(t, na.rm = TRUE) - min(t, na.rm = TRUE),
+      
+      # Subsurface accumulation strength
+      subsurface_chl_mean = mean(f_npq[pres > min_depth], na.rm = TRUE),
+      surface_chl_mean = mean(f_npq[pres <= min_depth], na.rm = TRUE),
+      subsurface_turb_mean = mean(t[pres > min_depth], na.rm = TRUE),
+      surface_turb_mean = mean(t[pres <= min_depth], na.rm = TRUE),
+      
+      # Quality flags
+      has_clear_scm = max_chl_depth > min_depth & subsurface_enhancement > 1.5,
+      has_turbidity_peak = max_turbidity_depth > min_depth,
+      
+      .groups = 'drop'
+    ) %>%
+    mutate(
+      # Key quality criteria for SCM with turbidity validation
+      high_quality_scm = case_when(
+        # Strong correlation between chl and turbidity
+        chl_turb_correlation > 0.6 &
+        # Maxima are co-located (within 3m)
+        depth_alignment <= 3 &
+        # Clear subsurface enhancement
+        subsurface_enhancement > 1.5 &
+        # Maximum occurs in subsurface
+        max_chl_depth > min_depth &
+        # Sufficient signal strength
+        max_chl > 2.0 ~ TRUE,
+        
+        TRUE ~ FALSE
+      ),
+      
+      # Classify SCM quality
+      scm_quality = case_when(
+        !has_clear_scm ~ "no_scm",
+        high_quality_scm ~ "high_quality",
+        chl_turb_correlation > 0.4 & depth_alignment <= 5 ~ "moderate_quality",
+        TRUE ~ "poor_quality"
+      )
+    )
+}
+
+# Function to find the best SCM examples
+find_best_scm_examples <- function(data, n_examples = 10) {
+  
+  scm_results <- detect_quality_scm(data)
+  
+  # Rank by multiple quality criteria
+  best_examples <- scm_results %>%
+    filter(high_quality_scm == TRUE) %>%
+    mutate(
+      # Composite quality score
+      quality_score = 
+        (chl_turb_correlation * 0.4) +  # Correlation weight
+        (pmin(subsurface_enhancement, 5) / 5 * 0.3) +  # Enhancement (capped at 5x)
+        (pmax(0, 5 - depth_alignment) / 5 * 0.2) +  # Depth alignment (closer = better)
+        (pmin(max_chl, 20) / 20 * 0.1)  # Signal strength (capped at 20)
+    ) %>%
+    arrange(desc(quality_score)) %>%
+    slice_head(n = n_examples)
+  
+  return(best_examples)
+}
+
+# Function to create summary plots of SCM quality
+plot_scm_quality_summary <- function(scm_results) {
+  
+  # Correlation vs Enhancement plot
+  p1 <- scm_results %>%
+    ggplot(aes(x = chl_turb_correlation, y = subsurface_enhancement, 
+               color = scm_quality)) +
+    geom_point(size = 2, alpha = 0.7) +
+    scale_color_manual(values = c("high_quality" = "#2E8B57",
+                                 "moderate_quality" = "#FFB347", 
+                                 "poor_quality" = "#CD5C5C",
+                                 "no_scm" = "#708090")) +
+    labs(x = "Chlorophyll-Turbidity Correlation",
+         y = "Subsurface Enhancement Ratio",
+         title = "SCM Quality Assessment",
+         color = "Quality") +
+    theme_classic()
+  
+  # Depth alignment plot
+  p2 <- scm_results %>%
+    filter(has_clear_scm) %>%
+    ggplot(aes(x = depth_alignment, fill = scm_quality)) +
+    geom_histogram(bins = 20, alpha = 0.7) +
+    scale_fill_manual(values = c("high_quality" = "#2E8B57",
+                                "moderate_quality" = "#FFB347", 
+                                "poor_quality" = "#CD5C5C")) +
+    labs(x = "Depth Alignment (m) between Chl and Turbidity Maxima",
+         y = "Count",
+         title = "Depth Alignment Distribution") +
+    theme_classic()
+  
+  # Combine plots
+  library(patchwork)
+  combined_plot <- p1 / p2
+  
+  return(combined_plot)
+}
+
+# Function to detect high-quality SCMs with turbidity validation
+detect_quality_scm <- function(data, min_depth = 5, max_depth = 50) {
+  
+  data %>%
+    group_by(date, station, castpk) %>%
+    filter(pres >= 1, pres <= max_depth, !is.na(f_npq), !is.na(t)) %>%
+    arrange(pres) %>%
+    filter(n() >= 8) %>%  # Sufficient depth resolution
+    summarise(
+      # Basic SCM metrics
+      surface_chl = mean(f_npq[pres <= 3], na.rm = TRUE),
+      max_chl = max(f_npq, na.rm = TRUE),
+      max_chl_depth = pres[which.max(f_npq)],
+      subsurface_enhancement = max_chl / surface_chl,
+      
+      # Turbidity validation metrics
+      surface_turbidity = mean(t[pres <= 3], na.rm = TRUE),
+      max_turbidity = max(t, na.rm = TRUE),
+      max_turbidity_depth = pres[which.max(t)],
+      
+      # Co-variation between chlorophyll and turbidity
+      chl_turb_correlation = cor(f_npq, t, use = "complete.obs"),
+      
+      # Depth alignment between maxima
+      depth_alignment = abs(max_chl_depth - max_turbidity_depth),
+      
+      # Profile shape similarity
+      chl_profile_range = max(f_npq, na.rm = TRUE) - min(f_npq, na.rm = TRUE),
+      turb_profile_range = max(t, na.rm = TRUE) - min(t, na.rm = TRUE),
+      
+      # Subsurface accumulation strength
+      subsurface_chl_mean = mean(f_npq[pres > min_depth], na.rm = TRUE),
+      surface_chl_mean = mean(f_npq[pres <= min_depth], na.rm = TRUE),
+      subsurface_turb_mean = mean(t[pres > min_depth], na.rm = TRUE),
+      surface_turb_mean = mean(t[pres <= min_depth], na.rm = TRUE),
+      
+      # Quality flags
+      has_clear_scm = max_chl_depth > min_depth & subsurface_enhancement > 1.5,
+      has_turbidity_peak = max_turbidity_depth > min_depth,
+      
+      .groups = 'drop'
+    ) %>%
+    mutate(
+      # Key quality criteria for SCM with turbidity validation
+      high_quality_scm = case_when(
+        # Strong correlation between chl and turbidity
+        chl_turb_correlation > 0.6 &
+        # Maxima are co-located (within 3m)
+        depth_alignment <= 3 &
+        # Clear subsurface enhancement
+        subsurface_enhancement > 1.5 &
+        # Maximum occurs in subsurface
+        max_chl_depth > min_depth &
+        # Sufficient signal strength
+        max_chl > 2.0 ~ TRUE,
+        
+        TRUE ~ FALSE
+      ),
+      
+      # Classify SCM quality
+      scm_quality = case_when(
+        !has_clear_scm ~ "no_scm",
+        high_quality_scm ~ "high_quality",
+        chl_turb_correlation > 0.4 & depth_alignment <= 5 ~ "moderate_quality",
+        TRUE ~ "poor_quality"
+      )
+    )
+}
+
+# Function to find the best SCM examples
+find_best_scm_examples <- function(data, n_examples = 10) {
+  
+  scm_results <- detect_quality_scm(data)
+  
+  # Rank by multiple quality criteria
+  best_examples <- scm_results %>%
+    filter(high_quality_scm == TRUE) %>%
+    mutate(
+      # Composite quality score
+      quality_score = 
+        (chl_turb_correlation * 0.4) +  # Correlation weight
+        (pmin(subsurface_enhancement, 5) / 5 * 0.3) +  # Enhancement (capped at 5x)
+        (pmax(0, 5 - depth_alignment) / 5 * 0.2) +  # Depth alignment (closer = better)
+        (pmin(max_chl, 20) / 20 * 0.1)  # Signal strength (capped at 20)
+    ) %>%
+    arrange(desc(quality_score)) %>%
+    slice_head(n = n_examples)
+  
+  return(best_examples)
+}
+
+# Function to create summary plots of SCM quality
+plot_scm_quality_summary <- function(scm_results) {
+  
+  # Correlation vs Enhancement plot
+  p1 <- scm_results %>%
+    ggplot(aes(x = chl_turb_correlation, y = subsurface_enhancement, 
+               color = scm_quality)) +
+    geom_point(size = 2, alpha = 0.7) +
+    scale_color_manual(values = c("high_quality" = "#2E8B57",
+                                 "moderate_quality" = "#FFB347", 
+                                 "poor_quality" = "#CD5C5C",
+                                 "no_scm" = "#708090")) +
+    labs(x = "Chlorophyll-Turbidity Correlation",
+         y = "Subsurface Enhancement Ratio",
+         title = "SCM Quality Assessment",
+         color = "Quality") +
+    theme_classic()
+  
+  # Depth alignment plot
+  p2 <- scm_results %>%
+    filter(has_clear_scm) %>%
+    ggplot(aes(x = depth_alignment, fill = scm_quality)) +
+    geom_histogram(bins = 20, alpha = 0.7) +
+    scale_fill_manual(values = c("high_quality" = "#2E8B57",
+                                "moderate_quality" = "#FFB347", 
+                                "poor_quality" = "#CD5C5C")) +
+    labs(x = "Depth Alignment (m) between Chl and Turbidity Maxima",
+         y = "Count",
+         title = "Depth Alignment Distribution") +
+    theme_classic()
+  
+  # Combine plots
+  library(patchwork)
+  combined_plot <- p1 / p2
+  
+  return(combined_plot)
+}
+
+```
+
+-----------
+Data Import
+-----------
+
+```{r}
+#Slope and NPQ Corrected CTD data
+f <- read_csv(here("files_big", "8_binAvg-1751575363003.csv"))
+
+# corrected_flu_2025-04-10
+
+e <- read_csv(here("outputs", "enviro_ctd_nut_2025-04-15.csv"))
+
+w <- read_csv(here("outputs", "enviro_weather_2025-04-14.csv"))
+```
+
+---
+Wrangling
+---
+
+```{r}
+f2 <- f %>% 
+  mutate(date = date(`Measurement time`)) %>%
+  filter(`Cast Direction Flag` == "d") %>% 
+  # filter(is.na(`Fluorometry Chlorophyll flag`)) %>% 
+  select(castpk = `Cast PK`,
+         ctd_num =`CTD serial number`,
+         date, m_time = `Measurement time`,
+         station = Station,
+         pres = `Pressure (dbar)`,
+         f_npq =  `Fluorometry Chlorophyll (ug/L)`,
+         t = `Turbidity (FTU)`,
+         s = `Salinity (PSU)`,
+         temp = `Temperature (deg C)`)
+```
+
+---
+Detecting subsurface maxima
+---
+
+```{r}
+# Example usage:
+subsurface_results <- detect_subsurface_accumulation(f2)
+# debug_example <- debug_subsurface_accumulation(f, "2021-06-05", "KC10")
+event_summary <- summarize_subsurface_events(subsurface_results)
+
+# debug_example <- debug_subsurface_accumulation(f, "2021-06-05", "KC10")
+event_summary_month <- summarize_subsurface_events_month(subsurface_results)
+
+# debug_example <- debug_subsurface_accumulation(f, "2021-06-05", "KC10")
+event_summary_station <- summarize_subsurface_events_station(subsurface_results)
+```
+
+```{r}
+#Looking where we have consequtive PRUTH profiles.
+pruth <- subsurface_results %>% 
+  filter(station == "PRUTH")
+
+pruth_2012 <- f2 %>% 
+  filter(date > "2012-07-01" & date < "2012-09-01")
+
+pruth_2013 <- f2 %>% 
+  filter(date > "2013-05-10" & date < "2013-10-16")
+
+pruth_2014 <- f2 %>% 
+  filter(date > "2014-07-01" & date < "2014-08-14")
+
+pruth_2015 <- f2 %>% 
+  filter(date > "2015-07-01" & date < "2015-08-01")
+
+pruth_2016 <- f2 %>% 
+  filter(date > "2016-07-01" & date < "2016-08-01")
+
+pruth_2018 <- f2 %>% 
+  filter(date > "2018-07-13" & date < "2018-07-28")
+
+ctd_data <- pruth_2012
+```
+
+```{r}
+# Assuming your data is in a dataframe called 'ctd_data'
+# If loading from file, uncomment and modify:
+# ctd_data <- read.csv("your_file.csv")
+
+# Data preparation
+ctd_processed <- ctd_data %>%
+  # Convert date to Date format if it's not already
+  mutate(date = as.Date(date)) %>%
+  # Filter to top 30m (assuming pressure ~ depth)
+  filter(pres <= 30) %>%
+  # Remove NA values
+  drop_na(date, pres, f_npq) %>%
+  # If multiple casts per day, you can either:
+  # Option 1: Average them
+  group_by(date, pres) %>%
+  summarise(f_npq = mean(f_npq, na.rm = TRUE), .groups = 'drop') %>%
+  # Option 2: If you want to keep separate casts, comment out the above and use:
+  # group_by(date, castpk, pres) %>%
+  # summarise(f_npq = mean(f_npq, na.rm = TRUE), .groups = 'drop') %>%
+  # Convert date to numeric for interpolation
+  mutate(date_numeric = as.numeric(date))
+
+# Create interpolation grid
+date_range <- range(ctd_processed$date_numeric)
+pres_range <- c(0, 30)  # Surface to 30m
+
+# Create regular grid for interpolation
+date_grid <- seq(date_range[1], date_range[2], length.out = 100)
+pres_grid <- seq(pres_range[1], pres_range[2], length.out = 50)
+
+# Perform interpolation using akima
+interp_result <- with(ctd_processed, 
+                     interp(x = date_numeric, y = pres, z = f_npq,
+                           xo = date_grid, yo = pres_grid,
+                           linear = TRUE, extrap = FALSE))
+
+# Convert interpolated data to long format for ggplot
+interp_df <- expand.grid(date_numeric = interp_result$x,
+                        pres = interp_result$y) %>%
+  mutate(f_npq = as.vector(interp_result$z),
+         date = as.Date(date_numeric, origin = "1970-01-01"))
+
+fluor_palette_v3 <- colorRampPalette(c(
+  "#08306b",  # Deep navy blue
+  "#1f4e7a",  # Dark blue
+  "#2e6b89",  # Medium blue
+  "#4d8fc7",  # Bright blue
+  "#2fb3d4",  # Vivid cyan-blue (bloom threshold)
+  "#00a693",  # Bright teal
+  "#4daf4a",  # Vibrant green
+  "#8cc152",  # Lime green
+  "#ffd23f",  # Bright yellow
+  "#ff8c42",  # Vivid orange
+  "#e74c3c"   # Bold red-orange
+))
+
+colors_v3 <- fluor_palette_v3(50)
+
+# Function to create breaks that emphasize bloom threshold
+create_fluor_breaks <- function(max_val = 50, bloom_threshold = 5) {
+  # More breaks in the 0-10 range to capture bloom dynamics
+  c(0, 1, 2, 3, 4, bloom_threshold, 7, 10, 15, 20, 30, 40, max_val)
+}
+
+
+
+# Create the section plot
+p <- ggplot(interp_df, aes(x = date, y = pres, fill = f_npq)) +
+  geom_raster() +
+  # geom_tile() +
+  # Use viridis color scale (good for fluorescence/chlorophyll data)
+  # scale_fill_viridis_c(name = "Fluorescence",
+  #                      na.value = "white",
+  #                      trans = "log10",  # Log transform for wide range
+  #                      labels = trans_format("log10", math_format(10^.x))) +
+  # Alternative color scales you might prefer:
+  # scale_fill_gradient2(low = "blue", mid = "green", high = "red", 
+  #                      midpoint = median(interp_df$f_npq, na.rm = TRUE),
+  #                      trans = "log10") +
+  # or
+  # 
+  scale_fill_gradientn(colors = colors_v3,
+                       values = scales::rescale(c(0, 2, 5, 10, 20, 50))) +
+
+  # Flip y-axis so surface is at top
+  scale_y_reverse(name = "Pressure (dbar)", expand = c(0, 0)) +
+  scale_x_date(name = "Date", expand = c(0, 0)) +
+  
+  # Add original data points
+  geom_point(data = ctd_processed,
+             aes(x = as.Date(date_numeric, origin = "1970-01-01"),
+                 y = pres, fill = f_npq),
+             size = 0.5, alpha = 0.7, shape = 21, color = "black") +
+  
+  # Theming
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12),
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 9),
+    plot.title = element_text(size = 14, hjust = 0.5)
+  ) +
+  
+  labs(title = "CTD Fluorescence Section Plot",
+       subtitle = "Interpolated fluorescence (f_npq) by date and depth")
+
+# Display the plot
+print(p)
+```
+
+
+```{r}
+f2 %>% 
+  filter(date > "2016-07-01" & date < "2016-09-01") %>% 
+  filter(s > 1) %>% 
+  mutate(month = month(date)) %>% 
+  filter(pres < 51) %>% 
+  ggplot(aes(x = s, y = f_npq, color = station)) +
+  geom_point() 
+# +
+#   scale_color_viridis_c(option = "turbo")
+```
+
+
+```{r}
+f2 %>% 
+  filter(date > "2012-07-01" & date < "2012-08-01") %>% 
+  filter(pres > 4 & pres < 31) %>% 
+  ggplot(aes(x = t, y = f_npq, color = s)) +
+  geom_point() +
+  scale_color_viridis_c()
+```
+
+
+
+
+
+
+
+
+
+
+
+
+---
+Plotting Examples - Data exploration
+---
+
+```{r}
+test <- f2 %>%
+  mutate(year = year(date),
+         month = month(date)) %>% 
+  filter(year == 2023 & month == 7) %>%
+  # filter(station == "PRUTH") %>% 
+  distinct(date, station, ctd_num)
+```
+
+
+```{r}
+p <- plot_scm_profile_v2(f2, "2025-05-02", "KC10", max_depth = 50, 
+                        remove_shallow_spikes = T, spike_depth = 1)
+print(p)
+```
+---
+#Finding true SCM
+---
+
+```{r}
+# Detect all SCMs with quality assessment
+scm_results <- detect_quality_scm(f2)
+
+# Find the best examples (like your KC10 case)
+best_examples <- find_best_scm_examples(f2, n_examples = 200)
+
+# Find profiles most similar to your KC10 example
+similar_to_kc10 <- scm_results %>%
+  filter(high_quality_scm == TRUE,
+         chl_turb_correlation > 0.7,    # Strong correlation like KC10
+         depth_alignment <= 2,          # Tight depth alignment
+         subsurface_enhancement > 2.0)  # Clear subsurface signal
+
+# Plot quality assessment
+quality_plot <- plot_scm_quality_summary(scm_results)
+print(quality_plot)
+```
+
+What are the stations that are regularly sampled throughout fitz-hugh sound?
+Compile a list and then:
+1) Try to do my corrections using information from KC10
+2) Apply the above code
+3) Figure out
+
+```{r}
+event_summary %>% 
+  ggplot(aes(x = as.factor(season), y = count, fill = accumulation_type)) +
+  geom_col(position = "stack", color = "black") +
+  scale_fill_npg()
+
+event_summary_month %>% 
+  ggplot(aes(x = as.factor(month), y = count, fill = accumulation_type)) +
+  geom_col(position = "stack", color = "black") +
+  scale_fill_npg()
+
+event_summary_station %>% 
+  ggplot(aes(x = as.factor(station), y = count, fill = accumulation_type)) +
+  geom_col(position = "fill", color = "black") +
+  scale_fill_npg()
+```
+
+```{r}
+# 2023-05-14
+# 2016-05-26
+# 2018-05-23
+```
+
+
+
+```{r}
+subsurface_results %>% 
+  ggplot(aes(x = as.factor(month), y = surface_integrated)) +
+  geom_boxplot()
+```
+
+```{r}
+# Convert wind direction from degrees to radians
+w$wd_rad <- w$wd_dm * pi / 180
+
+# Calculate u and v components
+w$u_component <- w$w_dm * sin(w$wd_rad)  # eastward component
+w$v_component <- w$w_dm * cos(w$wd_rad)  # northward component
+
+w <- w %>% 
+  select(-...1)
+
+e1 <- e %>% 
+  filter(pres == 1) %>% 
+  select(-...1)
+
+
+scm_driver <- subsurface_results %>% 
+  left_join(w) 
+
+
+```
+
+
+```{r}
+scm_driver %>%
+  mutate(year = year(date)) %>% 
+  ggplot(aes(x = as.factor(accumulation_type), y = qgm_b1_10)) +
+  geom_boxplot() +
+  geom_point(aes(fill = as.factor(year)), pch = 21, size = 4) +
+  scale_fill_viridis_d(option = "H") 
+```
+
+```{r}
+scm_driver %>% 
+  ggplot(aes(x = subsurface_max_surface_perc_change, y = Q_Total)) +
+  geom_point()
+```
+
+```{r}
+test_scm <- scm_results %>% 
+  filter(chl_turb_correlation > 0.8) %>% 
+  filter(scm_quality == "high_quality") %>% 
+  filter(max_chl > 4)
+
+test_no_scm <- scm_results %>% 
+  filter(chl_turb_correlation > 0.8) %>% 
+  filter(scm_quality == "no_scm") %>% 
+  filter(max_chl > 4) %>% 
+  filter(max_chl < 50)
+
+test3 <- rbind(test_scm, test_no_scm) %>% 
+  group_by(station, scm_quality) %>% 
+  summarise(count = n(), .groups = "drop")
+
+scm_list <- test_scm$castpk
+scm_date <- test_scm$date
+no_scm_list <- test_no_scm$castpk
+no_scm_date <- test_no_scm$date
+```
+
+```{r}
+f2 %>% 
+  filter(castpk %in% scm_list) %>% 
+  filter(pres < 21) %>% 
+  mutate(month = month(date)) %>% 
+  ggplot(aes(x = s, y = f_npq, color = pres)) +
+  geom_point(size = 3) +
+  scale_color_viridis_b(option = "turbo") +
+  theme_bw()
+```
+```{r}
+f2 %>% 
+  filter(castpk %in% no_scm_list) %>% 
+  filter(pres < 21) %>% 
+  mutate(month = month(date)) %>% 
+  ggplot(aes(x = s, y = f_npq, color = pres)) +
+  geom_point(size = 3) +
+  scale_color_viridis_b(option = "turbo") +
+  theme_bw()
+```
+```{r}
+f2 %>% 
+  filter(castpk %in% scm_list) %>% 
+  filter(pres < 21) %>%
+  group_by(pres) %>% 
+  summarise(f = mean(f_npq),
+            s = mean(s),
+            temp = mean(temp),
+            .groups = "drop") %>% 
+  ggplot(aes(x = s, y = pres)) +
+  geom_line(orientation = "y") +
+  scale_y_reverse() +
+  theme_bw()
+
+f2 %>% 
+  filter(castpk %in% no_scm_list) %>% 
+  filter(pres < 21) %>%
+  group_by(pres) %>% 
+  summarise(f = mean(f_npq),
+            s = mean(s),
+            temp = mean(temp),
+            .groups = "drop") %>%
+  ggplot(aes(x = s, y = pres)) +
+  geom_line(orientation = "y") +
+  scale_y_reverse() +
+  theme_bw()
+```
+
+```{r}
+w_scm <- w %>% 
+  filter(date %in% scm_date) %>% 
+  mutate(type = "scm")
+
+w_no_scm <- w %>% 
+  filter(date %in% no_scm_date) %>% 
+  mutate(type = "no")
+
+w_comp <- rbind(w_scm, w_no_scm)
+```
+
+```{r}
+test3 %>% 
+  ggplot(aes(x = as.factor(station), y = count, fill = scm_quality)) +
+  geom_col(position = "fill", color = "black") +
+  scale_fill_npg()
+```
+
+
+```{r}
+
+```
+
+
