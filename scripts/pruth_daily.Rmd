@@ -1,0 +1,589 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+#Upload packages
+library(tidyverse)
+library(here)
+library(readxl)
+library(patchwork)
+library(lubridate)
+library(zoo)
+library(ggsci)
+library(scales)
+library(akima)
+library(viridis)
+library(fields)
+library(metR)
+```
+
+
+```{r}
+#Slope and NPQ Corrected CTD data
+f <- read_csv(here("files_big", "8_binAvg-1751575363003.csv"))
+
+```
+
+```{r}
+f2 <- f %>% 
+  mutate(date = date(`Measurement time`)) %>%
+  filter(`Cast Direction Flag` == "d") %>% 
+  # filter(is.na(`Fluorometry Chlorophyll flag`)) %>% 
+  select(castpk = `Cast PK`,
+         ctd_num =`CTD serial number`,
+         date, m_time = `Measurement time`,
+         station = Station,
+         pres = `Pressure (dbar)`,
+         f_npq =  `Fluorometry Chlorophyll (ug/L)`,
+         t = `Turbidity (FTU)`,
+         s = `Salinity (PSU)`,
+         temp = `Temperature (deg C)`)
+```
+
+
+```{r}
+
+
+pruth_2012 <- f2 %>% 
+  filter(date > "2012-07-02" & date < "2012-09-01")
+
+pruth_2013 <- f2 %>% 
+  filter(date > "2013-05-10" & date < "2013-10-16")
+
+pruth_2014 <- f2 %>% 
+  filter(date > "2014-07-01" & date < "2014-08-14")
+
+pruth_2015 <- f2 %>% 
+  filter(date > "2015-07-01" & date < "2015-08-01")
+
+pruth_2016 <- f2 %>% 
+  filter(date > "2016-07-01" & date < "2016-08-01")
+
+pruth_2018 <- f2 %>% 
+  filter(date > "2018-07-13" & date < "2018-07-28")
+
+ctd_data <- pruth_2014
+```
+
+```{r}
+# Assuming your data is in a dataframe called 'ctd_data'
+# If loading from file, uncomment and modify:
+# ctd_data <- read.csv("your_file.csv")
+
+# Data preparation
+ctd_processed <- ctd_data %>%
+  # Convert date to Date format if it's not already
+  mutate(date = as.Date(date)) %>%
+  # Filter to top 30m (assuming pressure ~ depth)
+  filter(pres <= 30) %>%
+  # Remove NA values
+  drop_na(date, pres, f_npq) %>%
+  # If multiple casts per day, you can either:
+  # Option 1: Average them
+  group_by(date, pres) %>%
+  summarise(f_npq = mean(f_npq, na.rm = TRUE), .groups = 'drop') %>%
+  # Option 2: If you want to keep separate casts, comment out the above and use:
+  # group_by(date, castpk, pres) %>%
+  # summarise(f_npq = mean(f_npq, na.rm = TRUE), .groups = 'drop') %>%
+  # Convert date to numeric for interpolation
+  mutate(date_numeric = as.numeric(date))
+
+# Create interpolation grid
+date_range <- range(ctd_processed$date_numeric)
+pres_range <- c(0, 30)  # Surface to 30m
+
+# Create regular grid for interpolation
+date_grid <- seq(date_range[1], date_range[2], length.out = 100)
+pres_grid <- seq(pres_range[1], pres_range[2], length.out = 50)
+
+# Perform interpolation using akima
+interp_result <- with(ctd_processed, 
+                     interp(x = date_numeric, y = pres, z = f_npq,
+                           xo = date_grid, yo = pres_grid,
+                           linear = TRUE, extrap = FALSE))
+
+# Convert interpolated data to long format for ggplot
+interp_df <- expand.grid(date_numeric = interp_result$x,
+                        pres = interp_result$y) %>%
+  mutate(f_npq = as.vector(interp_result$z),
+         date = as.Date(date_numeric, origin = "1970-01-01"))
+
+fluor_palette_v3 <- colorRampPalette(c(
+  "#08306b",  # Deep navy blue
+  "#1f4e7a",  # Dark blue
+  "#2e6b89",  # Medium blue
+  "#4d8fc7",  # Bright blue
+  "#2fb3d4",  # Vivid cyan-blue (bloom threshold)
+  "#00a693",  # Bright teal
+  "#4daf4a",  # Vibrant green
+  "#8cc152",  # Lime green
+  "#ffd23f",  # Bright yellow
+  "#ff8c42",  # Vivid orange
+  "#e74c3c"   # Bold red-orange
+))
+
+colors_v3 <- fluor_palette_v3(50)
+
+# Function to create breaks that emphasize bloom threshold
+create_fluor_breaks <- function(max_val = 50, bloom_threshold = 5) {
+  # More breaks in the 0-10 range to capture bloom dynamics
+  c(0, 1, 2, 3, 4, bloom_threshold, 7, 10, 15, 20, 30, 40, max_val)
+}
+
+
+
+# Create the section plot
+p <- ggplot(interp_df, aes(x = date, y = pres, fill = f_npq)) +
+  geom_raster() +
+  # geom_tile() +
+  # Use viridis color scale (good for fluorescence/chlorophyll data)
+  # scale_fill_viridis_c(name = "Fluorescence",
+  #                      na.value = "white",
+  #                      trans = "log10",  # Log transform for wide range
+  #                      labels = trans_format("log10", math_format(10^.x))) +
+  # Alternative color scales you might prefer:
+  # scale_fill_gradient2(low = "blue", mid = "green", high = "red", 
+  #                      midpoint = median(interp_df$f_npq, na.rm = TRUE),
+  #                      trans = "log10") +
+  # or
+  # 
+  scale_fill_gradientn(colors = colors_v3,
+                       values = scales::rescale(c(0, 2, 5, 10, 20, 50))) +
+
+  # Flip y-axis so surface is at top
+  scale_y_reverse(name = "Pressure (dbar)", expand = c(0, 0)) +
+  scale_x_date(name = "Date", expand = c(0, 0)) +
+  
+  # Add original data points
+  geom_point(data = ctd_processed,
+             aes(x = as.Date(date_numeric, origin = "1970-01-01"),
+                 y = pres, fill = f_npq),
+             size = 0.5, alpha = 0.7, shape = 21, color = "black") +
+  
+  # Theming
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    axis.text = element_text(size = 10),
+    axis.title = element_text(size = 12),
+    legend.title = element_text(size = 11),
+    legend.text = element_text(size = 9),
+    plot.title = element_text(size = 14, hjust = 0.5)
+  ) +
+  
+  labs(title = "CTD Fluorescence Section Plot",
+       subtitle = "Interpolated fluorescence (f_npq) by date and depth")
+
+# Display the plot
+print(p)
+```
+
+```{r}
+# Assuming your data is in a dataframe called 'ctd_data'
+# If loading from file, uncomment and modify:
+# ctd_data <- read.csv("your_file.csv")
+
+# Data preparation for both fluorescence and temperature
+ctd_processed <- ctd_data %>%
+  # Convert date to Date format if it's not already
+  mutate(date = as.Date(date)) %>%
+  # Filter to top 30m (assuming pressure ~ depth)
+  filter(pres <= 30) %>%
+  # Remove NA values for both variables
+  drop_na(date, pres, f_npq, temp) %>%
+  # If multiple casts per day, average them
+  group_by(date, pres) %>%
+  summarise(
+    f_npq = mean(f_npq, na.rm = TRUE),
+    t = mean(temp, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  # Convert date to numeric for interpolation
+  mutate(date_numeric = as.numeric(date))
+
+# Create interpolation grid
+date_range <- range(ctd_processed$date_numeric)
+pres_range <- c(0, 30)  # Surface to 30m
+
+# Create regular grid for interpolation
+date_grid <- seq(date_range[1], date_range[2], length.out = 100)
+pres_grid <- seq(pres_range[1], pres_range[2], length.out = 50)
+
+# Perform interpolation for fluorescence
+interp_fluor <- with(ctd_processed, 
+                     interp(x = date_numeric, y = pres, z = f_npq,
+                           xo = date_grid, yo = pres_grid,
+                           linear = TRUE, extrap = FALSE))
+
+# Perform interpolation for temperature
+interp_temp <- with(ctd_processed, 
+                    interp(x = date_numeric, y = pres, z = t,
+                          xo = date_grid, yo = pres_grid,
+                          linear = TRUE, extrap = FALSE))
+
+# Convert interpolated data to long format for ggplot
+interp_df <- expand.grid(date_numeric = interp_fluor$x,
+                        pres = interp_fluor$y) %>%
+  mutate(
+    f_npq = as.vector(interp_fluor$z),
+    temperature = as.vector(interp_temp$z),
+    date = as.Date(date_numeric, origin = "1970-01-01")
+  )
+
+fluor_palette_v3 <- colorRampPalette(c(
+  "#08306b",  # Deep navy blue
+  "#1f4e7a",  # Dark blue
+  "#2e6b89",  # Medium blue
+  "#4d8fc7",  # Bright blue
+  "#2fb3d4",  # Vivid cyan-blue (bloom threshold)
+  "#00a693",  # Bright teal
+  "#4daf4a",  # Vibrant green
+  "#8cc152",  # Lime green
+  "#ffd23f",  # Bright yellow
+  "#ff8c42",  # Vivid orange
+  "#e74c3c"   # Bold red-orange
+))
+
+colors_v3 <- fluor_palette_v3(50)
+
+# Function to create breaks that emphasize bloom threshold
+create_fluor_breaks <- function(max_val = 50, bloom_threshold = 5) {
+  # More breaks in the 0-10 range to capture bloom dynamics
+  c(0, 1, 2, 3, 4, bloom_threshold, 7, 10, 15, 20, 30, 40, max_val)
+}
+
+# Create the section plot with temperature isotherms
+p <- ggplot(interp_df, aes(x = date, y = pres)) +
+  # Fluorescence background
+  geom_raster(aes(fill = f_npq)) +
+  
+  # Color scale for fluorescence
+  scale_fill_gradientn(colors = colors_v3,
+                       values = scales::rescale(c(0, 2, 5, 10, 20, 50)),
+                       name = "Fl)",
+                       guide = guide_colorbar(
+                         title.position = "top",
+                         title.hjust = 0.5,
+                         barwidth = 1,
+                         barheight = 8,
+                         frame.colour = "black",
+                         frame.linewidth = 0.5
+                       )) +
+  
+  # Add 10°C isotherm contour (cool blue for cooler water)
+  geom_contour(aes(z = temperature), 
+               breaks = 10, 
+               color = "#2166ac", 
+               linewidth = 1.5, 
+               alpha = 0.8,
+               linetype = "solid") +
+  
+  # Add 12.5°C isotherm contour (warm coral for warmer water)
+  geom_contour(aes(z = temperature), 
+               breaks = 12.5, 
+               color = "#d73027", 
+               linewidth = 1.5, 
+               alpha = 0.8,
+               linetype = "solid") +
+  
+  # Add contour labels for 10°C line
+  geom_text_contour(aes(z = temperature), 
+                    breaks = 10, 
+                    color = "#2166ac", 
+                    size = 3.8,
+                    fontface = "bold",
+                    stroke = 0.3,
+                    stroke.color = "white",
+                    label.padding = unit(0.15, "lines")) +
+  
+  # Add contour labels for 12.5°C line
+  geom_text_contour(aes(z = temperature), 
+                    breaks = 12.5, 
+                    color = "#d73027", 
+                    size = 3.8,
+                    fontface = "bold",
+                    stroke = 0.3,
+                    stroke.color = "white",
+                    label.padding = unit(0.15, "lines")) +
+  
+  # Flip y-axis so surface is at top
+  scale_y_reverse(name = "Pressure (dbar)", expand = c(0, 0)) +
+  scale_x_date(name = "Date", expand = c(0, 0)) +
+  
+  # Add original data points
+  geom_point(data = ctd_processed,
+             aes(x = as.Date(date_numeric, origin = "1970-01-01"),
+                 y = pres, fill = f_npq),
+             size = 0.5, alpha = 0.7, shape = 21, color = "black") +
+  
+  # Theming
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA),
+    axis.text = element_text(size = 11, color = "grey20"),
+    axis.title = element_text(size = 13, color = "grey20", face = "bold"),
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 10),
+    legend.position = "right",
+    plot.title = element_text(size = 16, hjust = 0.5, face = "bold", 
+                              color = "grey20", margin = margin(b = 10)),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, color = "grey40",
+                                margin = margin(b = 15)),
+    plot.margin = margin(20, 20, 20, 20)
+  ) 
+
+# Display the plot
+print(p)
+```
+```{r}
+# Assuming your data is in a dataframe called 'ctd_data'
+# If loading from file, uncomment and modify:
+# ctd_data <- read.csv("your_file.csv")
+
+# Data preparation for both fluorescence and temperature
+ctd_processed <- ctd_data %>%
+  # Convert date to Date format if it's not already
+  mutate(date = as.Date(date)) %>%
+  # Filter to top 30m (assuming pressure ~ depth)
+  filter(pres <= 30) %>%
+  # Remove NA values for both variables
+  drop_na(date, pres, f_npq, temp) %>%
+  # If multiple casts per day, average them
+  group_by(date, pres) %>%
+  summarise(
+    f_npq = mean(f_npq, na.rm = TRUE),
+    t = mean(temp, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  # Convert date to numeric for interpolation
+  mutate(date_numeric = as.numeric(date))
+
+# Create interpolation grid
+date_range <- range(ctd_processed$date_numeric)
+pres_range <- c(0, 30)  # Surface to 30m
+
+# Create regular grid for interpolation
+date_grid <- seq(date_range[1], date_range[2], length.out = 100)
+pres_grid <- seq(pres_range[1], pres_range[2], length.out = 50)
+
+# Alternative approach using loess smoothing for temperature
+# This is more robust for irregular oceanographic data
+
+# Create a finer grid for smoother interpolation
+date_grid <- seq(date_range[1], date_range[2], length.out = 150)
+pres_grid <- seq(pres_range[1], pres_range[2], length.out = 75)
+
+# Function to interpolate using loess (more robust for oceanographic data)
+loess_interp <- function(data, x_var, y_var, z_var, x_grid, y_grid, span = 0.01) {
+  # Create prediction grid
+  pred_grid <- expand.grid(x = x_grid, y = y_grid)
+  names(pred_grid) <- c(x_var, y_var)
+  
+  # Fit loess model
+  formula_str <- paste(z_var, "~", x_var, "+", y_var)
+  loess_model <- loess(as.formula(formula_str), data = data, span = span, degree = 1)
+  
+  # Predict on grid
+  pred_values <- predict(loess_model, newdata = pred_grid)
+  
+  # Return as matrix
+  matrix(pred_values, nrow = length(x_grid), ncol = length(y_grid))
+}
+
+# Perform interpolation for fluorescence using original method
+interp_fluor <- with(ctd_processed, 
+                     interp(x = date_numeric, y = pres, z = f_npq,
+                           xo = date_grid, yo = pres_grid,
+                           linear = TRUE, extrap = FALSE))
+
+# Use loess for temperature (more robust)
+temp_matrix <- loess_interp(ctd_processed, "date_numeric", "pres", "t", 
+                           date_grid, pres_grid, span = 0.01)
+
+# Convert interpolated data to long format for ggplot
+interp_df <- expand.grid(date_numeric = date_grid,
+                        pres = pres_grid) %>%
+  mutate(
+    f_npq = as.vector(interp_fluor$z),
+    temperature = as.vector(temp_matrix),
+    date = as.Date(date_numeric, origin = "1970-01-01")
+  )
+
+# Create a more conservative data mask based on actual data coverage
+create_conservative_mask <- function(interp_df, ctd_processed) {
+  interp_df$valid_temp <- TRUE
+  
+  # Get data boundaries for each date
+  data_summary <- ctd_processed %>%
+    group_by(date_numeric) %>%
+    summarise(
+      min_pres = min(pres, na.rm = TRUE),
+      max_pres = max(pres, na.rm = TRUE),
+      .groups = 'drop'
+    )
+  
+  # Find date range with data
+  date_range_data <- range(ctd_processed$date_numeric)
+  
+  for(i in 1:nrow(interp_df)) {
+    current_date <- interp_df$date_numeric[i]
+    current_pres <- interp_df$pres[i]
+    
+    # Check if date is within data coverage
+    if(current_date < date_range_data[1] || current_date > date_range_data[2]) {
+      interp_df$valid_temp[i] <- FALSE
+      next
+    }
+    
+    # Find nearest date in data
+    date_diff <- abs(data_summary$date_numeric - current_date)
+    nearest_idx <- which.min(date_diff)
+    
+    # Only keep if within reasonable depth range and not too far from data temporally
+    if(date_diff[nearest_idx] > 1.5 || # More than 1.5 days from data
+       current_pres > data_summary$max_pres[nearest_idx] + 2 || # Below data range
+       current_pres < data_summary$min_pres[nearest_idx] - 1) {  # Above data range
+      interp_df$valid_temp[i] <- FALSE
+    }
+  }
+  
+  return(interp_df)
+}
+
+# Apply conservative mask
+interp_df <- create_conservative_mask(interp_df, ctd_processed)
+interp_df$temperature[!interp_df$valid_temp] <- NA
+
+fluor_palette_v3 <- colorRampPalette(c(
+  "#08306b",  # Deep navy blue
+  "#1f4e7a",  # Dark blue
+  "#2e6b89",  # Medium blue
+  "#4d8fc7",  # Bright blue
+  "#2fb3d4",  # Vivid cyan-blue (bloom threshold)
+  "#00a693",  # Bright teal
+  "#4daf4a",  # Vibrant green
+  "#8cc152",  # Lime green
+  "#ffd23f",  # Bright yellow
+  "#ff8c42",  # Vivid orange
+  "#e74c3c"   # Bold red-orange
+))
+
+colors_v3 <- fluor_palette_v3(50)
+
+# Function to create breaks that emphasize bloom threshold
+create_fluor_breaks <- function(max_val = 50, bloom_threshold = 5) {
+  # More breaks in the 0-10 range to capture bloom dynamics
+  c(0, 1, 2, 3, 4, bloom_threshold, 7, 10, 15, 20, 30, 40, max_val)
+}
+
+# Create the section plot with temperature isotherms
+p <- ggplot(interp_df, aes(x = date, y = pres)) +
+  # Fluorescence background
+  geom_raster(aes(fill = f_npq)) +
+  
+  # Color scale for fluorescence
+  scale_fill_gradientn(colors = colors_v3,
+                       values = scales::rescale(c(0, 2, 5, 10, 20, 50)),
+                       name = "Fl",
+                       guide = guide_colorbar(
+                         title.position = "top",
+                         title.hjust = 0.5,
+                         barwidth = 1,
+                         barheight = 8,
+                         frame.colour = "black",
+                         frame.linewidth = 0.5
+                       )) +
+  
+  # Add 10°C isotherm contour (cool blue for cooler water)
+  geom_contour(aes(z = temperature), 
+               breaks = 10, 
+               color = "#2166ac", 
+               linewidth = 1.5, 
+               alpha = 0.8,
+               linetype = "solid") +
+  
+  # Add 12.5°C isotherm contour (warm coral for warmer water)
+  geom_contour(aes(z = temperature), 
+               breaks = 12.5, 
+               color = "#d73027", 
+               linewidth = 1.5, 
+               alpha = 0.8,
+               linetype = "solid") +
+  
+  # Add contour labels for 10°C line
+  geom_text_contour(aes(z = temperature), 
+                    breaks = 10, 
+                    color = "#2166ac", 
+                    size = 3.8,
+                    fontface = "bold",
+                    stroke = 0.3,
+                    stroke.color = "white",
+                    label.padding = unit(0.15, "lines")) +
+  
+  # Add contour labels for 12.5°C line
+  geom_text_contour(aes(z = temperature), 
+                    breaks = 12.5, 
+                    color = "#d73027", 
+                    size = 3.8,
+                    fontface = "bold",
+                    stroke = 0.3,
+                    stroke.color = "white",
+                    label.padding = unit(0.15, "lines")) +
+  
+  # Flip y-axis so surface is at top
+  scale_y_reverse(name = "Pressure (dbar)", expand = c(0, 0)) +
+  scale_x_date(name = "Date", expand = c(0, 0)) +
+  
+  # Add original data points
+  # geom_point(data = ctd_processed,
+  #            aes(x = as.Date(date_numeric, origin = "1970-01-01"),
+  #                y = pres, fill = f_npq),
+  #            size = 0.1, alpha = 0.7, shape = 21, color = "black") +
+  
+  # Theming
+  theme_minimal() +
+  theme(
+    panel.grid = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA),
+    axis.text = element_text(size = 11, color = "grey20"),
+    axis.title = element_text(size = 13, color = "grey20", face = "bold"),
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 10),
+    legend.position = "right",
+    plot.title = element_text(size = 16, hjust = 0.5, face = "bold", 
+                              color = "grey20", margin = margin(b = 10)),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, color = "grey40",
+                                margin = margin(b = 15)),
+    plot.margin = margin(20, 20, 20, 20)
+  ) 
+
+# Display the plot
+print(p)
+
+ggsave(here("figures", "ctd_fluorescence_section.png"), 
+       plot = p,
+       width = 12,        # Wide format to show temporal progression
+       height = 6,        # Height maintains good depth resolution
+       dpi = 300,         # High resolution for publication
+       units = "in",
+       bg = "white")      # White background
+```
+
+
+
+
+```{r}
+ctd_data %>% 
+  filter(pres < 30) %>% 
+  ggplot(aes(x = f_npq, y = temp, color = pres)) +
+  geom_point() +
+  scale_color_viridis_b()
+```
+
+
+

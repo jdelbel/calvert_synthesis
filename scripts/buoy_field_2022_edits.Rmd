@@ -28,6 +28,7 @@ library(ggsci)
 
 ```{r}
 #QC'd Buoy fluorescence data
+#Put buoy QC pipline into Claude for suggestions.
 
 #2022
 b22 <- read.csv(here("outputs", "buoy_corr_dm_2022.csv"))
@@ -110,29 +111,11 @@ buoy_ts <- buoy_ts %>%
             .groups = "drop")
 ```
 
-
-```{r}
-#Pulling out 2022 profiles from the corrected CTD data - This isn't needed here I dont think - I think I do this so I can pull in the interpolated profiles elsewhere.
-f22 <- f %>% 
-  mutate(year = year(date)) %>% 
-  filter(year == 2022)
-```
-
-
 ```{r}
 #Setting the date format for the daily mean wind data and then pulling out each year separated.
-#Why do they need to be separated?
 
 wind <- wind %>% 
   mutate(date = mdy(date))
-
-#2022
-wind22 <- wind %>% 
-  filter(year == 2022)
-
-#2024
-wind24 <- wind %>% 
-  filter(year == 2024)
 ```
 
 ```{r}
@@ -142,6 +125,10 @@ cd <- cd %>%
   select(date, chla) %>% 
   mutate(chla = case_when(date == "2022-05-05" ~ 1.41,
                           TRUE ~ as.numeric(chla)))
+```
+
+```{r}
+#There were two saturated CTD casts in 2022 and here, I am prepping to iterpolate from discrete sample profiles - this is OK here as they are mixed conditions lacking strong peaks.
 
 #Wrangling the March 2022 discrete chlorophyll fluorescence profile
 cm <- cm %>% 
@@ -166,6 +153,8 @@ c_interp <- c_interp %>%
 
 
 ```{r}
+#Performing the interpolation.
+
 # Select chlorophyll data and depths
 spec <- c_interp %>%
   select(`2022-03-09`, `2022-09-09`)
@@ -182,69 +171,42 @@ interp <- as.data.frame(sp.interp) %>%
   mutate(pres = x.new) %>% 
   pivot_longer(cols = 1:2, names_to = "date", values_to = "f_npq") %>% 
   mutate(date = as.Date(date),
+         year = year(date),
          f_npq = round(f_npq, 2)) %>% 
-  select(date, pres, f_npq)
+  select(date, year, pres, f_npq)
 ```
-
-
 
 ```{r}
 #Wrangling the buoy fluorometer data and joining 2022 and 2024 with both
-b22 <- b22 %>% 
+buoy_fl <- buoy_fl %>% 
   mutate(date = lubridate::ymd(date_corr),
          year = lubridate::year(date),
-         yday = lubridate::yday(date)) 
-
-#2022 data joins
-b22 <- b22 %>% 
+         yday = lubridate::yday(date)) %>% 
   left_join(cd) %>% 
   left_join(buoy_ts)
-
-#2024 data
-b24 <- b24 %>% 
-  mutate(date = lubridate::ymd(date_corr),
-         year = lubridate::year(date),
-         yday = lubridate::yday(date)) 
-
-b24 <- b24 %>% 
-  left_join(cd) %>% 
-  left_join(buoy_ts)
-
-#It would probably be less verbose if I just joined this within in single dataframe earlier
 ```
-
-
-
 ```{r}
 #Working with chemtax data to make it easy to plot
 
 #Making the date column a date format
 chem <- chem %>% 
-  mutate(date2 = lubridate::mdy(Date)) 
-
-#Selecting appropriate columns and renaming to easy to work with names
-chem <- chem %>%
-  select(date = date2, cyan = Cyanobacteria, hapt = Hapto, 
+  mutate(date = lubridate::mdy(Date)) %>%
+  select(date, cyan = Cyanobacteria, hapt = Hapto, 
          GA = `Prasinophytes-3`, cryp = Cryptophytes,
          dino = `Dinoflagellates-1`, raph = Raphido,
-         dict = Dictyo, diat = `Diatoms-1`)
-
-#Pivoting to long/tidy for plotting in ggplot
-chem <- chem %>% 
-  pivot_longer(c(cyan:diat), names_to = "group", values_to = "contribution")
-
-#Calculating TChla for each sample
-chem_tchla <- chem %>% 
+         dict = Dictyo, diat = `Diatoms-1`) %>% #rename groups
+  pivot_longer(c(cyan:diat), names_to = "group",
+               values_to = "contribution") %>%  #pivot longer
   group_by(date, group) %>% 
-  summarise(contribution = mean(contribution)) %>% 
+  summarise(contribution = mean(contribution)) %>% #Calculating daily mean for duplicates.
   ungroup() %>% 
   group_by(date) %>% 
-  mutate(tchla = sum(contribution)) %>% 
+  mutate(tchla = sum(contribution)) %>% #Calculating TChla concentrations for each day
   ungroup()
 
 
 #checking to see if there are any duplicates - there were replicates taken for DFO comparisons. None found because I already averaged these for the manuscript.
-chem_dup <- chem_tchla %>%
+chem_dup <- chem%>%
   distinct(date, tchla) %>% 
   group_by(date) %>% 
   mutate(dup = n()) %>% 
@@ -252,41 +214,6 @@ chem_dup <- chem_tchla %>%
   filter(dup > 1)
 
 #Good to move forward
-```
-
-```{r}
-#Creating the 2022 wind speed cubed plot - what if i added wind direction or vector here?
-f1_22 <-   ggplot() + 
-  geom_line(data = wind22, aes(x = date, y = WindSpd_Med^3),
-            size = 2) +
-  ylim(0, 6000) +
-  labs(y = bquote(Wind~"("*m^3*s^-3*")")) +
-  scale_x_date(limits = as_date(c("2022-01-01", "2022-12-31")),
-               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
-  theme_bw() +
-  theme(text = element_text(size = 35), #35
-        axis.text = element_text(color = "black"),
-        axis.title.x = element_blank(),
-        axis.text.x = element_blank())
-```
-
-```{r}
-#Creating the 2024 wind speed cubed plot
-f1_24 <-   
-  ggplot() + 
-  geom_line(data = wind24, aes(x = date, y = WindSpd_Med^3),
-            size = 2) +
-  ylim(0, 6000) +
-  labs(y = bquote(Wind~"("*m^-3*s^-3*")")) +
-  scale_x_date(limits = as_date(c("2024-01-01", "2024-12-31")),
-               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
-  theme_bw() +
-  theme(text = element_text(size = 35), #35
-        axis.text = element_text(color = "black"),
-        axis.title.x = element_blank(),
-        axis.text.x = element_blank(),
-        axis.title.y = element_blank(),
-        axis.text.y = element_blank())
 ```
 
 ```{r}
@@ -300,11 +227,64 @@ riv_loc <- c("Q_GM",
 q <- arrange(mutate(q, 
                       Watershed_group = factor(Watershed_group,
                                                levels = riv_loc)))
+
+#Setting plotting order phytoplankton groups
+
+#Order phytoplankton groups roughly from smallest to largest - create order list
+order_chem <- c("cyan", "hapt", "GA", "cryp",
+                   "dino", "raph", "dict", "diat")
+
+#Chemtax full data - Specify order of phyto groups for figures
+chem_tchla <- arrange(mutate(chem_tchla,
+                                group = factor(group,
+                                levels = order_chem)))
+
+#Brign over color palette from SOPO
+```
+
+```{r}
+#Creating the 2022 wind speed cubed plot - what if i added wind direction or vector here?
+f_wind_22 <- wind %>%
+  filter(year == 2022) %>%
+  ggplot() +
+  geom_line(aes(x = date, y = WindSpd_Med^3),
+            size = 2) +
+  ylim(0, 6000) +
+  labs(y = bquote(Wind~"("*m^3*s^-3*")")) +
+  scale_x_date(limits = as_date(c("2022-01-01", "2022-12-31")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank())
+
+print(f_wind_22)
+```
+
+```{r}
+#Creating the 2022 wind speed cubed plot - what if i added wind direction or vector here?
+f_wind_24 <- wind %>%
+  filter(year == 2024) %>%
+  ggplot() +
+  geom_line(aes(x = date, y = WindSpd_Med^3),
+            size = 2) +
+  ylim(0, 6000) +
+  labs(y = bquote(Wind~"("*m^3*s^-3*")")) +
+  scale_x_date(limits = as_date(c("2024-01-01", "2024-12-31")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank())
+
+print(f_wind_24)
 ```
 
 ```{r}
 #Creating the 2022 freshwater discharge plot.
-fd_22 <- q %>% 
+f_q_22 <- q %>% 
   filter(year == 2022) %>% 
   ggplot(aes(x = date, y = Q/10^3, fill = Watershed_group)) +
   geom_area() +
@@ -327,11 +307,13 @@ fd_22 <- q %>%
         axis.title.x = element_blank(),
         axis.text.x = element_blank())
         # axis.text.y = element_blank())
+
+print(f_q_22)
 ```
 
 ```{r}
 #Creating the 2024 freshwater discharge plot
-fd_24 <- q %>% 
+f_q_24 <- q %>% 
   filter(year == 2024) %>% 
   ggplot(aes(x = date, y = Q/10^3, fill = Watershed_group)) +
   geom_area() +
@@ -354,44 +336,39 @@ fd_24 <- q %>%
         axis.title.x = element_blank(),
         axis.text.x = element_blank(),
         axis.title.y = element_blank(),
-        axis.text.y = element_blank())
+        # axis.text.y = element_blank()
+        )
         # axis.text.y = element_blank())
+
+print(f_q_24)
 ```
 
 ```{r}
 #Setting up the joined buoy surface discrete chlorophyll 2m nightly median fluorescence and 2m daily mean salinity/temperature for plotting - pivoting long.
-b22_long <- b22 %>%
+
+buoy_fl_long <- buoy_fl %>%
   select(date_corr, chla, fl_med_day, mean_sal, mean_temp) %>% 
   pivot_longer(c(chla, fl_med_day, mean_sal, mean_temp),
               names_to = "par", values_to = "val") %>% 
-  mutate(date = date(date_corr))
-
-#Same for 2024
-b24_long <- b24 %>%
-  select(date_corr, chla, fl_med_day, mean_sal, mean_temp) %>% 
-  pivot_longer(c(chla, fl_med_day, mean_sal, mean_temp),
-              names_to = "par", values_to = "val") %>% 
-  mutate(date = date(date_corr))
-
+  mutate(date = date(date_corr),
+         year = year(date))  
 ```
 
 ```{r}
 #Creating buoy figure for 2022 - discrete surface chlorophyll, daily fluorescence/temp/sal
-f2_22 <-
-  b22_long %>% 
+f_buoy_22 <- buoy_fl_long %>% 
+  filter(year == 2022) %>% 
   ggplot(aes(x = date, y = val, color = par)) +
-  annotate("rect", xmin = date("2024-03-05"), xmax = date("2024-04-30"),
-           ymin = 0, ymax = Inf, fill = 'darkgreen', alpha = 0.2) +
-  geom_line(data = filter(b22_long,
+  geom_line(data = filter(buoy_fl_long,
                           par == "fl_med_day"),
             size = 2) +
-  geom_line(data = filter(b22_long,
+  geom_line(data = filter(buoy_fl_long,
                           par == "mean_sal"),
             size = 2) +
-  geom_line(data = filter(b22_long,
+  geom_line(data = filter(buoy_fl_long,
                           par == "mean_temp"),
             size = 2) +
-  geom_point(data = filter(b22_long,
+  geom_point(data = filter(buoy_fl_long,
                           par == "chla"),
             size = 4, pch = 8, stroke = 2) +
   ggsci::scale_color_jama(labels = c(expression(Chl[Discrete]),
@@ -409,25 +386,25 @@ f2_22 <-
         axis.text = element_text(color = "black"),
         axis.title.x = element_blank(),
         axis.text.x = element_blank())
+
+print(f_buoy_22)
 ```
 
 ```{r}
-#Same buoy plot for 2024
-f2_24 <-
-  b24_long %>% 
+#Creating buoy figure for 2022 - discrete surface chlorophyll, daily fluorescence/temp/sal
+f_buoy_24 <- buoy_fl_long %>% 
+  filter(year == 2024) %>% 
   ggplot(aes(x = date, y = val, color = par)) +
-  annotate("rect", xmin = date("2024-03-05"), xmax = date("2024-04-30"),
-           ymin = 0, ymax = Inf, fill = 'darkgreen', alpha = 0.2) +
-  geom_line(data = filter(b24_long,
+  geom_line(data = filter(buoy_fl_long,
                           par == "fl_med_day"),
             size = 2) +
-  geom_line(data = filter(b24_long,
+  geom_line(data = filter(buoy_fl_long,
                           par == "mean_sal"),
             size = 2) +
-  geom_line(data = filter(b24_long,
+  geom_line(data = filter(buoy_fl_long,
                           par == "mean_temp"),
             size = 2) +
-  geom_point(data = filter(b24_long,
+  geom_point(data = filter(buoy_fl_long,
                           par == "chla"),
             size = 4, pch = 8, stroke = 2) +
   ggsci::scale_color_jama(labels = c(expression(Chl[Discrete]),
@@ -444,106 +421,24 @@ f2_24 <-
         text = element_text(size = 35), #35
         axis.text = element_text(color = "black"),
         axis.title.x = element_blank(),
-        # axis.text.x = element_blank(),
-        axis.title.y = element_blank(),
-        axis.text.y = element_blank())
+        axis.text.x = element_blank())
+
+print(f_buoy_24)
 ```
 
 ```{r}
-#This makes a plot with wind, freshwater and buoy data with 2022 and 2024 side by side. Not super useful, but does show how different each year is.
-# wfb <- ggarrange(f1_22, f1_24, fd_22, fd_24, f2_22, f2_24, ncol = 2)
-# 
-# ggsave(here("figures", "panel_kc10_w_f_b.png"), wfb,
-#         width = 24, height = 12, dpi = 300)
-```
+#Adding in 2022 interpolated CTD fluorescence profiles to fill gap of bad data
 
+ctd_fl <- f %>% 
+  mutate(year = year(date)) %>% 
+  filter(year %in% c(2022, 2024)) %>% 
+  select(date, year, pres, f_npq)
 
-
-```{r}
-#Setting plotting order phytoplankton groups
-
-#Order phytoplankton groups roughly from smallest to largest - create order list
-order_chem <- c("cyan", "hapt", "GA", "cryp",
-                   "dino", "raph", "dict", "diat")
-
-#Chemtax full data - Specify order of phyto groups for figures
-chem_tchla <- arrange(mutate(chem_tchla,
-                                group = factor(group,
-                                levels = order_chem)))
-
-#Brign over color palette from SOPO
+ctd_fl <- rbind(ctd_fl, interp)
 ```
 
 ```{r}
-#Plot of the full CHEMTAX time-series
-chem_tchla %>%
-  ggplot() +
-  geom_bar(aes(date, contribution, fill = fct_rev(group)),
-           position = "stack", stat = "identity",
-           alpha = 1, color = "black", size = 1) +
-  ggsci::scale_fill_npg() +
-  scale_x_date(limits = as.Date(c("2019-01-01", "2024-12-31")),
-               expand = c(0, 0),
-               date_breaks = "years", date_labels = "%Y") +
-  theme_bw() +
-  labs(y = bquote("Phyto. (mg" ~ m^-3*")"),
-       fill = "Group") +
-  theme(
-        legend.position = "right",
-        # legend.position = c(1.02, 0.5),
-        legend.key.height = unit(0.5, "cm"),
-        # legend.text = element_text(size = 25),
-        legend.title = element_blank(),
-        text = element_text(size = 38), #35
-        axis.text = element_text(color = "black"),
-        axis.title.x = element_blank())
-        # axis.text.y = element_blank())
-
-ggsave(here("figures", "chemtax_19-24.png"),
-        width = 16, height = 6, dpi = 300)
-```
-
-
-
-
-
-```{r}
-f22_plot <- f22 %>% 
-  select(date, pres, f_npq)
-
-f22_plot <- rbind(f22_plot, interp)
-```
-
-```{r}
-# Option 1: Custom gradient emphasizing bloom threshold
-# Dark blue -> light blue -> green -> yellow -> orange -> red
-fluor_palette_v1 <- colorRampPalette(c(
-  "#08306b",  # Dark blue (low values)
-  "#2171b5",  # Medium blue
-  "#4292c6",  # Light blue (approaching bloom)
-  "#41ab5d",  # Green (bloom onset ~5 μg/L)
-  "#78c679",  # Light green
-  "#c2e699",  # Yellow-green
-  "#fed976",  # Yellow (moderate bloom)
-  "#fd8d3c",  # Orange (high bloom)
-  "#e31a1c"   # Red (very high bloom)
-))
-
-# Option 2: Oceanographic-inspired palette
-# Deep ocean blue to surface bloom colors
-fluor_palette_v2 <- colorRampPalette(c(
-  "#08306b",  # Deep blue (oligotrophic)
-  "#2171b5",  # Blue
-  "#4292c6",  # Medium blue
-  "#6baed6",  # Light blue (bloom threshold)
-  "#9ecae1",  # Very light blue
-  "#c6dbef",  # Pale blue
-  "#fee391",  # Pale yellow
-  "#fec44f",  # Yellow
-  "#fe9929",  # Orange
-  "#d95f0e"   # Dark orange (intense bloom)
-))
-
+#Setting color palette
 
 # Option 3: Viridis-inspired but with dark blue start
 fluor_palette_v3 <- colorRampPalette(c(
@@ -561,8 +456,6 @@ fluor_palette_v3 <- colorRampPalette(c(
 ))
 
 # Generate color vectors (50 colors for smooth gradients)
-colors_v1 <- fluor_palette_v1(50)
-colors_v2 <- fluor_palette_v2(50)
 colors_v3 <- fluor_palette_v3(50)
 
 # Function to create breaks that emphasize bloom threshold
@@ -570,52 +463,22 @@ create_fluor_breaks <- function(max_val = 50, bloom_threshold = 5) {
   # More breaks in the 0-10 range to capture bloom dynamics
   c(0, 1, 2, 3, 4, bloom_threshold, 7, 10, 15, 20, 30, 40, max_val)
 }
-
 ```
 
-
-
 ```{r}
-# f3 <-
-  
-  
-  f22_plot %>% 
-  filter(pres < 51) %>% 
-  mutate(day = 15,
-         year = year(date),
-         month = month(date)) %>% 
-  unite(date_2, c(year, month, day), sep = "-", remove = F) %>% 
-  mutate(date_2 = date(date_2)) %>% 
+#Creating CTD profile plot for each year.
+
+f_ctd_fl_22 <- ctd_fl %>% 
+  filter(pres < 51 & year == 2022) %>% 
   ggplot(aes(x = date)) +
   geom_tile(aes(y = pres, fill = f_npq)) +
-  # geom_vline(xintercept = as_date("2024-03-18"),
-  #            linetype = "solid", size = 1, color = "white") +
+
   geom_hline(yintercept = 5,
              linetype = "dashed", size = 1, color = "white") +
-  # annotate("text", x = as.Date("2024-01-15"), y = 5,
-  #          label = "c)",
-  #          size = 10) +
-  # annotate("text", x = as.Date("2024-11-19"), y = 9,
-  #          label = "5m",
-  #          size = 10,
-  #          color = "white") +
   scale_y_reverse(breaks = seq(0, 50, by = 10)) +
-  # cmocean::scale_fill_cmocean(name = "delta",
-  #                             limits = c(0, 20),
-  #                             oob = scales::squish) +
-  # scale_fill_viridis_c(limits = c(0, 30),
-  #                      oob = scales::squish) +
+
     scale_fill_gradientn(colors = colors_v3,
                        values = scales::rescale(c(0, 2, 5, 10, 20, 50))) +
-  #   scale_fill_gradientn(
-  #   colours = oce::oceColors9A(120),
-  #   breaks = c(0, 10, 20, 30),
-  #   limits = c(0, 35),
-  # ) +
-  # scale_fill_gradient2(low = "blue",
-  #                      mid = "green",
-  #                      high = "red",
-  #                      midpoint = 5) +
   labs(fill = bquote(CTD[FLU]~"(mg" ~ m^-3*")"),
        y = "Depth") +
   scale_x_date(limits = as_date(c("2022-01-01", "2022-12-31")),
@@ -634,19 +497,45 @@ create_fluor_breaks <- function(max_val = 50, bloom_threshold = 5) {
         ) +
     guides(fill = guide_colourbar(title.position = "right"))
 
-  # theme(text = element_text(size = 35), #35
-  #       axis.text = element_text(color = "black"),
-  #       axis.title.x = element_blank(),
-  #       legend.position = "top",
-  #       legend.box = "horizontal") +
-  # guides(fill = guide_colourbar(title.position = "top", title.hjust = 0.5,
-  #                               barwidth = 50, barheight = 1,
-  #                               frame.colour = "black", ticks.colour = "black"))
+print(f_ctd_fl_22)
 ```
 
+```{r}
+#Creating CTD profile plot for each year.
+
+f_ctd_fl_24 <- ctd_fl %>% 
+  filter(pres < 51 & year == 2024) %>% 
+  ggplot(aes(x = date)) +
+  geom_tile(aes(y = pres, fill = f_npq)) +
+
+  geom_hline(yintercept = 5,
+             linetype = "dashed", size = 1, color = "white") +
+  scale_y_reverse(breaks = seq(0, 50, by = 10)) +
+
+    scale_fill_gradientn(colors = colors_v3,
+                       values = scales::rescale(c(0, 2, 5, 10, 20, 50))) +
+  labs(fill = bquote(CTD[FLU]~"(mg" ~ m^-3*")"),
+       y = "Depth") +
+  scale_x_date(limits = as_date(c("2024-01-01", "2024-12-31")),
+               expand = c(0, 0),date_breaks = "months", date_labels = "%b") +
+  theme_bw() +
+  theme(text = element_text(size = 38), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        # axis.text.x = element_blank(),
+        legend.position = "right",
+        legend.key.height = unit(1.8, "cm"),
+        legend.title = element_text(size = 30, angle = 270),
+        legend.title.align = 0.5,
+        legend.direction = "vertical",
+        axis.text.x = element_blank()
+        ) +
+    guides(fill = guide_colourbar(title.position = "right"))
+
+print(f_ctd_fl_24)
+```
 
 ```{r}
-
 #Setting plotting order phytoplankton groups
 
 #Order phytoplankton groups roughly from smallest to largest - create order list
@@ -654,33 +543,18 @@ order_chem <- c("cyan", "hapt", "GA", "cryp",
                    "dino", "raph", "dict", "diat")
 
 #Chemtax full data - Specify order of phyto groups for figures
-chem_tchla <- arrange(mutate(chem_tchla,
+chem <- arrange(mutate(chem,
                                 group = factor(group,
                                 levels = order_chem)))
-
-
 ```
 
 ```{r}
-# f5 <- 
-  
-f4 <- chem_tchla %>%
+f_chem_22 <- chem %>%
   ggplot() +
-  # annotate("rect", xmin = date("2024-03-05"), xmax = date("2024-04-30"),
-  #          ymin = 0, ymax = Inf, fill = 'darkgreen', alpha = 0.2) +
   geom_bar(aes(date, contribution, fill = fct_rev(group)),
            position = "stack", stat = "identity",
            alpha = 1, color = "black", size = 1) +
-  # geom_vline(xintercept = as_date("2024-03-18"),
-  #            linetype = "solid", size = 1, color = "black") +
-  # annotate("text", x = as.Date("2024-01-15"), y = 5.4,
-  #          label = "d)",
-  #          size = 10) +
-  # annotate("text", x = as.Date("2024-12-15"), y = 5.4,
-  #          label = "5m",
-  #          size = 10) +
   ggsci::scale_fill_npg() +
-  # lims(y = c(0, 5)) +
   scale_x_date(limits = as.Date(c("2022-01-01", "2022-12-31")),
                expand = c(0, 0),
                date_breaks = "months", date_labels = "%b") +
@@ -689,22 +563,48 @@ f4 <- chem_tchla %>%
        fill = "Group") +
   theme(
         legend.position = "right",
-        # legend.position = c(1.02, 0.5),
         legend.key.height = unit(0.5, "cm"),
-        # legend.text = element_text(size = 25),
         legend.title = element_blank(),
         text = element_text(size = 38), #35
         axis.text = element_text(color = "black"),
         axis.title.x = element_blank())
-        # axis.text.y = element_blank())
+
+print(f_chem_22)
 ```
-
 ```{r}
-test2 <- ggarrange(f1_22, f2_22, f3, f4, ncol = 1)
+f_chem_24 <- chem %>%
+  ggplot() +
+  geom_bar(aes(date, contribution, fill = fct_rev(group)),
+           position = "stack", stat = "identity",
+           alpha = 1, color = "black", size = 1) +
+  ggsci::scale_fill_npg() +
+  scale_x_date(limits = as.Date(c("2024-01-01", "2024-12-31")),
+               expand = c(0, 0),
+               date_breaks = "months", date_labels = "%b") +
+  theme_bw() +
+  labs(y = bquote("Phyto. (mg" ~ m^-3*")"),
+       fill = "Group") +
+  theme(
+        legend.position = "right",
+        legend.key.height = unit(0.5, "cm"),
+        legend.title = element_blank(),
+        text = element_text(size = 38), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
 
+print(f_chem_24)
+```
+```{r}
+f_22_panel <- ggarrange(f_wind_22, f_buoy_22, f_ctd_fl_22, f_chem_22,
+                        ncol = 1)
 
+ggsave(here("figures", "panel_kc10_2022_buoy_discrete.png"), f_22_panel,
+        width = 16, height = 16, dpi = 300)
 
-ggsave(here("figures", "panel_kc10_2022_CHEMTAX_3.png"), test2,
+f_24_panel <- ggarrange(f_wind_24, f_buoy_24, f_ctd_fl_24, f_chem_24,
+                        ncol = 1)
+
+ggsave(here("figures", "panel_kc10_2024_buoy_discrete.png"), f_24_panel,
         width = 16, height = 16, dpi = 300)
 ```
 
