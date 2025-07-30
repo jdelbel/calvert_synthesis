@@ -775,23 +775,27 @@ wind_calc <- wind %>%
     # Convert to meteorological convention (direction wind is coming FROM)
     # u = eastward component, v = northward component
     u = -ws * sin(wd * pi/180),  # Negative because wd is "from" direction
-    v = -ws * cos(wd * pi/180)
+    v = -ws * cos(wd * pi/180),
+    # Calculate SE component for each hourly observation
+    se_component = (u - v) / sqrt(2)
   )
 
 # Calculate mean wind for the month prior to each sampling date
 wind_lag_vectors <- f %>% 
   mutate(month = month(date),
          year = year(date)) %>% 
-  filter(month %in% c(5)) %>%
-  filter(year != 2019) %>% 
+  filter(month %in% c(7)) %>%
+  # filter(year != 2019) %>% 
   filter(pres <= 30) %>% 
   group_by(date) %>% 
   summarise(int = sum(f_npq)) %>% 
-  ungroup() %>%
+  ungroup()
+
+wind_lag_vectors <- wind_lag_vectors %>%
   rowwise() %>%
   do({
     sample_date <- .$date
-    start_date <- sample_date - days(15)
+    start_date <- sample_date - days(3)
     end_date <- sample_date - days(1)
     
     period_wind <- wind_calc %>%
@@ -803,37 +807,34 @@ wind_lag_vectors <- f %>%
         int = .$int,
         mean_u_lag = mean(period_wind$u, na.rm = TRUE),
         mean_v_lag = mean(period_wind$v, na.rm = TRUE),
+        mean_se_lag = mean(period_wind$se_component, na.rm = TRUE),
         mean_ws_lag = mean(period_wind$ws, na.rm = TRUE),
         n_obs = nrow(period_wind)
-      )
+      ) 
     } else {
       data.frame(
         date = sample_date,
         int = .$int,
         mean_u_lag = NA,
         mean_v_lag = NA,
+        mean_se_lag = NA,
         mean_ws_lag = NA,
         n_obs = 0
       )
     }
   }) %>%
-  ungroup()
-
-wind_lag_vectors <- wind_lag_vectors %>%
-  mutate(
-    # Resultant wind speed and direction from mean components
-    resultant_ws = sqrt(mean_u_lag^2 + mean_v_lag^2),
-    resultant_wd = atan2(-mean_u_lag, -mean_v_lag) * 180/pi,
-    resultant_wd = ifelse(resultant_wd < 0, resultant_wd + 360, resultant_wd),
-    se_component = (mean_u_lag - mean_v_lag) / sqrt(2),
-  )
+  ungroup() %>% 
+    mutate(
+    # Calculate resultant wind speed from mean u and v components
+    resultant_ws = sqrt(mean_u_lag^2 + mean_v_lag^2)
+  ) 
 ```
 
 
 ```{r}
 wind_lag_vectors %>%
  mutate(year = year(date)) %>%
- select(int, mean_u_lag, mean_v_lag, mean_ws_lag, resultant_ws, se_component, year) %>%
+ select(int, mean_se_lag, mean_ws_lag, resultant_ws, year) %>%
  pivot_longer(cols = -c(int, year), names_to = "wind_param", values_to = "wind_value") %>%
  filter(!is.na(wind_value)) %>%
  ggplot(aes(x = wind_value, y = int)) +
@@ -851,7 +852,7 @@ wind_lag_vectors %>%
               "mean_v_lag" = "Northward wind", 
               "mean_ws_lag" = "Wind speed",
               "resultant_ws" = "Resultant speed",
-              "se_component" = "Southeast component"))) +
+              "mean_se_lag" = "NW-SE component"))) +
  theme_bw() +
  theme(
    panel.grid.minor = element_blank(),
@@ -864,11 +865,11 @@ wind_lag_vectors %>%
  labs(x = bquote("Wind component/speed"~(m~s^-1)), 
       y = bquote("Integrated fluorescence"~(mg~m^-2)),
       title = "Wind-Integrated Chlorophyll Correlations",
-      subtitle = "May - Prior 15 day mean lookout wind (no 2019)") +
+      subtitle = "July- Prior 3 day mean lookout wind") +
  guides(color = guide_legend(nrow = 1, override.aes = list(size = 3)))
 
-ggsave(here("figures", "scatters_may_wind_lag_19_integrated_no_2019.png"), 
-        width = 12, height = 8, dpi = 300)
+ggsave(here("figures", "scatters_july_3_day.png"), 
+        width = 12, height = 5, dpi = 300)
 ```
 
 ```{r}
@@ -876,8 +877,7 @@ ggsave(here("figures", "scatters_may_wind_lag_19_integrated_no_2019.png"),
 calculate_wind_lag <- function(f_data, wind_calc, lag_days) {
   f_data %>% 
     mutate(month = month(date)) %>% 
-    filter(month %in% c(4, 5)) %>%
-    # filter(month %in% c(3)) %>%
+    filter(month %in% c(7)) %>% 
     filter(pres <= 30) %>% 
     group_by(date) %>% 
     summarise(int = sum(f_npq), .groups = 'drop') %>% 
@@ -891,12 +891,21 @@ calculate_wind_lag <- function(f_data, wind_calc, lag_days) {
         filter(measurementTime >= start_date & measurementTime <= end_date)
       
       if(nrow(period_wind) > 0) {
+        # Calculate mean u and v components first
+        mean_u <- mean(period_wind$u, na.rm = TRUE)
+        mean_v <- mean(period_wind$v, na.rm = TRUE)
+        mean_se <- mean(period_wind$se_component, na.rm = TRUE)
+        mean_ws <- mean(period_wind$ws, na.rm = TRUE)
+        
+        # Calculate resultant speed from mean u and v components
+        resultant_speed <- sqrt(mean_u^2 + mean_v^2)
+        
         data.frame(
           date = sample_date,
           int = .$int,
-          mean_u_lag = mean(period_wind$u, na.rm = TRUE),
-          mean_v_lag = mean(period_wind$v, na.rm = TRUE),
-          mean_ws_lag = mean(period_wind$ws, na.rm = TRUE),
+          mean_se_lag = mean_se,
+          mean_ws_lag = mean_ws,
+          mean_resultant_lag = resultant_speed,
           n_obs = nrow(period_wind),
           lag_days = lag_days
         )
@@ -904,22 +913,15 @@ calculate_wind_lag <- function(f_data, wind_calc, lag_days) {
         data.frame(
           date = sample_date,
           int = .$int,
-          mean_u_lag = NA,
-          mean_v_lag = NA,
+          mean_se_lag = NA,
           mean_ws_lag = NA,
+          mean_resultant_lag = NA,
           n_obs = 0,
           lag_days = lag_days
         )
       }
     }) %>%
-    ungroup() %>%
-    mutate(
-      resultant_ws = sqrt(mean_u_lag^2 + mean_v_lag^2),
-      resultant_wd = atan2(-mean_u_lag, -mean_v_lag) * 180/pi,
-      resultant_wd = ifelse(resultant_wd < 0, resultant_wd + 360, resultant_wd),
-      # Add SE component (southeastward positive)
-      se_component = (mean_u_lag - mean_v_lag) / sqrt(2)
-    )
+    ungroup()
 }
 
 # Function to test multiple lag periods
@@ -929,44 +931,34 @@ test_lag_periods <- function(f_data, wind_calc, lag_range = 1:30) {
     wind_data <- calculate_wind_lag(f_data, wind_calc, lag)
     
     # Remove rows with missing wind data
-    wind_data_clean <- wind_data %>% filter(!is.na(mean_u_lag))
+    wind_data_clean <- wind_data %>% filter(!is.na(mean_se_lag))
     
     if(nrow(wind_data_clean) < 5) {
       return(data.frame(
         lag_days = lag,
-        eastward_r = NA,
-        eastward_p = NA,
-        northward_r = NA,
-        northward_p = NA,
+        se_component_r = NA,
+        se_component_p = NA,
         wind_speed_r = NA,
         wind_speed_p = NA,
         resultant_speed_r = NA,
         resultant_speed_p = NA,
-        se_component_r = NA,
-        se_component_p = NA,
         n_samples = nrow(wind_data_clean)
       ))
     }
     
     # Calculate correlations
-    east_cor <- cor.test(wind_data_clean$mean_u_lag, wind_data_clean$int)
-    north_cor <- cor.test(wind_data_clean$mean_v_lag, wind_data_clean$int)
+    se_cor <- cor.test(wind_data_clean$mean_se_lag, wind_data_clean$int)
     ws_cor <- cor.test(wind_data_clean$mean_ws_lag, wind_data_clean$int)
-    resultant_cor <- cor.test(wind_data_clean$resultant_ws, wind_data_clean$int)
-    se_cor <- cor.test(wind_data_clean$se_component, wind_data_clean$int)
+    resultant_cor <- cor.test(wind_data_clean$mean_resultant_lag, wind_data_clean$int)
     
     data.frame(
       lag_days = lag,
-      eastward_r = east_cor$estimate,
-      eastward_p = east_cor$p.value,
-      northward_r = north_cor$estimate,
-      northward_p = north_cor$p.value,
+      se_component_r = se_cor$estimate,
+      se_component_p = se_cor$p.value,
       wind_speed_r = ws_cor$estimate,
       wind_speed_p = ws_cor$p.value,
       resultant_speed_r = resultant_cor$estimate,
       resultant_speed_p = resultant_cor$p.value,
-      se_component_r = se_cor$estimate,
-      se_component_p = se_cor$p.value,
       n_samples = nrow(wind_data_clean)
     )
   })
@@ -977,63 +969,385 @@ test_lag_periods <- function(f_data, wind_calc, lag_range = 1:30) {
 # Run the analysis for lags 1-30 days
 lag_results <- test_lag_periods(f, wind_calc, lag_range = 1:30)
 
-# Display results sorted by strongest eastward correlation
+# Display results sorted by strongest SE component correlation
 lag_results %>%
-  arrange(desc(abs(eastward_r))) %>%
-  filter(!is.na(eastward_r)) %>%
+  arrange(desc(abs(se_component_r))) %>%
+  filter(!is.na(se_component_r)) %>%
+  mutate(
+    se_sig = ifelse(se_component_p < 0.05, "***", ""),
+    ws_sig = ifelse(wind_speed_p < 0.05, "***", ""),
+    resultant_sig = ifelse(resultant_speed_p < 0.05, "***", "")
+  ) %>%
+  select(lag_days, se_component_r, se_sig, wind_speed_r, ws_sig, resultant_speed_r, resultant_sig, n_samples) %>%
   head(10)
 
 # Plot correlation strength vs lag period
 library(ggplot2)
 library(tidyr)
 
-# Reshape for plotting
+# Reshape for plotting and add significance info
 lag_plot_data <- lag_results %>%
-  select(lag_days, eastward_r, northward_r, wind_speed_r, resultant_speed_r, se_component_r) %>%
-  pivot_longer(cols = -lag_days, names_to = "wind_metric", values_to = "correlation") %>%
-  mutate(wind_metric = case_when(
-    wind_metric == "eastward_r" ~ "Eastward component",
-    wind_metric == "northward_r" ~ "Northward component", 
-    wind_metric == "wind_speed_r" ~ "Wind speed",
-    wind_metric == "resultant_speed_r" ~ "Resultant speed",
-    wind_metric == "se_component_r" ~ "SE component"
-  ))
+  select(lag_days, se_component_r, se_component_p, wind_speed_r, wind_speed_p, resultant_speed_r, resultant_speed_p) %>%
+  pivot_longer(cols = -lag_days, 
+               names_to = c("wind_metric", "stat_type"), 
+               names_sep = "_(?=r$|p$)",
+               values_to = "value") %>%
+  pivot_wider(names_from = stat_type, values_from = value) %>%
+  mutate(
+    wind_metric = case_when(
+      wind_metric == "se_component" ~ "SE component",
+      wind_metric == "wind_speed" ~ "Wind speed",
+      wind_metric == "resultant_speed" ~ "Resultant speed"
+    ),
+    significant = p < 0.05,
+    correlation = r
+  )
 
-# Create the plot
+# Create the plot with significance indicators
 ggplot(lag_plot_data, aes(x = lag_days, y = correlation, color = wind_metric)) +
   geom_line(size = 1) +
-  geom_point(size = 2) +
+  geom_point(aes(shape = significant, size = significant)) +
   geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  scale_shape_manual(values = c("FALSE" = 1, "TRUE" = 16), 
+                     name = "Significant\n(p < 0.05)",
+                     labels = c("No", "Yes")) +
+  scale_size_manual(values = c("FALSE" = 2, "TRUE" = 3),
+                    guide = "none") +
   labs(
     x = "Lag period (days)",
     y = "Correlation coefficient (r)",
     title = "Wind-Chlorophyll Correlations vs Lag Period",
-    subtitle = "April-July data, pressure ≤ 30m",
+    subtitle = "April data, pressure ≤ 30m",
     color = "Wind metric"
   ) +
   theme_minimal() +
   theme(legend.position = "bottom") +
-  scale_x_continuous(breaks = seq(0, 30, 5))
+  scale_x_continuous(breaks = seq(0, 30, 5)) +
+  guides(color = guide_legend(order = 1),
+         shape = guide_legend(order = 2))
 
 # Find optimal lags for each metric
 optimal_lags <- lag_results %>%
-  filter(!is.na(eastward_r)) %>%
+  filter(!is.na(se_component_r)) %>%
   summarise(
-    eastward_optimal = lag_days[which.max(abs(eastward_r))],
-    eastward_max_r = eastward_r[which.max(abs(eastward_r))],
-    northward_optimal = lag_days[which.max(abs(northward_r))],
-    northward_max_r = northward_r[which.max(abs(northward_r))],
+    se_component_optimal = lag_days[which.max(abs(se_component_r))],
+    se_component_max_r = se_component_r[which.max(abs(se_component_r))],
     wind_speed_optimal = lag_days[which.max(abs(wind_speed_r))],
     wind_speed_max_r = wind_speed_r[which.max(abs(wind_speed_r))],
     resultant_optimal = lag_days[which.max(abs(resultant_speed_r))],
-    resultant_max_r = resultant_speed_r[which.max(abs(resultant_speed_r))],
-    se_component_optimal = lag_days[which.max(abs(se_component_r))],
-    se_component_max_r = se_component_r[which.max(abs(se_component_r))]
+    resultant_max_r = resultant_speed_r[which.max(abs(resultant_speed_r))]
   )
 
 print("Optimal lag periods:")
 print(optimal_lags)
 ```
+
+```{r}
+# Function to find optimal lag and correlation for each month-variable combination
+analyze_monthly_correlations <- function(f_data, wind_calc, months = 1:12, lag_range = 1:30) {
+  
+  results <- map_dfr(months, function(m) {
+    
+    # Modify the calculate_wind_lag function for specific month
+    monthly_results <- map_dfr(lag_range, function(lag) {
+      wind_data <- f_data %>% 
+        mutate(month = month(date)) %>% 
+        filter(month == m) %>% 
+        filter(pres <= 30) %>% 
+        group_by(date) %>% 
+        summarise(int = sum(f_npq), .groups = 'drop') %>% 
+        rowwise() %>%
+        do({
+          sample_date <- .$date
+          start_date <- sample_date - days(lag)
+          end_date <- sample_date - days(1)
+          
+          period_wind <- wind_calc %>%
+            filter(measurementTime >= start_date & measurementTime <= end_date)
+          
+          if(nrow(period_wind) > 0) {
+            # Calculate mean u and v components first
+            mean_u <- mean(period_wind$u, na.rm = TRUE)
+            mean_v <- mean(period_wind$v, na.rm = TRUE)
+            mean_se <- mean(period_wind$se_component, na.rm = TRUE)
+            mean_ws <- mean(period_wind$ws, na.rm = TRUE)
+            
+            # Calculate resultant speed from mean u and v components
+            resultant_speed <- sqrt(mean_u^2 + mean_v^2)
+            
+            data.frame(
+              date = sample_date,
+              int = .$int,
+              mean_u_lag = mean_u,
+              mean_v_lag = mean_v,
+              mean_se_lag = mean_se,
+              mean_ws_lag = mean_ws,
+              mean_resultant_lag = resultant_speed,
+              n_obs = nrow(period_wind)
+            )
+          } else {
+            data.frame(
+              date = sample_date,
+              int = .$int,
+              mean_u_lag = NA,
+              mean_v_lag = NA,
+              mean_se_lag = NA,
+              mean_ws_lag = NA,
+              mean_resultant_lag = NA,
+              n_obs = 0
+            )
+          }
+        }) %>%
+        ungroup()
+      
+      # Remove rows with missing wind data
+      wind_data_clean <- wind_data %>% filter(!is.na(mean_u_lag))
+      
+      if(nrow(wind_data_clean) < 5) {
+        return(data.frame(
+          month = m,
+          lag_days = lag,
+          eastward_r = NA,
+          eastward_p = NA,
+          northward_r = NA,
+          northward_p = NA,
+          se_component_r = NA,
+          se_component_p = NA,
+          wind_speed_r = NA,
+          wind_speed_p = NA,
+          resultant_speed_r = NA,
+          resultant_speed_p = NA,
+          n_samples = nrow(wind_data_clean)
+        ))
+      }
+      
+      # Calculate correlations
+      east_cor <- cor.test(wind_data_clean$mean_u_lag, wind_data_clean$int)
+      north_cor <- cor.test(wind_data_clean$mean_v_lag, wind_data_clean$int)
+      se_cor <- cor.test(wind_data_clean$mean_se_lag, wind_data_clean$int)
+      ws_cor <- cor.test(wind_data_clean$mean_ws_lag, wind_data_clean$int)
+      resultant_cor <- cor.test(wind_data_clean$mean_resultant_lag, wind_data_clean$int)
+      
+      data.frame(
+        month = m,
+        lag_days = lag,
+        eastward_r = east_cor$estimate,
+        eastward_p = east_cor$p.value,
+        northward_r = north_cor$estimate,
+        northward_p = north_cor$p.value,
+        se_component_r = se_cor$estimate,
+        se_component_p = se_cor$p.value,
+        wind_speed_r = ws_cor$estimate,
+        wind_speed_p = ws_cor$p.value,
+        resultant_speed_r = resultant_cor$estimate,
+        resultant_speed_p = resultant_cor$p.value,
+        n_samples = nrow(wind_data_clean)
+      )
+    })
+    
+    return(monthly_results)
+  })
+  
+  return(results)
+}
+
+# Run analysis for all months
+monthly_results <- analyze_monthly_correlations(f, wind_calc, months = 1:12, lag_range = 1:30)
+
+# Find optimal lag for each month-variable combination
+optimal_monthly <- monthly_results %>%
+  filter(!is.na(eastward_r)) %>%
+  group_by(month) %>%
+  summarise(
+    eastward_optimal_lag = lag_days[which.max(abs(eastward_r))],
+    eastward_max_r = eastward_r[which.max(abs(eastward_r))],
+    eastward_p = eastward_p[which.max(abs(eastward_r))],
+    
+    northward_optimal_lag = lag_days[which.max(abs(northward_r))],
+    northward_max_r = northward_r[which.max(abs(northward_r))],
+    northward_p = northward_p[which.max(abs(northward_r))],
+    
+    se_optimal_lag = lag_days[which.max(abs(se_component_r))],
+    se_max_r = se_component_r[which.max(abs(se_component_r))],
+    se_p = se_component_p[which.max(abs(se_component_r))],
+    
+    ws_optimal_lag = lag_days[which.max(abs(wind_speed_r))],
+    ws_max_r = wind_speed_r[which.max(abs(wind_speed_r))],
+    ws_p = wind_speed_p[which.max(abs(wind_speed_r))],
+    
+    resultant_optimal_lag = lag_days[which.max(abs(resultant_speed_r))],
+    resultant_max_r = resultant_speed_r[which.max(abs(resultant_speed_r))],
+    resultant_p = resultant_speed_p[which.max(abs(resultant_speed_r))],
+    .groups = 'drop'
+  )
+
+# Reshape for heatmap plotting
+heatmap_data <- optimal_monthly %>%
+  pivot_longer(
+    cols = c(eastward_optimal_lag:eastward_p, northward_optimal_lag:northward_p, 
+             se_optimal_lag:se_p, ws_optimal_lag:ws_p, resultant_optimal_lag:resultant_p),
+    names_to = c("variable", "metric"),
+    names_pattern = "(.*)_(optimal_lag|max_r|p)$",
+    values_to = "value"
+  ) %>%
+  pivot_wider(names_from = metric, values_from = value) %>%
+  mutate(
+    variable = case_when(
+      variable == "eastward" ~ "Eastward (E-W)",
+      variable == "northward" ~ "Northward (N-S)",
+      variable == "se" ~ "Southeastward (SE-NW)",
+      variable == "ws" ~ "Wind Speed", 
+      variable == "resultant" ~ "Resultant Speed"
+    ),
+    # Set factor levels to control x-axis order
+    variable = factor(variable, levels = c("Eastward (E-W)", "Northward (N-S)", "Southeastward (SE-NW)", "Wind Speed", "Resultant Speed")),
+    month_name = month.abb[month],
+    significant = p < 0.05,
+    abs_correlation = abs(max_r),
+    # Set non-significant correlations to NA for white coloring
+    max_r_sig = ifelse(significant, max_r, NA),
+    optimal_lag_sig = ifelse(significant, optimal_lag, NA),
+    # Add significance stars
+    sig_stars = case_when(
+      p < 0.001 ~ "***",
+      p < 0.01 ~ "**", 
+      p < 0.05 ~ "*",
+      TRUE ~ ""
+    )
+  )
+
+# Create the heatmap
+library(ggplot2)
+
+# Plot 1: Correlation strength heatmap with significance stars
+p1 <- ggplot(heatmap_data, aes(x = variable, y = factor(month_name, levels = month.abb[1:12]))) +
+  geom_tile(aes(fill = max_r_sig), color = "gray", size = 0.5) +
+  geom_text(aes(label = ifelse(significant, paste0(round(max_r, 2), sig_stars), "")), 
+            color = "white", fontface = "bold", size = 6) +
+  scale_fill_gradient2(low = "blue", mid = "white", high = "red", 
+                       midpoint = 0, name = "Correlation coefficient (r)",
+                       limits = c(-1, 1), na.value = "white",
+                       guide = guide_colorbar(title.position = "top", 
+                                            title.hjust = 0.5,
+                                            barwidth = 25, 
+                                            barheight = 1)) +
+  labs(
+    # title = "Wind-Chlorophyll Correlations by Month",
+    # subtitle = "Only significant correlations (p < 0.05) are colored",
+    x = "Wind Variable",
+    y = "Month"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    text = element_text(size = 27, face = "bold"), 
+    panel.grid = element_blank(),
+    legend.position = "top",
+    plot.title = element_text(hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5),
+    axis.title.x = element_blank()
+  )
+
+# Plot 2: Optimal lag periods
+p2 <- ggplot(heatmap_data, aes(x = variable, y = factor(month_name, levels = month.abb[1:12]))) +
+  geom_tile(aes(fill = optimal_lag_sig), color = "gray", size = 0.5) +
+  geom_text(aes(label = ifelse(significant, paste0(round(optimal_lag), "d"), "")), 
+            color = "white", fontface = "bold", size = 6) +
+  scale_fill_viridis_c(name = "Optimal lag (days)", na.value = "white",
+                       guide = guide_colorbar(title.position = "top", 
+                                            title.hjust = 0.5,
+                                            barwidth = 25, 
+                                            barheight = 1)) +
+  labs(
+    # title = "Optimal Lag Periods by Month",
+    # subtitle = "Only significant correlations shown",
+    x = "Wind Variable",
+    y = "Month"
+  ) +
+  theme_bw() +
+  theme(
+    axis.text.x = element_text(angle = 45, hjust = 1),
+    text = element_text(size = 27, face = "bold"), 
+    panel.grid = element_blank(),
+    legend.position = "top",
+    plot.title = element_text(hjust = 0.5),
+    plot.subtitle = element_text(hjust = 0.5),
+    axis.text.y = element_blank(),
+    axis.title.y = element_blank(),
+    axis.title.x = element_blank()
+  )
+
+# Create sample size data (take one variable since n_samples is the same across variables)
+sample_size_data <- heatmap_data %>%
+  filter(variable == "Eastward (E-W)") %>%
+  select(month, month_name) %>%
+  left_join(
+    monthly_results %>%
+      filter(!is.na(eastward_r)) %>%
+      group_by(month) %>%
+      slice(1) %>%
+      select(month, n_samples),
+    by = "month"
+  )
+
+# Plot 3: Sample sizes
+p3 <- ggplot(sample_size_data, aes(x = 1, y = factor(month_name, levels = month.abb[1:12]))) +
+  geom_tile(aes(fill = n_samples), color = "gray", size = 0.5) +
+  geom_text(aes(label = n_samples), color = "white", fontface = "bold", size = 6) +
+  scale_fill_viridis_c(name = "Sample size (n)", na.value = "white",
+                       guide = guide_colorbar(title.position = "top", 
+                                            title.hjust = 0.5,
+                                            barwidth = 25, 
+                                            barheight = 1)) +
+  labs(
+    x = "Sample Size",
+    y = "Month"
+  ) +
+  theme_bw() +
+  theme(
+    text = element_text(size = 27, face = "bold"), 
+    panel.grid = element_blank(),
+    legend.position = "top",
+    axis.text.y = element_blank(),
+    axis.title.y = element_blank(),
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank()
+  )
+
+# Display both plots
+print(p1)
+print(p2)
+print(p3)
+
+fig <- p1 + p2
+# + p3
+
+ggsave(here("figures", "heatmap.png"), fig,
+        width = 15, height = 16, dpi = 300)
+```
+
+
+
+
+
+
+```{r}
+wind_calc %>% 
+  mutate(date = date(measurementTime),
+         year = year(date),
+         month = month(date),
+         se_component = (u - v) / sqrt(2)) %>% 
+  filter(year == 2021 & month == 4) %>% 
+  ggplot() +
+  geom_point(aes(x = measurementTime, y = ws, color = wd)) +
+  geom_line((aes(x = measurementTime, y = se_component))) +
+  scale_color_viridis_c(option = "turbo")
+```
+
+
+
+
+
 
 
 
@@ -1087,7 +1401,7 @@ buoy_join %>%
 # Eastward wind specific thresholds and variability
 eastward_metrics <- f %>% 
   mutate(month = month(date)) %>% 
-  filter(month >=3 & month <= 8) %>%
+  filter(month == 4) %>%
   filter(pres <= 30) %>% 
   group_by(date) %>% 
   summarise(int = sum(f_npq)) %>% 
@@ -1095,66 +1409,30 @@ eastward_metrics <- f %>%
   rowwise() %>%
   do({
     sample_date <- .$date
-    start_date <- sample_date - days(15)
+    start_date <- sample_date - days(19)
     end_date <- sample_date - days(1)
     
-    period_wind <- wind %>%
-      select(measurementTime = measurementTime2,
-             ws = WindSpd_Avg,
-             wd = WindDir_Avg) %>% 
+    period_wind <- wind_calc %>%
       filter(measurementTime >= start_date & measurementTime <= end_date) %>%
-      mutate(u = -ws * sin(wd * pi/180))
+      mutate(mean_se <- mean(period_wind$se_component, na.rm = TRUE))
     
     if(nrow(period_wind) > 0) {
       data.frame(
         date = sample_date,
         int = .$int,
         # Eastward wind thresholds
-        strong_eastward_hours = sum(period_wind$u > 3, na.rm = TRUE),  # Hours with u > 1 m/s
-        max_eastward = max(period_wind$u, na.rm = TRUE),
+        strong_eastward_hours = sum(period_wind$mean_se > 3, na.rm = TRUE),  # Hours with u > 1 m/s
+        max_eastward = max(period_wind$mean_se, na.rm = TRUE),
         # Eastward wind events (consecutive periods)
-        eastward_event_intensity = mean(period_wind$u[period_wind$u > 0], na.rm = TRUE),
+        eastward_event_intensity = mean(period_wind$mean_se[period_wind$mean_se > 0], na.rm = TRUE),
         # Mixed metric
-        eastward_power = mean(pmax(period_wind$u, 0)^3, na.rm = TRUE)  # Cube only positive u
+        eastward_power = mean(pmax(period_wind$mean_se, 0)^3, na.rm = TRUE)  # Cube only positive u
       )
     }
   })
 ```
 
-```{r}
-# More detailed labeller with units
-eastward_metrics %>%
-  mutate(year = year(date)) %>%
-  select(int, strong_eastward_hours, max_eastward, eastward_event_intensity, eastward_power, year) %>%
-  pivot_longer(cols = -c(int, year), names_to = "wind_metric", values_to = "wind_value") %>%
-  filter(!is.na(wind_value)) %>%
-  ggplot(aes(x = wind_value, y = int)) +
-  geom_point(aes(color = as.factor(year)), size = 2.5, alpha = 0.8) +
-  geom_smooth(method = "lm", se = TRUE, alpha = 0.2, color = "black", linewidth = 0.8) +
-  stat_cor(method = "pearson", 
-           label.x.npc = "left", 
-           label.y.npc = "top",
-           size = 3.5,
-           label.sep = ", ") +
-  scale_color_brewer(type = "qual", palette = "Set3") +
-  facet_wrap(~wind_metric, scales = "free", 
-             labeller = labeller(wind_metric = c(
-               "strong_eastward_hours" = "Hours u > 1 m/s",
-               "max_eastward" = bquote("Max eastward wind"~(m~s^-1)), 
-               "eastward_event_intensity" = bquote("Mean eastward wind"~(m~s^-1)),
-               "eastward_power" = bquote("Eastward wind power"~(m^3~s^-3))))) +
-  theme_minimal() +
-  theme(
-    panel.grid.minor = element_blank(),
-    strip.text = element_text(size = 10, face = "bold"),
-    axis.text = element_text(color = "black"),
-    legend.position = "bottom",
-    legend.title = element_blank()
-  ) +
-  labs(x = NULL,  # Remove since each facet has different units
-       y = bquote("Integrated fluorescence"~(mg~m^-2))) +
-  guides(color = guide_legend(nrow = 1, override.aes = list(size = 3)))
-```
+
 ```{r}
 # Calculate SE wind component specifically
 wind_data <- wind %>%
@@ -1231,7 +1509,7 @@ se_wind_lag %>%
 # Calculate discharge metrics similar to wind
 discharge_lag <- f %>% 
   mutate(month = month(date)) %>% 
-  filter(month == 7) %>% 
+  filter(month == 4) %>% 
   filter(pres <= 30) %>% 
   group_by(date) %>% 
   summarise(int = sum(f_npq)) %>% 
@@ -1239,7 +1517,7 @@ discharge_lag <- f %>%
   rowwise() %>%
   do({
     sample_date <- .$date
-    start_date <- sample_date - days(30)
+    start_date <- sample_date - days(15)
     end_date <- sample_date - days(1)
     
     period_discharge <- weath %>%
@@ -1301,7 +1579,7 @@ discharge_lag %>%
 # Calculate temperature metrics similar to your wind analysis
 temp_lag <- f %>% 
   mutate(month = month(date)) %>% 
-  filter(month == 7) %>% 
+  filter(month == 4) %>% 
   filter(pres <= 30) %>% 
   group_by(date) %>% 
   summarise(int = sum(f_npq)) %>% 
