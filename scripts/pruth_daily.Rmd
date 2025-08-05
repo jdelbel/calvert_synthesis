@@ -17,14 +17,44 @@ library(akima)
 library(viridis)
 library(fields)
 library(metR)
+library(ggpubr)
 ```
 
 
 ```{r}
-#Slope and NPQ Corrected CTD data
+#Raw fluorescence data
 f <- read_csv(here("files_big", "8_binAvg-1751575363003.csv"))
 
+#download wind data
+w <- read_csv(here("files", "2025-07-28.1hourSamples.all_2.csv"))
 ```
+
+```{r}
+#Setting the date format for the daily mean wind data and then pulling out each year separated.
+w <- w %>% 
+  mutate(measurementTime2 = mdy_hm(measurementTime),
+         date = date(measurementTime2),
+         year = year(date))
+```
+
+```{r}
+#Creating the 2022 wind speed cubed plot - what if i added wind direction or vector here?
+w_calc <- w %>% 
+  select(measurementTime = measurementTime2,
+         ws = WindSpd_Avg, wd = WindDir_Avg) %>% 
+  mutate(
+    # Convert to meteorological convention (direction wind is coming FROM)
+    # u = eastward component, v = northward component
+    u = -ws * sin(wd * pi/180),  # Negative because wd is "from" direction
+    v = -ws * cos(wd * pi/180),
+    # Calculate SE component for each hourly observation
+    se_component = (u - v) / sqrt(2),
+    date = date(measurementTime),
+    year = year(measurementTime)
+  )
+```
+
+
 
 ```{r}
 f2 <- f %>% 
@@ -44,8 +74,7 @@ f2 <- f %>%
 
 
 ```{r}
-
-
+#Periods with lots of data
 pruth_2012 <- f2 %>% 
   filter(date > "2012-07-02" & date < "2012-09-01")
 
@@ -255,7 +284,9 @@ create_fluor_breaks <- function(max_val = 50, bloom_threshold = 5) {
 }
 
 # Create the section plot with temperature isotherms
-p <- ggplot(interp_df, aes(x = date, y = pres)) +
+interp_14_2 <- interp_df %>% 
+  filter(date > "2014-07-08") %>% 
+  ggplot(aes(x = date, y = pres)) +
   # Fluorescence background
   geom_raster(aes(fill = f_npq)) +
   
@@ -339,6 +370,7 @@ p <- ggplot(interp_df, aes(x = date, y = pres)) +
 # Display the plot
 print(p)
 ```
+
 ```{r}
 # Assuming your data is in a dataframe called 'ctd_data'
 # If loading from file, uncomment and modify:
@@ -480,8 +512,13 @@ create_fluor_breaks <- function(max_val = 50, bloom_threshold = 5) {
   c(0, 1, 2, 3, 4, bloom_threshold, 7, 10, 15, 20, 30, 40, max_val)
 }
 
+interp_df <- mutate(interp_df, date = as.POSIXct(date))
+```
+
+
+```{r}
 # Create the section plot with temperature isotherms
-p <- ggplot(interp_df, aes(x = date, y = pres)) +
+interp_14 <- ggplot(interp_df, aes(x = date, y = pres)) +
   # Fluorescence background
   geom_raster(aes(fill = f_npq)) +
   
@@ -536,7 +573,11 @@ p <- ggplot(interp_df, aes(x = date, y = pres)) +
   
   # Flip y-axis so surface is at top
   scale_y_reverse(name = "Pressure (dbar)", expand = c(0, 0)) +
-  scale_x_date(name = "Date", expand = c(0, 0)) +
+  scale_x_datetime(limits = as.POSIXct(c("2014-07-08 00:00:00",
+                                          "2014-08-13 00:00:00")),
+                   expand = c(0, 0),
+                   date_breaks = "7 days",
+                   date_labels = "%m-%d") +
   
   # Add original data points
   # geom_point(data = ctd_processed,
@@ -555,6 +596,8 @@ p <- ggplot(interp_df, aes(x = date, y = pres)) +
     legend.title = element_text(size = 12, face = "bold"),
     legend.text = element_text(size = 10),
     legend.position = "right",
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
     plot.title = element_text(size = 16, hjust = 0.5, face = "bold", 
                               color = "grey20", margin = margin(b = 10)),
     plot.subtitle = element_text(size = 12, hjust = 0.5, color = "grey40",
@@ -563,22 +606,106 @@ p <- ggplot(interp_df, aes(x = date, y = pres)) +
   ) 
 
 # Display the plot
-print(p)
+print(interp_14)
+# 
+# ggsave(here("figures", "ctd_fluorescence_section.png"), 
+#        plot = interp_14,
+#        width = 12,        # Wide format to show temporal progression
+#        height = 6,        # Height maintains good depth resolution
+#        dpi = 300,         # High resolution for publication
+#        units = "in",
+#        bg = "white")      # White background
+```
 
-ggsave(here("figures", "ctd_fluorescence_section.png"), 
-       plot = p,
-       width = 12,        # Wide format to show temporal progression
-       height = 6,        # Height maintains good depth resolution
-       dpi = 300,         # High resolution for publication
-       units = "in",
-       bg = "white")      # White background
+```{r}
+wind_se_14 <- w_calc %>% 
+  filter(date > "2014-07-01" & date < "2014-08-14") %>% 
+  ggplot() +
+  geom_line(aes(x = measurementTime, y = se_component),
+            size = 1) +
+  geom_point(aes(x = measurementTime, y = se_component,
+                 color = ws), size = 2) +
+  scale_color_viridis_c(option = "turbo",
+                       name = "WS",
+                       guide = guide_colorbar(
+                         title.position = "top",
+                         title.hjust = 0.5,
+                         barwidth = 1,
+                         barheight = 8,
+                         frame.colour = "black",
+                         frame.linewidth = 0.5)) +
+  scale_x_datetime(limits = as_datetime(c("2014-07-08 00:00:00",
+                                          "2014-08-13 00:00:00")),
+                   expand = c(0, 0),
+                   date_breaks = "7 days",
+                   date_labels = "%m-%d") +
+  theme_bw() +
+  theme(
+    # panel.grid = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA),
+    axis.text = element_text(size = 11, color = "grey20"),
+    axis.title = element_text(size = 13, color = "grey20", face = "bold"),
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 10),
+    legend.position = "right",
+    axis.text.x = element_blank(),
+    axis.title.x = element_blank(),
+    plot.title = element_text(size = 16, hjust = 0.5, face = "bold", 
+                              color = "grey20", margin = margin(b = 10)),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, color = "grey40",
+                                margin = margin(b = 15)),
+    plot.margin = margin(20, 20, 20, 20)
+  ) 
+```
+
+```{r}
+int_fl_14 <- pruth_2014 %>% 
+  filter(pres < 31) %>% 
+  group_by(date, ctd_num) %>% 
+  summarise(int_30 = sum(f_npq)) %>% 
+  ungroup() %>% 
+  mutate(date = as.POSIXct(date)) %>% 
+  ggplot() +
+  geom_line(aes(x = date, y = int_30),
+            size = 1) +
+  scale_color_viridis_c(option = "turbo") +
+  scale_x_datetime(limits = as_datetime(c("2014-07-08 00:00:00",
+                                          "2014-08-13 00:00:00")),
+                   expand = c(0, 0),
+                   date_breaks = "7 days",
+                   date_labels = "%m-%d") +
+  theme_bw() +
+  theme(
+    # panel.grid = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA),
+    plot.background = element_rect(fill = "white", color = NA),
+    axis.text = element_text(size = 11, color = "grey20"),
+    axis.title = element_text(size = 13, color = "grey20", face = "bold"),
+    legend.title = element_text(size = 12, face = "bold"),
+    legend.text = element_text(size = 10),
+    legend.position = "right",
+    plot.title = element_text(size = 16, hjust = 0.5, face = "bold", 
+                              color = "grey20", margin = margin(b = 10)),
+    plot.subtitle = element_text(size = 12, hjust = 0.5, color = "grey40",
+                                margin = margin(b = 15)),
+    plot.margin = margin(20, 20, 20, 20)
+  ) 
+```
+
+```{r}
+f_14_panel <- ggarrange(wind_se_14, interp_14, int_fl_14,
+                        ncol = 1, align = "v")
+
+ggsave(here("figures", "panel_pruth_2014.png"), f_14_panel,
+        width = 16, height = 12, dpi = 300)
 ```
 
 
 
 
 ```{r}
-ctd_data %>% 
+pruth_2014 %>% 
   filter(pres < 30) %>% 
   ggplot(aes(x = f_npq, y = temp, color = pres)) +
   geom_point() +

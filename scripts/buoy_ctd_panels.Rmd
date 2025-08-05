@@ -25,6 +25,7 @@ library(palr)
 library(ggsci)
 library(oce)
 library(ggpubr)
+library(RColorBrewer)
 
 ```
 
@@ -323,6 +324,54 @@ f_wind_22 <- wind %>%
 
 print(f_wind_22)
 ```
+```{r}
+#Creating the 2022 wind speed cubed plot - what if i added wind direction or vector here?
+wind_calc <- wind %>% 
+  select(measurementTime = measurementTime2,
+         ws = WindSpd_Avg, wd = WindDir_Avg) %>% 
+  mutate(
+    # Convert to meteorological convention (direction wind is coming FROM)
+    # u = eastward component, v = northward component
+    u = -ws * sin(wd * pi/180),  # Negative because wd is "from" direction
+    v = -ws * cos(wd * pi/180),
+    # Calculate SE component for each hourly observation
+    se_component = (u - v) / sqrt(2),
+    date = date(measurementTime),
+    year = year(measurementTime)
+  )
+
+
+f_se_22 <- wind_calc %>%
+  filter(year == 2022) %>% 
+  group_by(date) %>% 
+  summarise(se_mean = mean(se_component),
+            wd_mean = mean(wd)) %>% 
+  ungroup() %>% 
+  ggplot() +
+  geom_line(aes(x = date, y = se_mean),
+            size = 1) +
+  geom_point(aes(x = date, y = se_mean,
+                 color = wd_mean), size = 2) +
+  scale_color_viridis_c(option = "turbo") +
+  # ylim(0, 6000) +
+  scale_x_date(limits = as_date(c("2022-01-01",
+                                          "2022-12-31")),
+                   expand = c(0, 0),
+                   date_breaks = "months",
+                   date_labels = "%b") +
+  labs(y = bquote(Wind~"("*m^3*s^-3*")"),
+       color = "Dir (°)") +
+  theme_bw() +
+  theme(text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank(),
+        axis.text.x = element_blank())
+
+print(f_se_22)
+```
+
+
+
 
 ```{r}
 #Creating the 2022 wind speed cubed plot - what if i added wind direction or vector here?
@@ -651,13 +700,22 @@ print(f_chem_24)
 ```
 ```{r}
 f_22_panel <- ggarrange(f_wind_22, f_buoy_22, f_ctd_fl_22, f_chem_22,
-                        ncol = 1)
+                        ncol = 1, align = "hv")
 
 ggsave(here("figures", "panel_kc10_2022_buoy_discrete.png"), f_22_panel,
         width = 16, height = 16, dpi = 300)
 
+f_22_panel_se <- ggarrange(f_se_22, f_buoy_22, f_ctd_fl_22, f_chem_22,
+                        ncol = 1, align = "hv")
+
+ggsave(here("figures", "panel_kc10_2022_buoy_discrete.png"), f_22_panel,
+        width = 16, height = 16, dpi = 300)
+
+ggsave(here("figures", "panel_kc10_2022_buoy_discrete_se.png"), f_22_panel_se,
+        width = 16, height = 16, dpi = 300)
+
 f_24_panel <- ggarrange(f_wind_24, f_buoy_24, f_ctd_fl_24, f_chem_24,
-                        ncol = 1)
+                        ncol = 1, align = "hv")
 
 ggsave(here("figures", "panel_kc10_2024_buoy_discrete.png"), f_24_panel,
         width = 16, height = 16, dpi = 300)
@@ -784,7 +842,8 @@ wind_calc <- wind %>%
 wind_lag_vectors <- f %>% 
   mutate(month = month(date),
          year = year(date)) %>% 
-  filter(month %in% c(7)) %>%
+  filter(month %in% c(8)) %>%
+  
   # filter(year != 2019) %>% 
   filter(pres <= 30) %>% 
   group_by(date) %>% 
@@ -795,7 +854,7 @@ wind_lag_vectors <- wind_lag_vectors %>%
   rowwise() %>%
   do({
     sample_date <- .$date
-    start_date <- sample_date - days(3)
+    start_date <- sample_date - days(2)
     end_date <- sample_date - days(1)
     
     period_wind <- wind_calc %>%
@@ -832,43 +891,129 @@ wind_lag_vectors <- wind_lag_vectors %>%
 
 
 ```{r}
-wind_lag_vectors %>%
- mutate(year = year(date)) %>%
- select(int, mean_se_lag, mean_ws_lag, resultant_ws, year) %>%
- pivot_longer(cols = -c(int, year), names_to = "wind_param", values_to = "wind_value") %>%
- filter(!is.na(wind_value)) %>%
- ggplot(aes(x = wind_value, y = int)) +
- geom_point(aes(color = as.factor(year)), size = 3) +
- geom_smooth(method = "lm", se = TRUE, alpha = 0.2, color = "black", linewidth = 0.8) +
- stat_cor(method = "pearson", 
-          label.x.npc = "left", 
-          label.y.npc = "top",
-          size = 5,
-          label.sep = ", ") +
- scale_color_brewer(type = "qual", palette = "Set1") +  # Highly divergent colors
- facet_wrap(~wind_param, scales = "free", 
-            labeller = labeller(wind_param = c(
-              "mean_u_lag" = "Eastward wind",
-              "mean_v_lag" = "Northward wind", 
-              "mean_ws_lag" = "Wind speed",
-              "resultant_ws" = "Resultant speed",
-              "mean_se_lag" = "NW-SE component"))) +
- theme_bw() +
- theme(
-   panel.grid.minor = element_blank(),
-   text = element_text(size = 18),
-   strip.text = element_text(size = 16, face = "bold"),
-   axis.text = element_text(color = "black"),
-   legend.position = "bottom",
-   legend.title = element_blank()
- ) +
- labs(x = bquote("Wind component/speed"~(m~s^-1)), 
-      y = bquote("Integrated fluorescence"~(mg~m^-2)),
-      title = "Wind-Integrated Chlorophyll Correlations",
-      subtitle = "July- Prior 3 day mean lookout wind") +
- guides(color = guide_legend(nrow = 1, override.aes = list(size = 3)))
+# Create a consistent color palette for years 2014-2025
+# Based on Set1 but with problematic colors removed/modified
 
-ggsave(here("figures", "scatters_july_3_day.png"), 
+# Get Set1 colors and modify them
+set1_colors <- brewer.pal(9, "Set1")
+
+# Create a custom palette excluding white/yellow and adding darker alternatives
+custom_colors <- c(
+  set1_colors[1],  # Red
+  set1_colors[2],  # Blue  
+  set1_colors[3],  # Green
+  set1_colors[4],  # Purple
+  set1_colors[5],  # Orange
+  set1_colors[7],  # Brown
+  set1_colors[8],  # Pink
+  set1_colors[9],  # Grey
+  "#2F4F4F",       # Dark slate gray (replacing light colors)
+  "#8B4513",       # Saddle brown
+  "#483D8B",       # Dark slate blue
+  "#8B008B"        # Dark magenta
+)
+
+# Create named vector for years 2014-2025
+year_colors <- setNames(custom_colors[1:12], 2014:2025)
+
+# Function to get consistent colors for any subset of years
+get_year_colors <- function(years_present) {
+  return(year_colors[as.character(years_present)])
+}
+
+# Example usage in your plot:
+wind_lag_vectors %>%
+  mutate(year = year(date)) %>%
+  select(int, mean_se_lag, mean_ws_lag, resultant_ws, year) %>%
+  pivot_longer(cols = -c(int, year), names_to = "wind_param", values_to = "wind_value") %>%
+  filter(!is.na(wind_value)) %>%
+  ggplot(aes(x = wind_value, y = int)) +
+  geom_point(aes(color = as.factor(year)), size = 3) +
+  geom_smooth(method = "lm", se = TRUE, alpha = 0.2, color = "black", linewidth = 0.8) +
+  stat_cor(method = "pearson", 
+           label.x.npc = "left", 
+           label.y.npc = "top",
+           size = 5,
+           label.sep = ", ") +
+  # Use the custom color palette - fixed to match factor levels
+  scale_color_manual(values = year_colors) +
+  facet_wrap(~wind_param, scales = "free", 
+             labeller = labeller(wind_param = c(
+               "mean_u_lag" = "Eastward wind",
+               "mean_v_lag" = "Northward wind", 
+               "mean_ws_lag" = "Wind speed",
+               "resultant_ws" = "Resultant speed",
+               "mean_se_lag" = "NW-SE component"))) +
+  theme_bw() +
+  theme(
+    panel.grid.minor = element_blank(),
+    text = element_text(size = 18),
+    strip.text = element_text(size = 16, face = "bold"),
+    axis.text = element_text(color = "black"),
+    legend.position = "bottom",
+    legend.title = element_blank()
+  ) +
+  labs(x = bquote("Wind component/speed"~(m~s^-1)), 
+       y = bquote("Integrated fluorescence"~(mg~m^-2)),
+       title = "Wind-Integrated Chlorophyll Correlations",
+       subtitle = "August - Prior 2 day mean lookout wind") +
+  guides(color = guide_legend(nrow = 1, override.aes = list(size = 3)))
+
+# Alternative: If you want to dynamically adjust based on years present in each month
+create_month_plot <- function(data, month_name) {
+  data %>%
+    mutate(year = year(date)) %>%
+    select(int, mean_se_lag, mean_ws_lag, resultant_ws, year) %>%
+    pivot_longer(cols = -c(int, year), names_to = "wind_param", values_to = "wind_value") %>%
+    filter(!is.na(wind_value)) %>%
+    ggplot(aes(x = wind_value, y = int)) +
+    geom_point(aes(color = as.factor(year)), size = 3) +
+    geom_smooth(method = "lm", se = TRUE, alpha = 0.2, color = "black", linewidth = 0.8) +
+    stat_cor(method = "pearson", 
+             label.x.npc = "left", 
+             label.y.npc = "top",
+             size = 5,
+             label.sep = ", ") +
+    scale_color_manual(values = year_colors) +
+    facet_wrap(~wind_param, scales = "free", 
+               labeller = labeller(wind_param = c(
+                 "mean_u_lag" = "Eastward wind",
+                 "mean_v_lag" = "Northward wind", 
+                 "mean_ws_lag" = "Wind speed",
+                 "resultant_ws" = "Resultant speed",
+                 "mean_se_lag" = "NW-SE component"))) +
+    theme_bw() +
+    theme(
+      panel.grid.minor = element_blank(),
+      text = element_text(size = 18),
+      strip.text = element_text(size = 16, face = "bold"),
+      axis.text = element_text(color = "black"),
+      legend.position = "bottom",
+      legend.title = element_blank()
+    ) +
+    labs(x = bquote("Wind component/speed"~(m~s^-1)), 
+         y = bquote("Integrated fluorescence"~(mg~m^-2)),
+         title = "Wind-Integrated Chlorophyll Correlations",
+         subtitle = "July - Prior 3 day mean lookout wind") +
+    guides(color = guide_legend(nrow = 1, override.aes = list(size = 3)))
+}
+
+# Display the color palette for reference
+# data.frame(
+#   year = 2014:2025,
+#   color = year_colors
+# ) %>%
+#   ggplot(aes(x = year, y = 1, fill = factor(year))) +
+#   geom_col() +
+#   scale_fill_manual(values = year_colors) +
+#   theme_minimal() +
+#   labs(title = "Custom Year Color Palette", 
+#        subtitle = "Consistent colors for 2014-2025") +
+#   theme(legend.position = "none",
+#         axis.text.y = element_blank(),
+#         axis.title.y = element_blank())
+
+ggsave(here("figures", "scatters_august_2_day.png"), 
         width = 12, height = 5, dpi = 300)
 ```
 
@@ -876,8 +1021,10 @@ ggsave(here("figures", "scatters_july_3_day.png"),
 # Function to calculate wind metrics for a specific lag period
 calculate_wind_lag <- function(f_data, wind_calc, lag_days) {
   f_data %>% 
-    mutate(month = month(date)) %>% 
-    filter(month %in% c(7)) %>% 
+    mutate(month = month(date),
+           year = year(date)) %>% 
+    filter(month %in% c(8)) %>% 
+    # filter(!year %in% c(2020, 2021)) %>% 
     filter(pres <= 30) %>% 
     group_by(date) %>% 
     summarise(int = sum(f_npq), .groups = 'drop') %>% 
@@ -1005,8 +1152,8 @@ lag_plot_data <- lag_results %>%
 
 # Create the plot with significance indicators
 ggplot(lag_plot_data, aes(x = lag_days, y = correlation, color = wind_metric)) +
-  geom_line(size = 1) +
-  geom_point(aes(shape = significant, size = significant)) +
+  geom_line(size = 2) +
+  geom_point(aes(shape = significant, size = significant), size = 5) +
   geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
   scale_shape_manual(values = c("FALSE" = 1, "TRUE" = 16), 
                      name = "Significant\n(p < 0.05)",
@@ -1017,11 +1164,12 @@ ggplot(lag_plot_data, aes(x = lag_days, y = correlation, color = wind_metric)) +
     x = "Lag period (days)",
     y = "Correlation coefficient (r)",
     title = "Wind-Chlorophyll Correlations vs Lag Period",
-    subtitle = "April data, pressure ≤ 30m",
+    subtitle = "August data",
     color = "Wind metric"
   ) +
   theme_minimal() +
-  theme(legend.position = "bottom") +
+  theme(legend.position = "bottom",
+        text = element_text(size = 24)) +
   scale_x_continuous(breaks = seq(0, 30, 5)) +
   guides(color = guide_legend(order = 1),
          shape = guide_legend(order = 2))
@@ -1037,6 +1185,9 @@ optimal_lags <- lag_results %>%
     resultant_optimal = lag_days[which.max(abs(resultant_speed_r))],
     resultant_max_r = resultant_speed_r[which.max(abs(resultant_speed_r))]
   )
+
+ggsave(here("figures", "lag_august.png"),
+        width = 13, height = 8, dpi = 300)
 
 print("Optimal lag periods:")
 print(optimal_lags)
@@ -1253,7 +1404,7 @@ p2 <- ggplot(heatmap_data, aes(x = variable, y = factor(month_name, levels = mon
   geom_tile(aes(fill = optimal_lag_sig), color = "gray", size = 0.5) +
   geom_text(aes(label = ifelse(significant, paste0(round(optimal_lag), "d"), "")), 
             color = "white", fontface = "bold", size = 6) +
-  scale_fill_viridis_c(name = "Optimal lag (days)", na.value = "white",
+  scale_fill_viridis_c(name = "Optimal backward mean period (days)", na.value = "white",
                        guide = guide_colorbar(title.position = "top", 
                                             title.hjust = 0.5,
                                             barwidth = 25, 
@@ -1336,14 +1487,241 @@ wind_calc %>%
   mutate(date = date(measurementTime),
          year = year(date),
          month = month(date),
+         yday = yday(date),
          se_component = (u - v) / sqrt(2)) %>% 
-  filter(year == 2021 & month == 4) %>% 
+  filter(month == 4) %>% 
+  filter(year %in% c(2015, 2021)) %>% 
   ggplot() +
-  geom_point(aes(x = measurementTime, y = ws, color = wd)) +
-  geom_line((aes(x = measurementTime, y = se_component))) +
-  scale_color_viridis_c(option = "turbo")
+  geom_point(aes(x = yday, y = ws, color = wd)) +
+  geom_line((aes(x = yday, y = se_component))) +
+  scale_color_viridis_c(option = "turbo") +
+  facet_grid(.~year)
+```
+```{r}
+library(dplyr)
+library(ggplot2)
+library(lubridate)
+library(viridis)
+
+# Prepare sampling dates first to determine date range
+sampling_dates <- f %>%
+  mutate(year = year(date),
+         month = month(date)) %>%
+  filter(month == 4, year %in% c(2015, 2021))
+
+# Create expanded date ranges: 30 days before sampling + rest of sampling month
+date_ranges <- sampling_dates %>%
+  mutate(
+    start_date = date - days(30),
+    end_date = ceiling_date(date, "month") - days(1)  # Last day of sampling month
+  ) %>%
+  select(year, date, start_date, end_date)
+
+# Prepare wind data with expanded date range
+wind_plot_data <- wind_calc %>% 
+  mutate(wind_date = date(measurementTime),
+         year = year(wind_date),
+         se_component = (u - v) / sqrt(2)) %>%
+  # Filter for years of interest first
+  filter(year %in% c(2015, 2021)) %>%
+  # Join with date ranges
+  left_join(date_ranges %>% select(year, sampling_date = date, start_date, end_date), 
+            by = "year", 
+            relationship = "many-to-many") %>%
+  # Filter using the renamed columns
+  filter(wind_date >= start_date & wind_date <= end_date) %>%
+  # Convert to daily averages
+  group_by(wind_date, year) %>%
+  summarise(
+    ws = mean(ws, na.rm = TRUE),
+    wd = mean(wd, na.rm = TRUE),
+    se_component = mean(se_component, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  # Add month-day for x-axis
+  mutate(month_day = format(wind_date, "%m-%d")) %>%
+  rename(date = wind_date)
+
+# Prepare sampling date markers with 19-day backward period
+sampling_markers <- sampling_dates %>%
+  mutate(
+    period_start = date - days(18),  # 19 days including sampling day
+    period_end = date,
+    month_day = format(date, "%m-%d"),
+    period_start_md = format(period_start, "%m-%d"),
+    period_end_md = format(period_end, "%m-%d")
+  )
+
+# Create the enhanced plot
+ggplot() +
+  # Add grey boxes for 19-day backward periods
+  geom_rect(data = sampling_markers,
+            aes(xmin = period_start_md, 
+                xmax = period_end_md,
+                ymin = -Inf, 
+                ymax = Inf),
+            fill = "grey80", 
+            alpha = 0.6) +
+  
+  # Wind speed points colored by direction
+  geom_point(data = wind_plot_data,
+             aes(x = month_day, y = ws, color = wd),
+             size = 1.8, alpha = 0.8) +
+  
+  # SE component line
+  geom_line(data = wind_plot_data,
+            aes(x = month_day, y = se_component, group = year),
+            color = "black", 
+            linewidth = 0.9,
+            alpha = 0.9) +
+  
+  # Vertical lines for exact sampling dates
+  geom_vline(data = sampling_markers,
+             aes(xintercept = month_day),
+             color = "red", 
+             linewidth = 1.2,
+             alpha = 0.8) +
+  
+  # Color scale for wind direction
+  scale_color_viridis_c(option = "turbo", 
+                        name = "Wind Direction\n(degrees)",
+                        guide = guide_colorbar(barwidth = 1, 
+                                              barheight = 8)) +
+  
+  # X-axis with better date formatting
+  scale_x_discrete(name = "Date (Month-Day)",
+                   breaks = function(x) {
+                     # Show every 5th date for readability
+                     indices <- seq(1, length(x), by = 5)
+                     return(x[indices])
+                   }) +
+  
+  scale_y_continuous(name = bquote("Wind Speed"~(m~s^-1)~"/ SE Component"),
+                     expand = expansion(mult = c(0.05, 0.05))) +
+  
+  # Faceting by year
+  facet_grid(. ~ year, 
+             labeller = label_both,
+             scales = "free_x") +
+  
+  # Theme
+  theme_bw() +
+  theme(
+    panel.grid.minor.x = element_line(color = "grey95", size = 0.3),
+    panel.grid.major = element_line(color = "grey90", size = 0.5),
+    text = element_text(size = 12),
+    strip.text = element_text(size = 14, face = "bold"),
+    axis.text = element_text(color = "black"),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    legend.position = "right",
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12, color = "grey30")
+  ) +
+  
+  # Labels and title
+  labs(title = "Extended Wind Patterns Around April Sampling",
+       subtitle = "30 days before sampling + remainder of sampling month\nSE Component (black line) vs Wind Speed (colored points) - Daily averages",
+       caption = paste("Grey boxes: 19-day backward averaging periods | Red lines: Sampling dates"))
 ```
 
+
+```{r}
+# Alternative version using hourly data instead of daily averages
+create_hourly_plot <- function(years_to_plot = c(2015, 2021)) {
+  
+  # Get sampling dates and ranges
+  samp_dates <- f %>%
+    mutate(year = year(date), month = month(date)) %>%
+    filter(month == 4, year %in% years_to_plot)
+  
+  date_ranges <- samp_dates %>%
+    mutate(
+      start_date = date - days(30),
+      end_date = ceiling_date(date, "month") - days(1)
+    ) %>%
+    select(year, date, start_date, end_date)
+  
+  # Hourly wind data
+  wind_hourly <- wind_calc %>% 
+    mutate(wind_date = date(measurementTime),
+           datetime = measurementTime,
+           year = year(wind_date),
+           se_component = (u - v) / sqrt(2)) %>%
+    filter(year %in% years_to_plot) %>%
+    left_join(date_ranges %>% select(year, sampling_date = date, start_date, end_date), 
+              by = "year", 
+              relationship = "many-to-many") %>%
+    filter(wind_date >= start_date & wind_date <= end_date) %>%
+    select(-sampling_date, -start_date, -end_date) %>%
+    rename(date = wind_date)
+  
+  # Sampling markers
+  samp_markers <- samp_dates %>%
+    mutate(
+      period_start = date - days(18),
+      period_end = date,
+      month_day = format(date, "%m-%d")
+    )
+  
+  ggplot() +
+    # Grey boxes for 19-day periods
+    geom_rect(data = samp_markers,
+              aes(xmin = as.POSIXct(period_start), 
+                  xmax = as.POSIXct(period_end),
+                  ymin = -Inf, ymax = Inf),
+              fill = "grey80", alpha = 0.6) +
+    
+    # Hourly wind data
+    geom_point(data = wind_hourly,
+               aes(x = datetime, y = ws, color = wd),
+               size = 0.8, alpha = 0.6) +
+    
+    geom_line(data = wind_hourly,
+              aes(x = datetime, y = se_component, group = year),
+              color = "black", linewidth = 0.5, alpha = 0.8) +
+    
+    # Sampling dates
+    geom_vline(data = samp_markers,
+               aes(xintercept = as.POSIXct(date)),
+               color = "red", linewidth = 1.2) +
+    
+    geom_hline(yintercept = 0, color = "black", linewidth = 1) +
+    
+    scale_color_viridis_c(option = "turbo", name = "Wind Direction\n(degrees)") +
+    scale_x_datetime(name = "Date", date_labels = "%m-%d", date_breaks = "5 days") +
+    scale_y_continuous(name = bquote("Wind Speed"~(m~s^-1)~"/ SE Component")) +
+    
+    facet_grid(. ~ year, labeller = label_both, scales = "free_x") +
+    theme_bw() +
+    theme(
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      strip.text = element_text(size = 14, face = "bold"),
+      text = element_text(size = 12),
+      legend.position = "right"
+    ) +
+    labs(title = "Hourly Wind Patterns Around April Sampling",
+         subtitle = "30 days before + remainder of sampling month",
+         caption = "Grey boxes: 19-day backward averaging periods | Red lines: Sampling dates")
+}
+
+# Usage:
+# Main plot uses daily averages (shown above)
+# For hourly data: 
+create_hourly_plot(c(2017, 2021))
+```
+
+
+
+
+
+```{r}
+wind_calc %>% 
+  mutate(month = month(measurementTime),
+         year = year(measurementTime)) %>% 
+  filter(month == 4) %>% 
+  ggplot(aes(x = as.factor(year), y = se_component)) +
+  geom_boxplot()
+```
 
 
 
@@ -1378,8 +1756,8 @@ buoy_join <- buoy %>%
 
 buoy_join %>%
   filter(year == 2022) %>% 
-  filter(month > 5) %>% 
-  ggplot(aes(x = fl_med_day, y = u_dm)) +
+  filter(month == 4) %>% 
+  ggplot(aes(x = fl_med_day, y = lag(u_dm, 19))) +
   geom_point()
   
 ```
