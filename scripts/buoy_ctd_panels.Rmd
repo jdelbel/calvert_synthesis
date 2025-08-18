@@ -842,7 +842,7 @@ wind_calc <- wind %>%
 wind_lag_vectors <- f %>% 
   mutate(month = month(date),
          year = year(date)) %>% 
-  filter(month %in% c(8)) %>%
+  filter(month %in% c(4)) %>%
   
   # filter(year != 2019) %>% 
   filter(pres <= 30) %>% 
@@ -854,7 +854,7 @@ wind_lag_vectors <- wind_lag_vectors %>%
   rowwise() %>%
   do({
     sample_date <- .$date
-    start_date <- sample_date - days(2)
+    start_date <- sample_date - days(19)
     end_date <- sample_date - days(1)
     
     period_wind <- wind_calc %>%
@@ -956,7 +956,7 @@ wind_lag_vectors %>%
   labs(x = bquote("Wind component/speed"~(m~s^-1)), 
        y = bquote("Integrated fluorescence"~(mg~m^-2)),
        title = "Wind-Integrated Chlorophyll Correlations",
-       subtitle = "August - Prior 2 day mean lookout wind") +
+       subtitle = "April - Prior 2 day mean lookout wind") +
   guides(color = guide_legend(nrow = 1, override.aes = list(size = 3)))
 
 # Alternative: If you want to dynamically adjust based on years present in each month
@@ -1013,8 +1013,8 @@ create_month_plot <- function(data, month_name) {
 #         axis.text.y = element_blank(),
 #         axis.title.y = element_blank())
 
-ggsave(here("figures", "scatters_august_2_day.png"), 
-        width = 12, height = 5, dpi = 300)
+# ggsave(here("figures", "scatters_august_2_day.png"), 
+#         width = 12, height = 5, dpi = 300)
 ```
 
 ```{r}
@@ -1478,6 +1478,122 @@ ggsave(here("figures", "heatmap.png"), fig,
 ```
 
 
+```{r}
+wind_calc_dm <- wind_calc %>% 
+  mutate(date = date(measurementTime)) %>% 
+  group_by(date) %>% 
+  summarise(se = mean(se_component)) %>% 
+  ungroup() 
+
+b_join <- buoy %>%
+  select(date, year, fl_med_day) %>% 
+  mutate(month = month(date)) %>% 
+  left_join(wind_calc_dm)
+```
+```{r}
+# Create 19-day backwards averaged SE wind component
+b22_analysis <- b_join %>%
+  arrange(date) %>%  # Ensure chronological order
+  mutate(
+    # 19-day backwards rolling average of SE wind
+    se_19day_back = zoo::rollmean(se, k = 19, fill = NA, align = "right"),
+    # Extract month for filtering
+    month = lubridate::month(date)
+  ) %>%
+  # Filter to April data to match your CTD analysis
+  filter(month %in% c(4)) %>%
+  # Remove rows with missing data
+  drop_na(fl_med_day, se_19day_back)
+
+# Calculate correlation
+correlation_result <- cor.test(b22_analysis$fl_med_day, b22_analysis$se_19day_back)
+
+# Print correlation results
+cat("Correlation between daily fluorescence and 19-day backwards SE wind (April only):\n")
+cat("r =", round(correlation_result$estimate, 3), "\n")
+cat("p-value =", round(correlation_result$p.value, 4), "\n")
+cat("n =", nrow(b22_analysis), "observations\n")
+
+# Create scatter plot
+april_plot <- ggplot(b22_analysis,
+                     aes(x = se_19day_back,
+                         y = fl_med_day,
+                         color = as.factor(year))) +
+  geom_point(alpha = 0.6, size = 2) +
+  geom_smooth(method = "lm", se = TRUE, color = "#d73027") +
+  labs(
+    x = "19-day Backwards Averaged SE Wind Component (m/s)",
+    y = "Daily Median Fluorescence",
+    title = "Daily Buoy Fluorescence vs SE Wind (April)",
+    subtitle = paste("r =", round(correlation_result$estimate, 3), 
+                     ", p =", round(correlation_result$p.value, 4))
+  ) +
+  theme_bw() +
+  theme(
+    text = element_text(size = 12),
+    plot.title = element_text(size = 14, face = "bold")
+  )
+
+print(april_plot)
+```
+
+
+```{r}
+# Optional: Test different averaging windows to see if 19 days is optimal
+test_windows <- c(5, 10, 15, 19, 25, 30)
+
+window_results <- map_dfr(test_windows, function(window) {
+  temp_data <- b_join %>%
+    arrange(date) %>%
+    mutate(
+      se_back = zoo::rollmean(se, k = window, fill = NA, align = "right"),
+      month = lubridate::month(date)
+    ) %>%
+    filter(month %in% c(7)) %>%
+    drop_na(fl_med_day, se_back)
+  
+  if(nrow(temp_data) > 10) {  # Need sufficient data
+    cor_result <- cor.test(temp_data$fl_med_day, temp_data$se_back)
+    tibble(
+      window_days = window,
+      correlation = cor_result$estimate,
+      p_value = cor_result$p.value,
+      n_obs = nrow(temp_data)
+    )
+  }
+}) %>%
+  arrange(desc(abs(correlation)))
+
+cat("\nCorrelations for different backwards averaging windows:\n")
+print(window_results)
+
+# Plot window sensitivity
+window_plot <- ggplot(window_results, aes(x = window_days, y = correlation)) +
+  geom_line(size = 1) +
+  geom_point(size = 3) +
+  geom_point(data = filter(window_results, window_days == 19), 
+             color = "#d73027", size = 4) +
+  labs(
+    x = "Backwards Averaging Window (days)",
+    y = "Correlation Coefficient",
+    title = "Sensitivity to SE Wind Averaging Window",
+    subtitle = "Red point = 19-day window from CTD analysis"
+  ) +
+  theme_bw()
+
+print(window_plot)
+```
+
+
+
+
+
+
+
+
+
+
+
 
 
 
@@ -1507,7 +1623,7 @@ library(viridis)
 sampling_dates <- f %>%
   mutate(year = year(date),
          month = month(date)) %>%
-  filter(month == 4, year %in% c(2015, 2021))
+  filter(month == 4, year %in% c(2014, 2015, 2018, 2021, 2022))
 
 # Create expanded date ranges: 30 days before sampling + rest of sampling month
 date_ranges <- sampling_dates %>%
@@ -1523,7 +1639,7 @@ wind_plot_data <- wind_calc %>%
          year = year(wind_date),
          se_component = (u - v) / sqrt(2)) %>%
   # Filter for years of interest first
-  filter(year %in% c(2015, 2021)) %>%
+  filter(year %in% c(2014, 2015, 2018, 2021, 2022)) %>%
   # Join with date ranges
   left_join(date_ranges %>% select(year, sampling_date = date, start_date, end_date), 
             by = "year", 

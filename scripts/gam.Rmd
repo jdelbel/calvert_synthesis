@@ -67,6 +67,7 @@ btemp <- bsal %>%
 bsal2 <- bsal2 %>% 
   left_join(btemp)
 ```
+
 ```{r}
 b <- b %>% 
   mutate(date = lubridate::ymd(date_corr),
@@ -79,6 +80,7 @@ b <- b %>%
 b2 <- b %>% 
   left_join(weath)
 ```
+
 ```{r}
 bf <- b2 %>% 
   select(date, 

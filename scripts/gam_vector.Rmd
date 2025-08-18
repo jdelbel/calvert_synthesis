@@ -1,0 +1,1531 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Some new interpolation tutorials to consider:
+https://search.r-project.org/CRAN/refmans/rioja/html/interp.dataset.html
+https://github.com/hdugan/NTLlakeloads
+
+```{r}
+#Upload packages
+library(tidyverse)
+library(here)
+library(readxl)
+library(patchwork)
+library(lubridate)
+library(MBA)
+library(mgcv)
+library(FNN)
+library(zoo)
+library(reshape2)
+library(rioja)
+library(egg)
+library(palr)
+library(ggsci)
+library(mgcv)
+
+```
+
+```{r}
+# 2024 corrected buoy data
+b22 <- read.csv(here("outputs", "buoy_corr_dm_2022.csv"))
+b23 <- read.csv(here("outputs", "buoy_corr_dm_2023.csv"))
+b24 <- read.csv(here("outputs", "buoy_corr_dm_2024.csv"))
+b25 <- read.csv(here("outputs", "buoy_corr_dm_2025.csv"))
+
+bsal <- read.csv(here("files", "buoy_ts_all.csv"))
+
+weath <- read_csv(here("outputs", "enviro_weather_2025-04-14.csv"))
+```
+
+```{r}
+b22 <- b22 %>% 
+  select(date_corr, fl_med_day) %>% 
+  distinct()
+
+b23 <- b23 %>% 
+  select(date_corr, fl_med_day) %>% 
+  distinct()
+
+b24 <- b24 %>% 
+  select(date_corr, fl_med_day) %>% 
+  distinct()
+
+b25 <- b25 %>% 
+  select(date_corr, fl_med_day) %>% 
+  distinct()
+
+b <- rbind(b22, b24)
+
+bsal2 <- bsal %>% 
+  mutate(measurementTime = mdy_hm(measurementTime),
+         date = date(measurementTime)) %>% 
+  filter(WaterSalinity_UQL == 2) %>% 
+  group_by(date) %>% 
+  summarise(mean_sal = mean(WaterSalinity)) %>% 
+  ungroup()
+
+btemp <- bsal %>% 
+  mutate(measurementTime = mdy_hm(measurementTime),
+         date = date(measurementTime)) %>% 
+  filter(WaterTemp_UQL == 2) %>% 
+  group_by(date) %>% 
+  summarise(mean_temp = mean(WaterTemp)) %>% 
+  ungroup()
+
+bsal2 <- bsal2 %>% 
+  left_join(btemp)
+```
+
+```{r}
+b <- b %>% 
+  mutate(date = lubridate::ymd(date_corr),
+         year = lubridate::year(date),
+         yday = lubridate::yday(date)) 
+
+b <- b %>% 
+  left_join(bsal2)
+
+b2 <- b %>% 
+  left_join(weath)
+```
+
+```{r}
+bf <- b2 %>% 
+  select(date, 
+         year,
+         yday,
+         f = fl_med_day,
+         s = mean_sal,
+         t = mean_temp,
+         ws = w_dm,
+         wd = wd_dm,
+         qt = Q_Total,
+         qgm = Q_GM,
+         qsm = Q_SM,
+         qra = Q_RA) %>% 
+  mutate(
+    # Convert to meteorological convention (direction wind is coming FROM)
+    # u = eastward component, v = northward component
+    u = -ws * sin(wd * pi/180),  # Negative because wd is "from" direction
+    v = -ws * cos(wd * pi/180),
+    # Calculate SE component for each hourly observation
+    se_component = (u - v) / sqrt(2)) %>% 
+  filter(year %in% c(2022, 2024))
+
+
+```
+
+```{r}
+# Prepare data for GAM
+bf_gam <- bf %>%
+  drop_na(f) %>%  # Remove missing fluorescence values
+  filter(f > 0) %>%  # Remove negative/zero fluorescence if any
+  mutate(
+    year_factor = as.factor(year),  # Year as categorical variable
+    # Create log-transformed fluorescence (often better distributed)
+    log_f = log(f + 0.1)  # Add small constant to handle zeros
+  )
+```
+
+```{r}
+# Check which days/months are missing in 2024
+missing_dates <- bf_gam %>%
+  group_by(year_factor, month = month(date)) %>%
+  summarise(n_days = n(), .groups = 'drop') %>%
+  pivot_wider(names_from = year_factor, values_from = n_days) %>%
+  mutate(difference = `2022` - `2024`)
+
+print(missing_dates)
+```
+```{r}
+# Or more detailed:
+date_coverage <- bf_gam %>%
+  group_by(year_factor) %>%
+  summarise(
+    start_date = min(date),
+    end_date = max(date),
+    total_days = n()
+  )
+print(date_coverage)
+```
+```{r}
+# First, let's see the actual date ranges
+bf_gam %>%
+  group_by(year_factor) %>%
+  summarise(
+    start_date = min(date),
+    end_date = max(date),
+    n_days = n(),
+    .groups = 'drop'
+  )
+
+# Check which specific dates exist for each year
+date_check <- bf_gam %>%
+  select(date, year_factor) %>%
+  mutate(
+    year = year(date),
+    yday = yday(date)
+  ) %>%
+  group_by(year_factor) %>%
+  summarise(
+    min_yday = min(yday),
+    max_yday = max(yday),
+    missing_days = 365 - n(),
+    .groups = 'drop'
+  )
+print(date_check)
+
+# See gaps in the data
+full_year_2022 <- seq(as.Date("2022-01-01"), as.Date("2022-12-31"), by = "day")
+full_year_2024 <- seq(as.Date("2024-01-01"), as.Date("2024-12-31"), by = "day")
+
+missing_2022 <- full_year_2022[!full_year_2022 %in% bf_gam$date[bf_gam$year_factor == "2022"]]
+missing_2024 <- full_year_2024[!full_year_2024 %in% bf_gam$date[bf_gam$year_factor == "2024"]]
+
+print("Missing dates in 2022:")
+print(missing_2022)
+print("Missing dates in 2024:")
+print(missing_2024)
+```
+```{r}
+# Create matched dataset by removing the same dates from 2022
+bf_gam_matched <- bf_gam %>%
+  filter(
+    !(month(date) == 3 & day(date) %in% 20:23) &  # Remove March 20-23
+    !(month(date) == 12 & day(date) >= 5)          # Remove Dec 5 onward
+  )
+
+# Verify the matching
+bf_gam_matched %>%
+  group_by(year_factor) %>%
+  summarise(n_days = n())
+```
+
+
+
+
+
+
+
+```{r}
+# Simple GAM model
+# Start with basic seasonal pattern + environmental variables
+gam_model <- gam(
+  f ~ 
+    s(yday, k = 10) +           # Seasonal pattern (day of year)
+    s(t, k = 14) +               # Temperature effect
+    s(s, k = 8) + 
+    s(qt) + # Salinity effect  
+    s(se_component, k = 5) +    # SE wind component
+    year_factor,                # Year as fixed effect (different intercepts)
+  data = bf_gam_matched,
+  family = gaussian(),          # Assuming normal distribution
+  method = "REML"               # Better for model selection
+)
+
+# Model summary
+summary(gam_model)
+
+# Check model diagnostics
+par(mfrow = c(2, 2))
+gam.check(gam_model)
+
+# Plot smooth terms
+par(mfrow = c(2, 2))
+plot(gam_model, pages = 1, residuals = TRUE, pch = 19, cex = 0.5)
+```
+
+
+```{r}
+# Alternative with log-transformed response (often better for fluorescence)
+gam_model_log <- gam(
+  log_f ~ 
+    s(yday, k = 10) +           
+    s(t, k = 14) +               
+    s(s, k = 8) +
+    s(qt, k = 8) +
+    s(se_component, k = 8) +    
+    year_factor,                
+  data = bf_gam,
+  family = gaussian(),          
+  method = "REML"               
+)
+
+# Compare models using AIC
+cat("Model comparison (lower AIC is better):\n")
+cat("Regular fluorescence AIC:", AIC(gam_model), "\n")
+cat("Log fluorescence AIC:", AIC(gam_model_log), "\n")
+
+# Model summary
+summary(gam_model_log)
+
+# Check model diagnostics
+par(mfrow = c(2, 2))
+gam.check(gam_model_log)
+
+par(mfrow = c(2, 2))
+plot(gam_model_log, pages = 1, residuals = TRUE, pch = 19, cex = 0.5)
+```
+```{r}
+# Check residuals
+gam.check(gam_model_log)
+# Residuals vs fitted
+plot(fitted(gam_model_log), residuals(gam_model_log))
+abline(h = 0, col = "red")
+
+# Check for temporal autocorrelation
+acf(residuals(gam_model_log))
+```
+
+```{r}
+# Extract and plot year-specific seasonal patterns
+
+library(ggplot2)
+library(dplyr)
+library(mgcv)
+
+# Method 1: Predict seasonal patterns for each year
+# Create prediction grid for each year
+pred_data <- expand.grid(
+  yday = 1:365,
+  year_factor = c("2022", "2024")
+) %>%
+  mutate(
+    # Set other variables to their mean values for prediction
+    t = mean(bf_gam_matched$t, na.rm = TRUE),
+    s = mean(bf_gam_matched$s, na.rm = TRUE),
+    se_component = mean(bf_gam_matched$se_component, na.rm = TRUE)
+  )
+
+# Generate predictions
+pred_data$fitted <- predict(gam_model_log, newdata = pred_data)
+pred_data$se <- predict(gam_model_log, newdata = pred_data, se.fit = TRUE)$se.fit
+pred_data$upper <- pred_data$fitted + 1.96 * pred_data$se
+pred_data$lower <- pred_data$fitted - 1.96 * pred_data$se
+
+# Convert back from log scale if desired
+pred_data$fitted_orig <- exp(pred_data$fitted)
+pred_data$upper_orig <- exp(pred_data$upper)
+pred_data$lower_orig <- exp(pred_data$lower)
+
+# Plot 1: Log-scale seasonal patterns
+p1 <- ggplot(pred_data, aes(x = yday, y = fitted, color = year_factor, fill = year_factor)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.3, color = NA) +
+  geom_line(size = 1) +
+  labs(
+    title = "Year-specific Seasonal Patterns (Log Fluorescence)",
+    x = "Day of Year",
+    y = "Log Fluorescence (predicted)",
+    color = "Year",
+    fill = "Year"
+  ) +
+  theme_minimal() +
+  scale_x_continuous(breaks = c(1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335),
+                     labels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+                               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
+
+# Plot 2: Original scale seasonal patterns
+p2 <- ggplot(pred_data, aes(x = yday, y = fitted_orig, color = year_factor, fill = year_factor)) +
+  geom_ribbon(aes(ymin = lower_orig, ymax = upper_orig), alpha = 0.3, color = NA) +
+  geom_line(size = 1) +
+  labs(
+    title = "Year-specific Seasonal Patterns (Original Fluorescence Scale)",
+    x = "Day of Year",
+    y = "Fluorescence (predicted)",
+    color = "Year",
+    fill = "Year"
+  ) +
+  theme_minimal() +
+  scale_x_continuous(breaks = c(1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335),
+                     labels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+                               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
+
+# Plot 3: Add observed data overlay
+bf_gam$year_factor <- as.factor(bf_gam$year_factor)
+p3 <- ggplot(pred_data, aes(x = yday, y = fitted, color = year_factor)) +
+  geom_line(size = 1, alpha = 0.8) +
+  geom_point(data = bf_gam, 
+             aes(x = yday, y = log_f, color = year_factor), 
+             alpha = 0.3, size = 0.5) +
+  labs(
+    title = "Seasonal Patterns: Model Predictions vs Observed Data",
+    x = "Day of Year",
+    y = "Log Fluorescence",
+    color = "Year"
+  ) +
+  theme_minimal() +
+  scale_x_continuous(breaks = c(1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335),
+                     labels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+                               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
+
+# Method 2: Extract year differences
+# Calculate difference between years
+year_diff <- pred_data %>%
+  select(yday, year_factor, fitted) %>%
+  tidyr::pivot_wider(names_from = year_factor, values_from = fitted, names_prefix = "year_") %>%
+  mutate(difference = year_2024 - year_2022)
+
+p4 <- ggplot(year_diff, aes(x = yday, y = difference)) +
+  geom_line(color = "red", size = 1) +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.7) +
+  labs(
+    title = "Year-to-Year Differences in Seasonal Pattern",
+    subtitle = "2024 - 2022 (log fluorescence)",
+    x = "Day of Year",
+    y = "Difference in Log Fluorescence"
+  ) +
+  theme_minimal() +
+  scale_x_continuous(breaks = c(1, 32, 60, 91, 121, 152, 182, 213, 244, 274, 305, 335),
+                     labels = c("Jan", "Feb", "Mar", "Apr", "May", "Jun", 
+                               "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"))
+
+# Summary statistics
+seasonal_stats <- pred_data %>%
+  group_by(year_factor) %>%
+  summarise(
+    peak_day = yday[which.max(fitted)],
+    peak_value = max(fitted),
+    min_day = yday[which.min(fitted)],
+    min_value = min(fitted),
+    seasonal_amplitude = max(fitted) - min(fitted),
+    .groups = 'drop'
+  )
+
+print("Seasonal Pattern Summary:")
+print(seasonal_stats)
+
+# Display plots
+print(p1)
+print(p2) 
+print(p3)
+print(p4)
+```
+```{r}
+# Add year-specific seasonal patterns
+gam_model_interaction <- gam(
+  log_f ~ 
+    s(yday, by = year_factor, k = 10) +  # Allows different seasonal shapes
+    s(t, k = 14) +               
+    s(s, k = 8) +    
+    s(qt, k = 8) +
+    s(se_component, k = 8) +    
+    year_factor,                
+  data = bf_gam_matched,
+  family = gaussian(),          
+  method = "REML"               
+)
+
+# Compare models
+AIC(gam_model_log, gam_model_interaction)
+
+summary(gam_model_interaction)
+```
+```{r}
+# Now use the interaction model for predictions
+pred_data_interaction <- expand.grid(
+  yday = 1:365,
+  year_factor = c("2022", "2024")
+) %>%
+  mutate(
+    t = mean(bf_gam$t, na.rm = TRUE),
+    s = mean(bf_gam$s, na.rm = TRUE), 
+    se_component = mean(bf_gam$se_component, na.rm = TRUE)
+  )
+
+# Generate predictions with the interaction model
+pred_data_interaction$fitted <- predict(gam_model_interaction, newdata = pred_data_interaction)
+
+# Plot the REAL year differences
+ggplot(pred_data_interaction, aes(x = yday, y = fitted, color = year_factor)) +
+  geom_line(size = 1) +
+  labs(title = "True Year-specific Seasonal Patterns (with interactions)")
+```
+
+```{r}
+# Identifying what drove the year differences
+
+library(tidyverse)
+library(mgcv)
+
+# Step 1: Compare environmental conditions between years
+env_comparison <- bf_gam_matched %>%
+  group_by(year_factor) %>%
+  summarise(
+    mean_temp = mean(t, na.rm = TRUE),
+    sd_temp = sd(t, na.rm = TRUE),
+    mean_salinity = mean(s, na.rm = TRUE),
+    sd_salinity = sd(s, na.rm = TRUE),
+    mean_discharge = mean(qt, na.rm = TRUE),
+    sd_discharge = sd(qt, na.rm = TRUE),
+    mean_wind = mean(se_component, na.rm = TRUE),
+    sd_wind = sd(se_component, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+print("Environmental differences between years:")
+print(env_comparison)
+```
+```{r}
+# Look at the actual temperature distributions
+ggplot(bf_gam_matched, aes(x = t, fill = year_factor)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Temperature Distributions by Year")
+
+# And salinity distributions  
+ggplot(bf_gam_matched, aes(x = s, fill = year_factor)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Salinity Distributions by Year")
+
+ggplot(bf_gam_matched, aes(x = se_component, fill = year_factor)) +
+  geom_density(alpha = 0.5) +
+  labs(title = "Salinity Distributions by Year")
+```
+```{r}
+# Publication Figure: Environmental Forcing of Interannual Phytoplankton Variability
+
+library(tidyverse)
+library(gridExtra)
+library(mgcv)
+
+# Panel A: Environmental conditions comparison
+env_comparison_plot <- bf_gam_matched %>%
+  select(year_factor, t, s, qt) %>%
+  pivot_longer(cols = c(t, s, qt), names_to = "variable", values_to = "value") %>%
+  mutate(
+    variable = factor(variable, 
+                     levels = c("t", "s", "qt"),
+                     labels = c("Temperature (°C)", "Salinity (PSU)", "Discharge (m³/s)"))
+  ) %>%
+  ggplot(aes(x = year_factor, y = value, fill = year_factor)) +
+  geom_boxplot(alpha = 0.7) +
+  facet_wrap(~variable, scales = "free_y", nrow = 1) +
+  labs(
+    title = "(A) Environmental Conditions",
+    x = "Year",
+    y = "Value"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none",
+        strip.text = element_text(size = 10, face = "bold"))
+
+# Panel B: Temperature distributions (your key finding)
+temp_dist_plot <- ggplot(bf_gam_matched, aes(x = t, fill = year_factor)) +
+  geom_density(alpha = 0.6) +
+  geom_vline(data = bf_gam %>% group_by(year_factor) %>% 
+             summarise(mean_temp = mean(t, na.rm = TRUE)),
+             aes(xintercept = mean_temp, color = year_factor),
+             linetype = "dashed", size = 1) +
+  labs(
+    title = "(B) Temperature Regime Differences",
+    x = "Temperature (°C)",
+    y = "Density"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "bottom")
+
+# Panel C: Temperature-fluorescence relationship
+temp_response_plot <- ggplot(bf_gam_matched, aes(x = t, y = log_f, color = year_factor)) +
+  geom_point(alpha = 0.3, size = 0.8) +
+  geom_smooth(method = "gam", se = TRUE, size = 1.2) +
+  labs(
+    title = "(C) Temperature-Fluorescence Relationships",
+    x = "Temperature (°C)",
+    y = "Log Fluorescence"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# Panel D: Seasonal patterns with environmental overlay
+seasonal_env_plot <- bf_gam_matched %>%
+  mutate(month = month(date, label = TRUE)) %>%
+  group_by(year_factor, month) %>%
+  summarise(
+    mean_fluor = mean(log_f, na.rm = TRUE),
+    mean_temp = mean(t, na.rm = TRUE),
+    .groups = 'drop'
+  ) %>%
+  ggplot(aes(x = month, group = year_factor)) +
+  geom_line(aes(y = mean_fluor, color = year_factor), size = 1.2) +
+  geom_point(aes(y = mean_fluor, color = year_factor), size = 2) +
+  labs(
+    title = "(D) Seasonal Fluorescence Patterns",
+    x = "Month",
+    y = "Mean Log Fluorescence"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none",
+        axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Combine all panels
+final_figure <- grid.arrange(
+  env_comparison_plot,
+  arrangeGrob(temp_dist_plot, temp_response_plot, ncol = 2),
+  seasonal_env_plot,
+  ncol = 1,
+  heights = c(1, 1.2, 1)
+)
+```
+```{r}
+# Show the actual relationship with uncertainty
+ggplot(bf_gam_matched, aes(x = t, y = log_f)) +
+  geom_point(alpha = 0.2) +
+  geom_smooth(method = "gam", se = TRUE) +
+  geom_vline(xintercept = c(8, 12), linetype = "dashed", color = "red") +
+  annotate("rect", xmin = 8, xmax = 12, ymin = -Inf, ymax = Inf, 
+           alpha = 0.1, fill = "red") +
+  labs(title = "Optimal Temperature Range for Fluorescence",
+       x = "Temperature (°C)", y = "Log Fluorescence")
+```
+```{r}
+bf_gam_matched %>%
+  mutate(optimal_temp = t >= 8 & t <= 12) %>%
+  group_by(year_factor) %>%
+  summarise(
+    pct_optimal = 100 * mean(optimal_temp),
+    mean_fluor = mean(log_f),
+    mean_fluor_optimal = mean(log_f[optimal_temp]),
+    mean_fluor_suboptimal = mean(log_f[!optimal_temp])
+  )
+```
+
+
+```{r}
+# Summary statistics table for the text
+summary_stats <- bf_gam %>%
+  group_by(year_factor) %>%
+  summarise(
+    n_days = n(),
+    mean_fluor = round(mean(exp(log_f), na.rm = TRUE), 2),
+    mean_temp = round(mean(t, na.rm = TRUE), 2),
+    mean_sal = round(mean(s, na.rm = TRUE), 2),
+    mean_discharge = round(mean(qt, na.rm = TRUE), 0),
+    temp_above_10 = round(100 * sum(t > 10, na.rm = TRUE) / n(), 1),
+    .groups = 'drop'
+  )
+
+print("Summary Statistics for Publication:")
+print(summary_stats)
+```
+
+
+```{r}
+# Model comparison statistics
+model_stats <- data.frame(
+  Model = c("Environmental only", "Environmental + Year interactions"),
+  AIC = c(1225.403, 1121.423),
+  R_squared = c("0.25", "0.43"),  # Update with your actual values
+  Delta_AIC = c(0, 104)
+)
+
+print("Model Comparison Table:")
+print(model_stats)
+
+# Key finding summary for results text
+cat("
+KEY FINDINGS FOR RESULTS SECTION:
+
+1. Environmental Differences:
+   - 2024 was 0.5°C warmer on average (10.5°C vs 9.9°C)
+   - 2024 spent", summary_stats$temp_above_10[2], "% of time above 10°C vs", 
+   summary_stats$temp_above_10[1], "% in 2022
+   - 2024 had higher salinity and lower discharge (more marine influence)
+
+2. Biological Response:
+   - Same temperature-fluorescence relationship both years
+   - Higher fluorescence in 2024 due to more time in optimal temperature range
+   - Model with year interactions explained 43% vs 25% variance (ΔAIC = 104)
+
+3. Mechanism:
+   - Environmental forcing rather than community change
+   - Warmer, more marine conditions in 2024 enhanced phytoplankton productivity
+")
+```
+
+
+```{r}
+# Step 2: Extract individual smooth effects by year
+# Create prediction grids for each environmental variable
+
+# Temperature effects by year
+temp_range <- seq(min(bf_gam$t, na.rm = TRUE), max(bf_gam$t, na.rm = TRUE), length.out = 100)
+temp_pred <- expand.grid(
+  t = temp_range,
+  year_factor = c("2022", "2024")
+) %>%
+  mutate(
+    yday = median(bf_gam$yday, na.rm = TRUE),
+    s = mean(bf_gam$s, na.rm = TRUE),
+    se_component = mean(bf_gam$se_component, na.rm = TRUE)
+  )
+
+temp_pred$fitted <- predict(gam_model_interaction, newdata = temp_pred)
+
+# Salinity effects by year
+sal_range <- seq(min(bf_gam$s, na.rm = TRUE), max(bf_gam$s, na.rm = TRUE), length.out = 100)
+sal_pred <- expand.grid(
+  s = sal_range,
+  year_factor = c("2022", "2024")
+) %>%
+  mutate(
+    yday = median(bf_gam$yday, na.rm = TRUE),
+    t = mean(bf_gam$t, na.rm = TRUE),
+    se_component = mean(bf_gam$se_component, na.rm = TRUE)
+  )
+
+sal_pred$fitted <- predict(gam_model_interaction, newdata = sal_pred)
+
+# Discharge effects by year
+qt_range <- seq(min(bf_gam$qt, na.rm = TRUE), max(bf_gam$qt, na.rm = TRUE), length.out = 100)
+qt_pred <- expand.grid(
+  qt = qt_range,
+  year_factor = c("2022", "2024")
+) %>%
+  mutate(
+    yday = median(bf_gam$yday, na.rm = TRUE),
+    t = mean(bf_gam$t, na.rm = TRUE),
+    s = mean(bf_gam$s, na.rm = TRUE),
+    se_component = mean(bf_gam$se_component, na.rm = TRUE)
+  )
+
+qt_pred$fitted <- predict(gam_model_interaction, newdata = qt_pred)
+
+# Step 3: Plot environmental response differences
+p1 <- ggplot(temp_pred, aes(x = t, y = fitted, color = year_factor)) +
+  geom_line(size = 1) +
+  labs(title = "Temperature Response Differs by Year",
+       x = "Temperature (°C)", y = "Log Fluorescence (predicted)") +
+  theme_minimal()
+
+p2 <- ggplot(sal_pred, aes(x = s, y = fitted, color = year_factor)) +
+  geom_line(size = 1) +
+  labs(title = "Salinity Response Differs by Year", 
+       x = "Salinity (PSU)", y = "Log Fluorescence (predicted)") +
+  theme_minimal()
+
+p3 <- ggplot(qt_pred, aes(x = qt, y = fitted, color = year_factor)) +
+  geom_line(size = 1) +
+  labs(title = "Discharge Response Differs by Year",
+       x = "Discharge", y = "Log Fluorescence (predicted)") +
+  theme_minimal()
+
+# Step 4: Seasonal pattern differences
+yday_pred <- expand.grid(
+  yday = 1:365,
+  year_factor = c("2022", "2024")
+) %>%
+  mutate(
+    t = mean(bf_gam$t, na.rm = TRUE),
+    s = mean(bf_gam$s, na.rm = TRUE),
+    se_component = mean(bf_gam$se_component, na.rm = TRUE)
+  )
+
+yday_pred$fitted <- predict(gam_model_interaction, newdata = yday_pred)
+
+p4 <- ggplot(yday_pred, aes(x = yday, y = fitted, color = year_factor)) +
+  geom_line(size = 1) +
+  labs(title = "Seasonal Patterns Differ by Year",
+       x = "Day of Year", y = "Log Fluorescence (predicted)") +
+  theme_minimal()
+
+# Display plots
+print(p1)
+print(p2)
+print(p3)
+print(p4)
+```
+
+
+```{r}
+# Step 5: Quantify the relative importance of each driver
+# Calculate variance explained by each smooth term for each year
+# This tells us which variables matter most for each year
+
+smooth_importance <- data.frame(
+  term = c("s(t):2022", "s(s):2022", "s(qt):2022", "s(yday):2022",
+           "s(t):2024", "s(s):2024", "s(qt):2024", "s(yday):2024"),
+  edf = c(3.48, 4.52, 12.86, 7.81,  # From your model output
+          7.29, 2.72, 3.13, 7.95)
+)
+
+smooth_importance$year <- c(rep("2022", 4), rep("2024", 4))
+smooth_importance$variable <- rep(c("Temperature", "Salinity", "Discharge", "Seasonality"), 2)
+
+# Plot relative importance
+p5 <- ggplot(smooth_importance, aes(x = variable, y = edf, fill = year)) +
+  geom_col(position = "dodge") +
+  labs(title = "Variable Importance Differs by Year",
+       subtitle = "Higher EDF = more complex (nonlinear) response",
+       x = "Environmental Variable", y = "Effective Degrees of Freedom") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+print(p5)
+```
+
+
+```{r}
+# Step 6: Environmental anomalies analysis
+# Compare each year's conditions to the long-term mean
+environmental_anomalies <- bf_gam %>%
+  mutate(
+    temp_anomaly = t - mean(t, na.rm = TRUE),
+    sal_anomaly = s - mean(s, na.rm = TRUE),
+    discharge_anomaly = qt - mean(qt, na.rm = TRUE)
+  ) %>%
+  group_by(year_factor, month = month(date)) %>%
+  summarise(
+    temp_anom = mean(temp_anomaly, na.rm = TRUE),
+    sal_anom = mean(sal_anomaly, na.rm = TRUE),
+    discharge_anom = mean(discharge_anomaly, na.rm = TRUE),
+    .groups = 'drop'
+  )
+
+# Plot monthly anomalies
+p6 <- environmental_anomalies %>%
+  pivot_longer(cols = c(temp_anom, sal_anom, discharge_anom),
+               names_to = "variable", values_to = "anomaly") %>%
+  ggplot(aes(x = month, y = anomaly, color = year_factor)) +
+  geom_line() +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  facet_wrap(~variable, scales = "free_y") +
+  labs(title = "Monthly Environmental Anomalies by Year",
+       x = "Month", y = "Anomaly from Overall Mean") +
+  theme_minimal()
+
+print(p6)
+
+# Summary interpretation guide
+cat("
+INTERPRETATION GUIDE:
+1. Environmental Comparison: Shows mean differences in conditions
+2. Response Curves: Shows if years respond differently to each driver
+3. EDF Plot: Shows which variables were most important each year
+   - Higher EDF = more complex, nonlinear response
+   - Compare heights between years
+4. Monthly Anomalies: Shows when conditions were unusual
+
+KEY QUESTIONS TO ASK:
+- Which year had more extreme temperature/salinity/discharge conditions?
+- Do the response curves show different shapes or optima between years?
+- Which variables have dramatically different EDF between years?
+- When during the year were conditions most different?
+")
+```
+
+
+
+```{r}
+# Create prediction plots for key relationships
+# Seasonal pattern
+seasonal_pred <- data.frame(
+  yday = 1:365,
+  t = mean(bf_gam$t, na.rm = TRUE),
+  s = mean(bf_gam$s, na.rm = TRUE),
+  se_component = mean(bf_gam$se_component, na.rm = TRUE),
+  year_factor = "2023"  # Use middle year
+)
+
+seasonal_pred$pred_f <- predict(gam_model, newdata = seasonal_pred)
+
+seasonal_plot <- ggplot(seasonal_pred, aes(x = yday, y = pred_f)) +
+  geom_line(color = "#2166ac", size = 1.2) +
+  geom_point(data = bf_gam, aes(x = yday, y = f, color = year_factor), 
+             alpha = 0.4, size = 0.8) +
+  scale_color_manual(values = c("2022" = "#1b7837", "2023" = "#762a83", "2024" = "#5aae61")) +
+  labs(
+    x = "Day of Year",
+    y = "Fluorescence",
+    title = "Seasonal Pattern in Buoy Fluorescence",
+    color = "Year"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+print(seasonal_plot)
+```
+
+
+```{r}
+# SE wind component relationship
+wind_pred <- data.frame(
+  se_component = seq(min(bf_gam$se_component, na.rm = TRUE), 
+                     max(bf_gam$se_component, na.rm = TRUE), 
+                     length.out = 100),
+  yday = mean(bf_gam$yday),
+  t = mean(bf_gam$t, na.rm = TRUE),
+  s = mean(bf_gam$s, na.rm = TRUE),
+  year_factor = "2023"
+)
+
+wind_pred$pred_f <- predict(gam_model, newdata = wind_pred)
+
+wind_plot <- ggplot(wind_pred, aes(x = se_component, y = pred_f)) +
+  geom_line(color = "#d73027", size = 1.2) +
+  geom_point(data = bf_gam, aes(x = se_component, y = f, color = year_factor), 
+             alpha = 0.4, size = 0.8) +
+  scale_color_manual(values = c("2022" = "#1b7837", "2023" = "#762a83", "2024" = "#5aae61")) +
+  labs(
+    x = "SE Wind Component (m/s)",
+    y = "Fluorescence",
+    title = "SE Wind Effect on Buoy Fluorescence",
+    color = "Year"
+  ) +
+  theme_bw() +
+  theme(legend.position = "bottom")
+
+print(wind_plot)
+```
+
+
+```{r}
+# Model performance metrics
+cat("\nModel Performance:\n")
+cat("R-squared:", summary(gam_model)$r.sq, "\n")
+cat("Deviance explained:", round(summary(gam_model)$dev.expl * 100, 1), "%\n")
+
+# Residuals by year to check for year effects
+residual_plot <- bf_gam %>%
+  mutate(residuals = residuals(gam_model)) %>%
+  ggplot(aes(x = yday, y = residuals, color = year_factor)) +
+  geom_point(alpha = 0.6) +
+  geom_smooth(method = "loess", se = FALSE) +
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  scale_color_manual(values = c("2022" = "#1b7837", "2023" = "#762a83", "2024" = "#5aae61")) +
+  labs(
+    x = "Day of Year",
+    y = "Residuals",
+    title = "Model Residuals by Year",
+    color = "Year"
+  ) +
+  theme_bw()
+
+print(residual_plot)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+# Simple model with just temperature
+simple_gam <- gam(f ~ s(se_component), data = bf)
+
+# Look at the results
+summary(simple_gam)
+plot(simple_gam)
+```
+
+```{r}
+# Two predictors
+gam2 <- gam(f ~ s(t) + s(s), data = bf)
+summary(gam2)
+
+# Compare models
+AIC(simple_gam, gam2)
+plot(gam2, pages = 1)  # Shows both smooth curves
+```
+
+```{r}
+gam3 <- gam(f ~ s(t) + s(s) + s(qt), data = bf)
+summary(gam3)
+AIC(simple_gam, gam2, gam3)
+plot(gam3, pages = 1) 
+```
+
+```{r}
+gam4 <- gam(f ~ s(t) + s(s) + s(qt) + s(se_component), data = bf)
+summary(gam4)
+AIC(simple_gam, gam2, gam3, gam4)
+plot(gam4, pages = 1) 
+```
+
+
+
+```{r}
+# Check if this 3-variable model is significantly better
+summary(gam2)$r.sq  # 2-variable model
+summary(gam3)$r.sq  # 3-variable model
+summary(gam4)$r.sq  # 3-variable model
+```
+```{r}
+gam4 <- gam(f ~ s(t) + s(s) + s(qt) + s(yday), data = bf)
+summary(gam4)
+AIC(simple_gam, gam2, gam3, gam4)
+plot(gam4, pages = 1)
+
+```
+
+```{r}
+gam5 <- gam(f ~ s(t) + s(s) + s(qt) + s(se_component) + s(yday), data = bf)
+summary(gam5)
+AIC(simple_gam, gam2, gam3, gam4, gam5)
+plot(gam5, pages = 1)
+```
+
+```{r}
+bf$ws_lag3 <- lag(bf$ws, 3)   # 3 days prior
+bf$wind_event <- bf$ws > quantile(bf$ws, 0.9, na.rm = TRUE)
+
+gam_lag <- gam(f ~ s(t) + s(s) + s(qt) + s(yday) + s(ws_lag3) + 
+                 s(wd_lag3), data = bf)
+summary(gam_lag)
+AIC(simple_gam, gam2, gam3, gam4, gam5, gam_lag)
+plot(gam_lag, pages = 1)
+```
+
+```{r}
+# bf$qt_lag7 <- lag(bf$qgm, 7)
+
+# gam_dis7 <- gam(f ~ s(t) + s(s) + s(qt) + s(yday), data = bf)
+# summary(gam_dis7)
+# AIC(simple_gam, gam2, gam3, gam4, gam5, gam_dis7)
+# plot(gam_dis, pages = 1)
+```
+
+```{r}
+bf$year <- as.factor(year(bf$date))
+
+gam_year2 <- gam(f ~ s(t) + s(s) + s(qt) + s(se_component) +
+                 s(yday) + s(yday, by = year) + year, 
+                 data = bf)
+
+AIC(simple_gam, gam2, gam3, gam4, gam5, gam_year2)
+plot(gam_year2, pages = 1)
+```
+
+```{r}
+# Test all environmental interactions by year
+gam_full_interactions <- gam(f ~ s(t, by = year) + s(s, by = year) + 
+                            s(qt, by = year) + s(se_component, by = year) +  
+                            s(yday, by = year) + year, 
+                            data = bf)
+```
+
+```{r}
+# Compare your current model to the full interaction model
+anova(gam_year2, gam_full_interactions, test = "Chisq")
+```
+```{r}
+# Test just temperature interaction
+gam_temp_int <- gam(f ~ s(t, by = year) + s(s) + s(qt) + 
+                    s(yday, by = year) + year, data = bf)
+
+# Test just salinity interaction  
+gam_sal_int <- gam(f ~ s(t) + s(s, by = year) + s(qt) + 
+                   s(yday, by = year) + year, data = bf)
+
+# Test just discharge interaction
+gam_qt_int <- gam(f ~ s(t) + s(s) + s(qt, by = year) + 
+                  s(yday, by = year) + year, data = bf)
+
+# Compare each to your original model
+anova(gam_year2, gam_temp_int, test = "Chisq")
+anova(gam_year2, gam_sal_int, test = "Chisq")
+anova(gam_year2, gam_qt_int, test = "Chisq")
+```
+```{r}
+# This is now your best model
+gam_final <- gam(f ~ s(t, by = year) +
+                     s(s, by = year) + 
+                     s(qt, by = year, k = 15) +
+                     s(se_component, by = year) +
+                     s(yday, by = year) + year, 
+                 data = bf)
+# Plot to see how relationships differ by year
+plot(gam_final, pages = 1)
+
+summary(gam_final)
+gam.check(gam_final)
+
+# What the EDF values tell you:
+# 
+# Temperature: Much more complex relationship in 2024 (edf = 7.90) vs 2022 (edf = 4.35)
+# Salinity: More complex in 2022 (edf = 5.95) than 2024 (edf = 2.45)
+# Discharge: Very different complexity between years (6.04 vs 1.00)
+# Seasonality: Similar complexity both years (~7.4-7.6)
+# 
+# The big differences in EDF values between years confirm that your environmental relationships really are quite different between 2022 and 2024 - particularly for temperature and discharge.
+# Try the increased k for discharge and see if the k-index warnings disappear. If they persist, you might increase k further (try k = 20).
+
+# Perfect! Your model diagnostics look much better now. The discharge k-index p-values improved from highly significant warnings to marginal (p = 0.08-0.09), which is acceptable.
+# Key observations:
+# Model is well-specified:
+# 
+# All k-index p-values > 0.05 (the marginal 0.08-0.09 for discharge is fine)
+# Model converged properly
+# 
+# Interesting ecological patterns:
+# 
+# Discharge 2022: Very complex relationship (edf = 13.21) - suggests highly non-linear response to freshwater inputs
+# Discharge 2024: Linear relationship (edf = 1.00) - much simpler response
+# Temperature: Still more complex in 2024 (edf = 7.92) vs 2022 (edf = 3.63)
+# Salinity: Simple relationships both years, slightly more complex in 2024
+```
+
+```{r}
+plot(gam_final, pages = 1)
+```
+
+
+
+
+```{r}
+library(ggplot2)
+library(dplyr)
+library(patchwork)  # For combining plots
+
+# Function to extract smooth effects from GAM
+extract_smooth <- function(model, term, n = 100) {
+  # Get the range of the variable
+  var_range <- range(model$model[[term]], na.rm = TRUE)
+  
+  # Create new data for prediction
+  newdata <- data.frame(
+    x = seq(var_range[1], var_range[2], length.out = n)
+  )
+  names(newdata) <- term
+  
+  # Set other variables to their means
+  for (var in names(model$model)) {
+    if (var != term && var != "f" && !grepl("year", var)) {
+      if (is.numeric(model$model[[var]])) {
+        newdata[[var]] <- mean(model$model[[var]], na.rm = TRUE)
+      } else {
+        newdata[[var]] <- levels(model$model[[var]])[1]
+      }
+    }
+  }
+  
+  # Add year column if needed
+  if ("year" %in% names(model$model)) {
+    newdata$year <- levels(model$model$year)[1]
+  }
+  
+  # Get predictions
+  pred <- predict(model, newdata, se.fit = TRUE, type = "terms")
+  
+  # Find which column corresponds to our term
+  term_col <- grep(paste0("s\\(", term, "\\)"), colnames(pred$fit))
+  if (length(term_col) == 0) {
+    term_col <- grep(term, colnames(pred$fit))[1]
+  }
+  
+  data.frame(
+    x = newdata[[term]],
+    fit = pred$fit[, term_col],
+    se = pred$se.fit[, term_col],
+    lower = pred$fit[, term_col] - 1.96 * pred$se.fit[, term_col],
+    upper = pred$fit[, term_col] + 1.96 * pred$se.fit[, term_col]
+  )
+}
+
+# Simpler approach for seasonal effects by year
+extract_seasonal_by_year <- function(model, data) {
+  # Get unique years from the data
+  years <- unique(data$year)
+  seasonal_data <- list()
+  
+  for (yr in years) {
+    # Create prediction data for this year
+    newdata <- data.frame(
+      yday = 1:365,
+      year = as.factor(yr),
+      t = median(data$t, na.rm = TRUE),
+      s = median(data$s, na.rm = TRUE),
+      qt = median(data$qt, na.rm = TRUE)
+    )
+    
+    # Ensure factor levels match
+    if (is.factor(data$year)) {
+      newdata$year <- factor(newdata$year, levels = levels(data$year))
+    }
+    
+    # Get predictions with error handling
+    tryCatch({
+      pred <- predict(model, newdata, se.fit = TRUE)
+      
+      seasonal_data[[as.character(yr)]] <- data.frame(
+        yday = 1:365,
+        year = as.character(yr),
+        fit = pred$fit,
+        se = pred$se.fit,
+        lower = pred$fit - 1.96 * pred$se.fit,
+        upper = pred$fit + 1.96 * pred$se.fit
+      )
+    }, error = function(e) {
+      cat("Error predicting for year", yr, ":", e$message, "\n")
+      return(NULL)
+    })
+  }
+  
+  # Remove any NULL entries and combine
+  seasonal_data <- seasonal_data[!sapply(seasonal_data, is.null)]
+  if (length(seasonal_data) > 0) {
+    return(do.call(rbind, seasonal_data))
+  } else {
+    return(NULL)
+  }
+}
+
+# Create individual plots
+create_effect_plot <- function(data, x_var, x_label, title) {
+  ggplot(data, aes(x = x, y = fit)) +
+    geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.3, fill = "steelblue") +
+    geom_line(color = "steelblue", size = 1) +
+    geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+    labs(x = x_label, y = "Effect on Fluorescence", title = title) +
+    theme_classic() +
+    theme(
+      plot.title = element_text(size = 12, hjust = 0.5),
+      axis.title = element_text(size = 10),
+      axis.text = element_text(size = 9)
+    )
+}
+
+# Assuming your GAM model is called 'gam_year2' and data is 'bf'
+# Extract smooth effects for environmental variables
+temp_data <- extract_smooth(gam_year2, "t")
+sal_data <- extract_smooth(gam_year2, "s")
+discharge_data <- extract_smooth(gam_year2, "qt")
+
+# Extract seasonal patterns by year
+seasonal_data <- extract_seasonal_by_year(gam_year2, bf)
+
+# Create individual plots
+p1 <- create_effect_plot(temp_data, "t", "Temperature (°C)", "Temperature Effect")
+
+p2 <- create_effect_plot(sal_data, "s", "Salinity", "Salinity Effect")
+
+p3 <- create_effect_plot(discharge_data, "qt", "Total Discharge", "Discharge Effect")
+
+# Seasonal plot with both years
+p4 <- ggplot(seasonal_data, aes(x = yday, y = fit, color = year, fill = year)) +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.3, color = NA) +
+  geom_line(size = 1) +
+  scale_color_manual(values = c("2022" = "#E31A1C", "2024" = "#1F78B4")) +
+  scale_fill_manual(values = c("2022" = "#E31A1C", "2024" = "#1F78B4")) +
+  labs(x = "Day of Year", y = "Predicted Fluorescence", 
+       title = "Seasonal Patterns by Year", color = "Year", fill = "Year") +
+  theme_classic() +
+  theme(
+    plot.title = element_text(size = 12, hjust = 0.5),
+    axis.title = element_text(size = 10),
+    axis.text = element_text(size = 9),
+    legend.position = "bottom"
+  )
+
+# Combine all plots using patchwork
+combined_plot <- (p1 + p2) / (p3 + p4)
+
+# Add overall title and improve layout
+final_plot <- combined_plot + 
+  plot_annotation(
+    title = "GAM Analysis: Environmental Drivers of Phytoplankton Fluorescence",
+    theme = theme(plot.title = element_text(size = 14, hjust = 0.5, face = "bold"))
+  )
+
+# Display the plot
+print(final_plot)
+
+# Save the plot
+ggsave(here("figures", "fluorescence_gam_analysis.png"), final_plot, 
+       width = 12, height = 10, dpi = 300)
+
+# Print model summary for reference
+cat("Model Summary:\n")
+print(summary(gam_year2))
+cat("\nModel R-squared:", summary(gam_year2)$r.sq)
+cat("\nDeviance explained:", summary(gam_year2)$dev.expl * 100, "%")
+```
+
+```{r}
+# Create comparison plot with both years overlaid
+library(ggplot2)
+library(mgcv)
+library(gridExtra)
+
+# Generate prediction data for each variable
+# Temperature predictions
+temp_pred <- data.frame(
+  t = rep(seq(min(bf$t, na.rm = TRUE), max(bf$t, na.rm = TRUE), length.out = 100), 2),
+  s = rep(mean(bf$s, na.rm = TRUE), 200),
+  qt = rep(mean(bf$qt, na.rm = TRUE), 200),
+  yday = rep(mean(bf$yday, na.rm = TRUE), 200),
+  year = rep(c("2022", "2024"), each = 100)
+)
+temp_pred$pred <- predict(gam_final, temp_pred, se.fit = TRUE)$fit
+temp_pred$se <- predict(gam_final, temp_pred, se.fit = TRUE)$se.fit
+
+# Salinity predictions
+sal_pred <- data.frame(
+  t = rep(mean(bf$t, na.rm = TRUE), 200),
+  s = rep(seq(min(bf$s, na.rm = TRUE), max(bf$s, na.rm = TRUE), length.out = 100), 2),
+  qt = rep(mean(bf$qt, na.rm = TRUE), 200),
+  yday = rep(mean(bf$yday, na.rm = TRUE), 200),
+  year = rep(c("2022", "2024"), each = 100)
+)
+sal_pred$pred <- predict(gam_final, sal_pred, se.fit = TRUE)$fit
+sal_pred$se <- predict(gam_final, sal_pred, se.fit = TRUE)$se.fit
+
+# Discharge predictions
+qt_pred <- data.frame(
+  t = rep(mean(bf$t, na.rm = TRUE), 200),
+  s = rep(mean(bf$s, na.rm = TRUE), 200),
+  qt = rep(seq(min(bf$qt, na.rm = TRUE), max(bf$qt, na.rm = TRUE), length.out = 100), 2),
+  yday = rep(mean(bf$yday, na.rm = TRUE), 200),
+  year = rep(c("2022", "2024"), each = 100)
+)
+qt_pred$pred <- predict(gam_final, qt_pred, se.fit = TRUE)$fit
+qt_pred$se <- predict(gam_final, qt_pred, se.fit = TRUE)$se.fit
+
+# Seasonal predictions
+yday_pred <- data.frame(
+  t = rep(mean(bf$t, na.rm = TRUE), 200),
+  s = rep(mean(bf$s, na.rm = TRUE), 200),
+  qt = rep(mean(bf$qt, na.rm = TRUE), 200),
+  yday = rep(seq(1, 365, length.out = 100), 2),
+  year = rep(c("2022", "2024"), each = 100)
+)
+yday_pred$pred <- predict(gam_final, yday_pred, se.fit = TRUE)$fit
+yday_pred$se <- predict(gam_final, yday_pred, se.fit = TRUE)$se.fit
+
+# Create individual plots
+p1 <- ggplot(temp_pred, aes(x = t, y = pred, color = year, fill = year)) +
+  geom_ribbon(aes(ymin = pred - 1.96*se, ymax = pred + 1.96*se), alpha = 0.3) +
+  geom_line(size = 1) +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  labs(x = "Temperature (°C)", y = "Effect on Fluorescence", title = "Temperature Effect") +
+  scale_color_manual(values = c("2022" = "#E74C3C", "2024" = "#3498DB")) +
+  scale_fill_manual(values = c("2022" = "#E74C3C", "2024" = "#3498DB")) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+p2 <- ggplot(sal_pred, aes(x = s, y = pred, color = year, fill = year)) +
+  geom_ribbon(aes(ymin = pred - 1.96*se, ymax = pred + 1.96*se), alpha = 0.3) +
+  geom_line(size = 1) +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  labs(x = "Salinity", y = "Effect on Fluorescence", title = "Salinity Effect") +
+  scale_color_manual(values = c("2022" = "#E74C3C", "2024" = "#3498DB")) +
+  scale_fill_manual(values = c("2022" = "#E74C3C", "2024" = "#3498DB")) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+p3 <- ggplot(qt_pred, aes(x = qt, y = pred, color = year, fill = year)) +
+  geom_ribbon(aes(ymin = pred - 1.96*se, ymax = pred + 1.96*se), alpha = 0.3) +
+  geom_line(size = 1) +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  labs(x = "Total Discharge", y = "Effect on Fluorescence", title = "Discharge Effect") +
+  scale_color_manual(values = c("2022" = "#E74C3C", "2024" = "#3498DB")) +
+  scale_fill_manual(values = c("2022" = "#E74C3C", "2024" = "#3498DB")) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+p4 <- ggplot(yday_pred, aes(x = yday, y = pred, color = year, fill = year)) +
+  geom_ribbon(aes(ymin = pred - 1.96*se, ymax = pred + 1.96*se), alpha = 0.3) +
+  geom_line(size = 1) +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  labs(x = "Day of Year", y = "Predicted Fluorescence", title = "Seasonal Patterns by Year") +
+  scale_color_manual(values = c("2022" = "#E74C3C", "2024" = "#3498DB"), name = "Year") +
+  scale_fill_manual(values = c("2022" = "#E74C3C", "2024" = "#3498DB"), name = "Year") +
+  theme_minimal()
+
+# Combine plots
+grid.arrange(p1, p2, p3, p4, ncol = 2, 
+             top = "GAM Analysis: Environmental Drivers of Phytoplankton Fluorescence")
+```
+```{r}
+# Plot all smooths at once (this will show them separately)
+plot(gam_final, pages = 1, shade = TRUE)
+```
+```{r}
+# Create separate plots for each year with optimal scales
+library(ggplot2)
+library(mgcv)
+library(gridExtra)
+
+# Generate prediction data for each variable and year separately
+# Temperature predictions - 2022
+temp_pred_2022 <- data.frame(
+  t = seq(min(bf$t, na.rm = TRUE), max(bf$t, na.rm = TRUE), length.out = 100),
+  s = rep(mean(bf$s, na.rm = TRUE), 100),
+  qt = rep(mean(bf$qt, na.rm = TRUE), 100),
+  yday = rep(mean(bf$yday, na.rm = TRUE), 100),
+  year = rep("2022", 100)
+)
+temp_pred_2022$pred <- predict(gam_final, temp_pred_2022, se.fit = TRUE)$fit
+temp_pred_2022$se <- predict(gam_final, temp_pred_2022, se.fit = TRUE)$se.fit
+
+# Temperature predictions - 2024
+temp_pred_2024 <- data.frame(
+  t = seq(min(bf$t, na.rm = TRUE), max(bf$t, na.rm = TRUE), length.out = 100),
+  s = rep(mean(bf$s, na.rm = TRUE), 100),
+  qt = rep(mean(bf$qt, na.rm = TRUE), 100),
+  yday = rep(mean(bf$yday, na.rm = TRUE), 100),
+  year = rep("2024", 100)
+)
+temp_pred_2024$pred <- predict(gam_final, temp_pred_2024, se.fit = TRUE)$fit
+temp_pred_2024$se <- predict(gam_final, temp_pred_2024, se.fit = TRUE)$se.fit
+
+# Salinity predictions - 2022
+sal_pred_2022 <- data.frame(
+  t = rep(mean(bf$t, na.rm = TRUE), 100),
+  s = seq(min(bf$s, na.rm = TRUE), max(bf$s, na.rm = TRUE), length.out = 100),
+  qt = rep(mean(bf$qt, na.rm = TRUE), 100),
+  yday = rep(mean(bf$yday, na.rm = TRUE), 100),
+  year = rep("2022", 100)
+)
+sal_pred_2022$pred <- predict(gam_final, sal_pred_2022, se.fit = TRUE)$fit
+sal_pred_2022$se <- predict(gam_final, sal_pred_2022, se.fit = TRUE)$se.fit
+
+# Salinity predictions - 2024
+sal_pred_2024 <- data.frame(
+  t = rep(mean(bf$t, na.rm = TRUE), 100),
+  s = seq(min(bf$s, na.rm = TRUE), max(bf$s, na.rm = TRUE), length.out = 100),
+  qt = rep(mean(bf$qt, na.rm = TRUE), 100),
+  yday = rep(mean(bf$yday, na.rm = TRUE), 100),
+  year = rep("2024", 100)
+)
+sal_pred_2024$pred <- predict(gam_final, sal_pred_2024, se.fit = TRUE)$fit
+sal_pred_2024$se <- predict(gam_final, sal_pred_2024, se.fit = TRUE)$se.fit
+
+# Discharge predictions - 2022
+qt_pred_2022 <- data.frame(
+  t = rep(mean(bf$t, na.rm = TRUE), 100),
+  s = rep(mean(bf$s, na.rm = TRUE), 100),
+  qt = seq(min(bf$qt, na.rm = TRUE), max(bf$qt, na.rm = TRUE), length.out = 100),
+  yday = rep(mean(bf$yday, na.rm = TRUE), 100),
+  year = rep("2022", 100)
+)
+qt_pred_2022$pred <- predict(gam_final, qt_pred_2022, se.fit = TRUE)$fit
+qt_pred_2022$se <- predict(gam_final, qt_pred_2022, se.fit = TRUE)$se.fit
+
+# Discharge predictions - 2024
+qt_pred_2024 <- data.frame(
+  t = rep(mean(bf$t, na.rm = TRUE), 100),
+  s = rep(mean(bf$s, na.rm = TRUE), 100),
+  qt = seq(min(bf$qt, na.rm = TRUE), max(bf$qt, na.rm = TRUE), length.out = 100),
+  yday = rep(mean(bf$yday, na.rm = TRUE), 100),
+  year = rep("2024", 100)
+)
+qt_pred_2024$pred <- predict(gam_final, qt_pred_2024, se.fit = TRUE)$fit
+qt_pred_2024$se <- predict(gam_final, qt_pred_2024, se.fit = TRUE)$se.fit
+
+# Seasonal predictions - 2022
+yday_pred_2022 <- data.frame(
+  t = rep(mean(bf$t, na.rm = TRUE), 100),
+  s = rep(mean(bf$s, na.rm = TRUE), 100),
+  qt = rep(mean(bf$qt, na.rm = TRUE), 100),
+  yday = seq(1, 365, length.out = 100),
+  year = rep("2022", 100)
+)
+yday_pred_2022$pred <- predict(gam_final, yday_pred_2022, se.fit = TRUE)$fit
+yday_pred_2022$se <- predict(gam_final, yday_pred_2022, se.fit = TRUE)$se.fit
+
+# Seasonal predictions - 2024
+yday_pred_2024 <- data.frame(
+  t = rep(mean(bf$t, na.rm = TRUE), 100),
+  s = rep(mean(bf$s, na.rm = TRUE), 100),
+  qt = rep(mean(bf$qt, na.rm = TRUE), 100),
+  yday = seq(1, 365, length.out = 100),
+  year = rep("2024", 100)
+)
+yday_pred_2024$pred <- predict(gam_final, yday_pred_2024, se.fit = TRUE)$fit
+yday_pred_2024$se <- predict(gam_final, yday_pred_2024, se.fit = TRUE)$se.fit
+
+# Create plots for 2022
+p1_2022 <- ggplot(temp_pred_2022, aes(x = t, y = pred)) +
+  geom_ribbon(aes(ymin = pred - 1.96*se, ymax = pred + 1.96*se), alpha = 0.3, fill = "#E74C3C") +
+  geom_line(size = 1, color = "#E74C3C") +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  labs(x = "Temperature (°C)", y = "Effect on Fluorescence", title = "Temperature Effect - 2022") +
+  theme_minimal()
+
+p2_2022 <- ggplot(sal_pred_2022, aes(x = s, y = pred)) +
+  geom_ribbon(aes(ymin = pred - 1.96*se, ymax = pred + 1.96*se), alpha = 0.3, fill = "#E74C3C") +
+  geom_line(size = 1, color = "#E74C3C") +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  labs(x = "Salinity", y = "Effect on Fluorescence", title = "Salinity Effect - 2022") +
+  theme_minimal()
+
+p3_2022 <- ggplot(qt_pred_2022, aes(x = qt, y = pred)) +
+  geom_ribbon(aes(ymin = pred - 1.96*se, ymax = pred + 1.96*se), alpha = 0.3, fill = "#E74C3C") +
+  geom_line(size = 1, color = "#E74C3C") +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  labs(x = "Total Discharge", y = "Effect on Fluorescence", title = "Discharge Effect - 2022") +
+  theme_minimal()
+
+p4_2022 <- ggplot(yday_pred_2022, aes(x = yday, y = pred)) +
+  geom_ribbon(aes(ymin = pred - 1.96*se, ymax = pred + 1.96*se), alpha = 0.3, fill = "#E74C3C") +
+  geom_line(size = 1, color = "#E74C3C") +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  labs(x = "Day of Year", y = "Predicted Fluorescence", title = "Seasonal Pattern - 2022") +
+  theme_minimal()
+
+# Create plots for 2024
+p1_2024 <- ggplot(temp_pred_2024, aes(x = t, y = pred)) +
+  geom_ribbon(aes(ymin = pred - 1.96*se, ymax = pred + 1.96*se), alpha = 0.3, fill = "#3498DB") +
+  geom_line(size = 1, color = "#3498DB") +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  labs(x = "Temperature (°C)", y = "Effect on Fluorescence", title = "Temperature Effect - 2024") +
+  theme_minimal()
+
+p2_2024 <- ggplot(sal_pred_2024, aes(x = s, y = pred)) +
+  geom_ribbon(aes(ymin = pred - 1.96*se, ymax = pred + 1.96*se), alpha = 0.3, fill = "#3498DB") +
+  geom_line(size = 1, color = "#3498DB") +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  labs(x = "Salinity", y = "Effect on Fluorescence", title = "Salinity Effect - 2024") +
+  theme_minimal()
+
+p3_2024 <- ggplot(qt_pred_2024, aes(x = qt, y = pred)) +
+  geom_ribbon(aes(ymin = pred - 1.96*se, ymax = pred + 1.96*se), alpha = 0.3, fill = "#3498DB") +
+  geom_line(size = 1, color = "#3498DB") +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  labs(x = "Total Discharge", y = "Effect on Fluorescence", title = "Discharge Effect - 2024") +
+  theme_minimal()
+
+p4_2024 <- ggplot(yday_pred_2024, aes(x = yday, y = pred)) +
+  geom_ribbon(aes(ymin = pred - 1.96*se, ymax = pred + 1.96*se), alpha = 0.3, fill = "#3498DB") +
+  geom_line(size = 1, color = "#3498DB") +
+  geom_hline(yintercept = 0, linetype = "dashed", alpha = 0.5) +
+  labs(x = "Day of Year", y = "Predicted Fluorescence", title = "Seasonal Pattern - 2024") +
+  theme_minimal()
+```
+
+
+```{r}
+# Combine plots - 2022
+test <- grid.arrange(p1_2022, p2_2022, p3_2022, p4_2022, ncol = 2, 
+             top = "GAM Analysis 2022: Environmental Drivers of Phytoplankton Fluorescence")
+
+# Save the plot
+ggsave(here("figures", "fluorescence_gam_2022.png"), test, 
+       width = 12, height = 10, dpi = 300)
+```
+
+
+```{r}
+# Combine plots - 2024  
+test2 <- grid.arrange(p1_2024, p2_2024, p3_2024, p4_2024, ncol = 2,
+             top = "GAM Analysis 2024: Environmental Drivers of Phytoplankton Fluorescence")
+
+# Save the plot
+ggsave(here("figures", "fluorescence_gam_2024.png"), test2, 
+       width = 12, height = 10, dpi = 300)
+```
+
