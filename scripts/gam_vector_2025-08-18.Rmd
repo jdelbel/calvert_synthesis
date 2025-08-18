@@ -136,6 +136,7 @@ missing_dates <- bf_gam %>%
 
 print(missing_dates)
 ```
+
 ```{r}
 # Or more detailed:
 date_coverage <- bf_gam %>%
@@ -187,6 +188,7 @@ print(missing_2022)
 print("Missing dates in 2024:")
 print(missing_2024)
 ```
+
 ```{r}
 # Create matched dataset by removing the same dates from 2022
 bf_gam_matched <- bf_gam %>%
