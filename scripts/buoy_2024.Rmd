@@ -27,8 +27,8 @@ chl_22 <- chl %>%
          date = lubridate::date(measurementTime_2),
          month = lubridate::month(measurementTime_2),
          hour = lubridate::hour(measurementTime_2)) %>%  
-  mutate(group = case_when(date > "2024-03-25" ~ 2,
-                           date < "2024-03-20" ~ 1)) %>% 
+  mutate(group = case_when(date > "2024-03-25" ~ 2, #Prior to bad data gap
+                           date < "2024-03-20" ~ 1)) %>% #after bad data gap.
   filter(date >= "2024-03-25" |
                            date <= "2024-03-20")
 
@@ -117,6 +117,99 @@ chl_22 %>%
   geom_point(data = filter(chl_22, gf < -1), color = "red")
 ```
 
+```{r}
+# Function to detect outliers using IQR method
+detect_outliers_iqr <- function(x, k = 1.5) {
+  Q1 <- quantile(x, 0.25, na.rm = TRUE)
+  Q3 <- quantile(x, 0.75, na.rm = TRUE)
+  IQR <- Q3 - Q1
+  lower <- Q1 - k * IQR
+  upper <- Q3 + k * IQR
+  return(x < lower | x > upper)
+}
+
+chl_22_qc <- chl_22 %>% 
+  group_by(group) %>% 
+  mutate(
+    gf = c(NA, diff(fl)/lag(fl)[-1]),  # Fix GF calculation
+    # Outlier flags
+    fl_outlier = detect_outliers_iqr(fl, k = 2),
+    gf_outlier = detect_outliers_iqr(abs(gf), k = 1.5),
+    # Combined flag
+    outlier_flag = fl_outlier | gf_outlier | fl < 0 | fl > 50
+  ) %>%
+  filter(!outlier_flag) %>%
+  ungroup()
+
+library(zoo)
+
+chl_22_qc_lo <- chl_22 %>% 
+  group_by(group) %>% 
+  arrange(measurementTime_2) %>%  # assuming you have a datetime column
+  mutate(
+    # Rolling mean and SD (adjust window size as needed)
+    roll_mean = rollmean(fl, k = 5, fill = NA, align = "center"),
+    roll_sd = rollapply(fl, width = 5, FUN = sd, fill = NA, align = "center"),
+    # Z-score relative to local conditions
+    local_zscore = abs(fl - roll_mean) / roll_sd,
+    # Growth factor
+    gf = c(NA, diff(fl)/lag(fl)[-1]),
+    # Flag extreme values
+    spike_flag = local_zscore > 3 | abs(gf) > 1 | fl < 0 | fl > 50
+  ) %>%
+  filter(!spike_flag) %>%
+  ungroup()
+
+chl_22_cpd  <- chl_22 %>% 
+  group_by(group) %>% 
+  arrange(measurementTime_2) %>%
+  mutate(
+    # First derivative (growth factor)
+    gf = (fl - lag(fl)) / lag(fl),
+    # Second derivative (change in growth factor)
+    gf2 = gf - lag(gf),
+    # Adaptive thresholds
+    gf_threshold = quantile(abs(gf), 0.95, na.rm = TRUE),
+    gf2_threshold = quantile(abs(gf2), 0.95, na.rm = TRUE),
+    # Flag spikes
+    spike_flag = abs(gf) > gf_threshold | 
+                 abs(gf2) > gf2_threshold | 
+                 fl < 0 | 
+                 fl > 50
+  ) %>%
+  filter(!spike_flag) %>%
+  ungroup()
+
+clean_fluorometry <- function(data, max_iter = 5) {
+  for(i in 1:max_iter) {
+    n_before <- nrow(data)
+    
+    data <- data %>%
+      group_by(group) %>%
+      mutate(
+        gf = c(NA, diff(fl)/lag(fl)[-1]),
+        gf_mad = mad(gf, na.rm = TRUE),  # Median absolute deviation
+        gf_median = median(gf, na.rm = TRUE),
+        outlier = abs(gf - gf_median) > 3 * gf_mad | fl < 0 | fl > 50
+      ) %>%
+      filter(!outlier) %>%
+      select(-gf_mad, -gf_median, -outlier) %>%
+      ungroup()
+    
+    n_after <- nrow(data)
+    removed <- n_before - n_after
+    
+    cat(sprintf("Iteration %d: removed %d points\n", i, removed))
+    
+    # Stop if very few points removed
+    if(removed < 0.001 * n_before) break
+  }
+  return(data)
+}
+
+chl_22_qc_it <- clean_fluorometry(chl_22)
+```
+
 
 ```{r}
 f2 <- chl_22_q1 %>%
@@ -128,23 +221,47 @@ f2 <- chl_22_q1 %>%
         text = element_text(size = 35), #35
         axis.text = element_text(color = "black"),
         axis.title.x = element_blank())
+
+print(f2)
+
 ```
 
 ```{r}
-chl_22_q1 %>% 
-  filter(date > "2024-05-20" & date < "2024-05-30") %>% 
-  ggplot(aes(x = measurementTime_2, y = fl)) +
+chl_22_qc_it %>%
+  ggplot(aes(measurementTime_2, fl)) +
   geom_line() +
-    geom_rect(aes(xmin = hour <= 6, xmax = hour >= 20,
-                  ymin = 0, ymax = 30),
-               fill = "transparent", color = "red", size = 1.5)
+  labs(y = "Fluorescence") +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
 ```
+
+
+
+
+
 
 
 
 
 ```{r}
 chl_22_q2 <- chl_22_q1 %>%
+  group_by(date) %>%
+  filter(hour <= 6 | hour >= 20) %>% #This filters out anything before 6am and after 9pm
+  ungroup() %>%
+  mutate(date_corr = case_when(hour >= 0 & hour <= 6 ~ (date-1),
+                              TRUE ~ as.Date(date))) %>% 
+  group_by(month, group) %>%
+  mutate(sd_all = sd(fl),
+         mean_all = mean(fl),
+         sd_mean_all = (fl - mean_all)/sd_all,
+         cv = (sd_all/mean_all)*100,
+         cv100 = cv*2) %>% 
+  ungroup()
+
+chl_22_q2_it <- chl_22_qc_it %>%
   group_by(date) %>%
   filter(hour <= 6 | hour >= 20) %>% #This filters out anything before 6am and after 9pm
   ungroup() %>%
@@ -173,21 +290,55 @@ f3 <- chl_22_q2 %>%
         text = element_text(size = 35), #35
         axis.text = element_text(color = "black"),
         axis.title.x = element_blank())
+
+print(f3)
 ```
+
+```{r}
+chl_22_q2_it %>% 
+  ggplot(aes(measurementTime_2, fl)) +
+  geom_line() +
+  geom_point(data = filter(chl_22_q2_it, sd_mean_all > 4), color = "red") +
+  geom_vline(xintercept = lubridate::ymd_hms("2022-05-16 00:12:00"), color = "red",
+             size = 2) +
+  labs(y = "Fluorescence") +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+
+```
+
 
 ```{r}
 chl_22_q3 <- chl_22_q2 %>% 
   filter(sd_mean_all < 3) %>% 
+  filter(sd_mean_all > -3)
+
+chl_22_q3_it <- chl_22_q2_it %>% 
+  filter(sd_mean_all < 3) %>%
   filter(sd_mean_all > -3)
 ```
 
 ```{r}
 chl_22_q3 %>% 
   ggplot(aes(measurementTime_2, fl)) +
-  geom_line() 
+  geom_line()
+
+chl_22_q3_it %>% 
+  ggplot(aes(measurementTime_2, fl)) +
+  geom_line()
 ```
+
 ```{r}
-chl_22_q3 <- chl_22_q2 %>% 
+chl_22_q3 <- chl_22_q3 %>% 
+  group_by(date_corr) %>% 
+  mutate(fl_med_day = median(fl), 
+         fl_med_3 = zoo::rollapply(fl, 3, median, align = 'right', fill = NA),) %>% 
+  ungroup()
+
+chl_22_q3_it <- chl_22_q3_it %>% 
   group_by(date_corr) %>% 
   mutate(fl_med_day = median(fl), 
          fl_med_3 = zoo::rollapply(fl, 3, median, align = 'right', fill = NA),) %>% 
@@ -232,6 +383,53 @@ fig <- f1/f2/f3/f4/f5 + plot_layout(axis_titles = "collect")
 ggsave(here("figures", "buoy_2024_correction.png"), fig,
         width = 16, height = 12, dpi = 300)
 ```
+
+```{r}
+chl_22_q3 %>%
+  left_join(cd) %>% 
+  ggplot() +
+  geom_line(aes(date_corr, fl_med_day), size = 2, color = "blue") +
+  geom_point(aes(date, chla), size = 3, pch = 21, fill = "white", stroke = 1.5) +
+  labs(y = "Fluorescence") +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+```
+```{r}
+chl_22_q3_it %>%
+  left_join(cd) %>% 
+  ggplot() +
+  geom_line(aes(date_corr, fl_med_day), size = 2, color = "blue") +
+  geom_point(aes(date, chla), size = 3, pch = 21, fill = "white", stroke = 1.5) +
+  labs(y = "Fluorescence") +
+  theme_bw() +
+  theme(legend.position = "none",
+        text = element_text(size = 35), #35
+        axis.text = element_text(color = "black"),
+        axis.title.x = element_blank())
+```
+
+```{r}
+compare_og <- chl_22_q3 %>% 
+  select(date_corr, fl_og = fl_med_day) %>% 
+  distinct()
+
+compare_it <- chl_22_q3_it %>% 
+  select(date_corr, fl_it = fl_med_day) %>% 
+  distinct()
+
+compare <- compare_og %>% 
+  left_join(compare_it)
+```
+```{r}
+compare %>% 
+  ggplot(aes(x = fl_og, y = fl_it)) +
+  geom_point()
+```
+
+
 
 ```{r}
 join_test <- chl_22_q3 %>%
