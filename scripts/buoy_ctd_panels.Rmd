@@ -1716,7 +1716,7 @@ ggplot() +
                      expand = expansion(mult = c(0.05, 0.05))) +
   
   # Faceting by year
-  facet_grid(. ~ year, 
+  facet_wrap(~ year, 
              labeller = label_both,
              scales = "free_x") +
   
@@ -1738,6 +1738,540 @@ ggplot() +
   labs(title = "Extended Wind Patterns Around April Sampling",
        subtitle = "30 days before sampling + remainder of sampling month\nSE Component (black line) vs Wind Speed (colored points) - Daily averages",
        caption = paste("Grey boxes: 19-day backward averaging periods | Red lines: Sampling dates"))
+
+ggsave(here("figures", "lag_period_test.png"),
+        width = 16, height = 8, dpi = 300)
+```
+```{r}
+# Prepare sampling dates first to determine date range
+sampling_dates <- f %>%
+  mutate(year = year(date),
+         month = month(date)) %>%
+  filter(month == 4, year %in% c(2014, 2015, 2018, 2021, 2022))
+
+# Create expanded date ranges: 30 days before sampling + rest of sampling month
+date_ranges <- sampling_dates %>%
+  mutate(
+    start_date = date - days(30),
+    end_date = ceiling_date(date, "month") - days(1)  # Last day of sampling month
+  ) %>%
+  select(year, date, start_date, end_date)
+
+# Prepare wind data with expanded date range
+wind_plot_data <- wind_calc %>% 
+  mutate(wind_date = date(measurementTime),
+         year = year(wind_date),
+         se_component = (u - v) / sqrt(2)) %>%
+  # Filter for years of interest first
+  filter(year %in% c(2014, 2015, 2018, 2021, 2022)) %>%
+  # Join with date ranges
+  left_join(date_ranges %>% select(year, sampling_date = date, start_date, end_date), 
+            by = "year", 
+            relationship = "many-to-many") %>%
+  # Filter using the renamed columns
+  filter(wind_date >= start_date & wind_date <= end_date) %>%
+  # Convert to daily averages
+  group_by(wind_date, year) %>%
+  summarise(
+    ws = mean(ws, na.rm = TRUE),
+    wd = mean(wd, na.rm = TRUE),
+    se_component = mean(se_component, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  # Add month-day for x-axis
+  mutate(month_day = format(wind_date, "%m-%d")) %>%
+  rename(date = wind_date)
+
+# Calculate 19-day SE-NW component averages for each sampling period
+se_averages <- sampling_dates %>%
+  mutate(
+    period_start = date - days(18),  # 19 days including sampling day
+    period_end = date
+  ) %>%
+  left_join(
+    wind_plot_data %>% select(date, year, se_component),
+    by = "year",
+    relationship = "many-to-many"
+  ) %>%
+  filter(date.y >= period_start & date.y <= period_end) %>%
+  group_by(year, date.x) %>%
+  summarise(
+    se_avg_19day = mean(se_component, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  rename(date = date.x) %>%
+  left_join(sampling_dates, by = c("year", "date"))
+
+# Prepare sampling date markers with 19-day backward period and averages
+sampling_markers <- se_averages %>%
+  mutate(
+    period_start = date - days(18),  # 19 days including sampling day
+    period_end = date,
+    month_day = format(date, "%m-%d"),
+    period_start_md = format(period_start, "%m-%d"),
+    period_end_md = format(period_end, "%m-%d"),
+    # Format the average for display
+    se_avg_label = paste0("19-day SE avg:\n", round(se_avg_19day, 2), " m/s")
+  )
+
+# Create the enhanced plot
+ggplot() +
+  # Add grey boxes for 19-day backward periods
+  geom_rect(data = sampling_markers,
+            aes(xmin = period_start_md, 
+                xmax = period_end_md,
+                ymin = -Inf, 
+                ymax = Inf),
+            fill = "grey80", 
+            alpha = 0.6) +
+  
+  # Wind speed points colored by direction
+  geom_point(data = wind_plot_data,
+             aes(x = month_day, y = ws, color = wd),
+             size = 1.8, alpha = 0.8) +
+  
+  # SE component line
+  geom_line(data = wind_plot_data,
+            aes(x = month_day, y = se_component, group = year),
+            color = "black", 
+            linewidth = 0.9,
+            alpha = 0.9) +
+  
+  # Vertical lines for exact sampling dates
+  geom_vline(data = sampling_markers,
+             aes(xintercept = month_day),
+             color = "red", 
+             linewidth = 1.2,
+             alpha = 0.8) +
+  
+  # Add SE average text labels in grey boxes
+  geom_text(data = sampling_markers,
+            aes(x = period_start_md, 
+                y = Inf,
+                label = se_avg_label),
+            hjust = 0, 
+            vjust = 1.1,
+            size = 3.5,
+            color = "darkblue",
+            fontface = "bold",
+            background = "white") +
+  
+  # Color scale for wind direction
+  scale_color_viridis_c(option = "turbo", 
+                        name = "Wind Direction\n(degrees)",
+                        guide = guide_colorbar(barwidth = 1, 
+                                              barheight = 8)) +
+  
+  # X-axis with better date formatting
+  scale_x_discrete(name = "Date (Month-Day)",
+                   breaks = function(x) {
+                     # Show every 5th date for readability
+                     indices <- seq(1, length(x), by = 5)
+                     return(x[indices])
+                   }) +
+  
+  scale_y_continuous(name = bquote("Wind Speed"~(m~s^-1)~"/ SE Component"),
+                     expand = expansion(mult = c(0.1, 0.05))) +  # Extra space at top for labels
+  
+  # Faceting by year
+  facet_wrap(~ year, 
+             labeller = label_both,
+             scales = "free_x") +
+  
+  # Theme
+  theme_bw() +
+  theme(
+    panel.grid.minor.x = element_line(color = "grey95", size = 0.3),
+    panel.grid.major = element_line(color = "grey90", size = 0.5),
+    text = element_text(size = 12),
+    strip.text = element_text(size = 14, face = "bold"),
+    axis.text = element_text(color = "black"),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    legend.position = "right",
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12, color = "grey30")
+  ) +
+  
+  # Labels and title
+  labs(title = "Extended Wind Patterns Around April Sampling",
+       subtitle = "30 days before sampling + remainder of sampling month\nSE Component (black line) vs Wind Speed (colored points) - Daily averages",
+       caption = paste("Grey boxes: 19-day backward averaging periods with SE-NW component averages | Red lines: Sampling dates"))
+
+ggsave(here("figures", "lag_period_test_with_averages.png"),
+        width = 16, height = 8, dpi = 300)
+```
+```{r}
+# Prepare sampling dates first to determine date range
+sampling_dates <- f %>%
+  mutate(year = year(date),
+         month = month(date)) %>%
+  filter(month == 4, year %in% c(2014, 2015, 2018, 2021, 2022, 2024))
+
+# Create expanded date ranges: 30 days before sampling + rest of sampling month
+date_ranges <- sampling_dates %>%
+  mutate(
+    start_date = date - days(30),
+    end_date = ceiling_date(date, "month") - days(1)  # Last day of sampling month
+  ) %>%
+  select(year, date, start_date, end_date)
+
+# Prepare wind data with expanded date range
+wind_plot_data <- wind_calc %>% 
+  mutate(wind_date = date(measurementTime),
+         year = year(wind_date),
+         se_component = (u - v) / sqrt(2)) %>%
+  # Filter for years of interest first
+  filter(year %in% c(2014, 2015, 2018, 2021, 2022, 2024)) %>%
+  # Join with date ranges
+  left_join(date_ranges %>% select(year, sampling_date = date, start_date, end_date), 
+            by = "year", 
+            relationship = "many-to-many") %>%
+  # Filter using the renamed columns
+  filter(wind_date >= start_date & wind_date <= end_date) %>%
+  # Convert to daily averages
+  group_by(wind_date, year) %>%
+  summarise(
+    ws = mean(ws, na.rm = TRUE),
+    wd = mean(wd, na.rm = TRUE),
+    se_component = mean(se_component, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  # Add month-day for x-axis
+  mutate(month_day = format(wind_date, "%m-%d")) %>%
+  rename(date = wind_date)
+
+# Calculate 19-day SE-NW component averages for each sampling period
+se_averages <- sampling_dates %>%
+  mutate(
+    period_start = date - days(18),  # 19 days including sampling day
+    period_end = date
+  ) %>%
+  left_join(
+    wind_plot_data %>% select(date, year, se_component),
+    by = "year",
+    relationship = "many-to-many"
+  ) %>%
+  filter(date.y >= period_start & date.y <= period_end) %>%
+  group_by(year, date.x) %>%
+  summarise(
+    se_avg_19day = mean(se_component, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  rename(date = date.x) %>%
+  left_join(sampling_dates, by = c("year", "date"))
+
+# Handle overlapping periods and prepare sampling markers
+sampling_markers <- se_averages %>%
+  mutate(
+    period_start = date - days(18),
+    period_end = date,
+    month_day = format(date, "%m-%d"),
+    period_start_md = format(period_start, "%m-%d"),
+    period_end_md = format(period_end, "%m-%d")
+  ) %>%
+  # Check for overlapping periods within each year and average if needed
+  group_by(year) %>%
+  arrange(date) %>%
+  mutate(
+    # Create groups for overlapping periods
+    overlap_group = cumsum(c(TRUE, diff(as.numeric(date)) > 18))
+  ) %>%
+  group_by(year, overlap_group) %>%
+  summarise(
+    # For overlapping periods, use the mean date and average the SE values
+    date = if(n() > 1) as.Date(mean(as.numeric(date)), origin = "1970-01-01") else first(date),
+    period_start = min(date) - days(18),
+    period_end = max(date),
+    se_avg_19day = mean(se_avg_19day, na.rm = TRUE),
+    # Use earliest start and latest end for the box
+    period_start_md = format(min(date) - days(18), "%m-%d"),
+    period_end_md = format(max(date), "%m-%d"),
+    month_day = format(if(n() > 1) as.Date(mean(as.numeric(date)), origin = "1970-01-01") else first(date), "%m-%d"),
+    n_samples = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    # Format the average for display, noting if multiple samples were averaged
+    se_avg_label = if_else(n_samples > 1,
+                          paste0("19-day SE avg:\n", round(se_avg_19day, 2), " m/s\n(", n_samples, " samples)"),
+                          paste0("19-day SE avg:\n", round(se_avg_19day, 2), " m/s")),
+    # Add vertical offset for label positioning to prevent overlap
+    label_offset = (row_number() - 1) * 0.15  # Stagger labels vertically
+  )
+
+# Create the enhanced plot
+ggplot() +
+  # Add grey boxes for 19-day backward periods
+  geom_rect(data = sampling_markers,
+            aes(xmin = period_start_md, 
+                xmax = period_end_md,
+                ymin = -Inf, 
+                ymax = Inf),
+            fill = "grey80", 
+            alpha = 0.6) +
+  
+  # Wind speed points colored by direction
+  geom_point(data = wind_plot_data,
+             aes(x = month_day, y = ws, color = wd),
+             size = 1.8, alpha = 0.8) +
+  
+  # SE component line
+  geom_line(data = wind_plot_data,
+            aes(x = month_day, y = se_component, group = year),
+            color = "black", 
+            linewidth = 0.9,
+            alpha = 0.9) +
+  
+  # Vertical lines for exact sampling dates
+  geom_vline(data = sampling_markers,
+             aes(xintercept = month_day),
+             color = "red", 
+             linewidth = 1.2,
+             alpha = 0.8) +
+  
+  geom_hline(yintercept =  0) +
+  
+  # Add SE average text labels in grey boxes
+  geom_text(data = sampling_markers,
+            aes(x = period_start_md, 
+                y = Inf,
+                label = se_avg_label),
+            hjust = 0, 
+            vjust = 1.1,
+            size = 3.5,
+            color = "darkblue",
+            fontface = "bold",
+            background = "white") +
+  
+  # Color scale for wind direction
+  scale_color_viridis_c(option = "turbo", 
+                        name = "Wind Direction\n(degrees)",
+                        guide = guide_colorbar(barwidth = 1, 
+                                              barheight = 8)) +
+  
+  # X-axis with better date formatting
+  scale_x_discrete(name = "Date (Month-Day)",
+                   breaks = function(x) {
+                     # Show every 5th date for readability
+                     indices <- seq(1, length(x), by = 5)
+                     return(x[indices])
+                   }) +
+  
+  scale_y_continuous(name = bquote("Wind Speed"~(m~s^-1)~"/ SE Component"),
+                     expand = expansion(mult = c(0.1, 0.05))) +  # Extra space at top for labels
+  
+  # Faceting by year
+  facet_wrap(~ year, 
+             labeller = label_both,
+             scales = "free_x") +
+  
+  # Theme
+  theme_bw() +
+  theme(
+    panel.grid.minor.x = element_line(color = "grey95", size = 0.3),
+    panel.grid.major = element_line(color = "grey90", size = 0.5),
+    text = element_text(size = 12),
+    strip.text = element_text(size = 14, face = "bold"),
+    axis.text = element_text(color = "black"),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    legend.position = "right",
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12, color = "grey30")
+  ) +
+  
+  # Labels and title
+  labs(title = "Extended Wind Patterns Around April Sampling",
+       subtitle = "30 days before sampling + remainder of sampling month\nSE Component (black line) vs Wind Speed (colored points) - Daily averages",
+       caption = paste("Grey boxes: 19-day backward averaging periods with SE-NW component averages | Red lines: Sampling dates"))
+
+ggsave(here("figures", "lag_period_test_with_averages2.png"),
+        width = 16, height = 8, dpi = 300)
+```
+```{r}
+# Prepare sampling dates first to determine date range
+sampling_dates <- f %>%
+  mutate(year = year(date),
+         month = month(date)) %>%
+  filter(month == 4, year %in% c(2014, 2015, 2018, 2021, 2022, 2024))
+
+# Create expanded date ranges: 30 days before sampling + rest of sampling month
+date_ranges <- sampling_dates %>%
+  mutate(
+    start_date = date - days(30),
+    end_date = ceiling_date(date, "month") - days(1)  # Last day of sampling month
+  ) %>%
+  select(year, date, start_date, end_date)
+
+# Prepare wind data with expanded date range
+wind_plot_data <- wind_calc %>% 
+  mutate(wind_date = date(measurementTime),
+         year = year(wind_date),
+         se_component = (u - v) / sqrt(2)) %>%
+  # Filter for years of interest first
+  filter(year %in% c(2014, 2015, 2018, 2021, 2022, 2024)) %>%
+  # Join with date ranges
+  left_join(date_ranges %>% select(year, sampling_date = date, start_date, end_date), 
+            by = "year", 
+            relationship = "many-to-many") %>%
+  # Filter using the renamed columns
+  filter(wind_date >= start_date & wind_date <= end_date) %>%
+  # Convert to daily averages
+  group_by(wind_date, year) %>%
+  summarise(
+    ws = mean(ws, na.rm = TRUE),
+    wd = mean(wd, na.rm = TRUE),
+    se_component = mean(se_component, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  # Add month-day for x-axis
+  mutate(month_day = format(wind_date, "%m-%d")) %>%
+  rename(date = wind_date)
+
+# Calculate 19-day SE-NW component averages for each sampling period
+se_averages <- sampling_dates %>%
+  mutate(
+    period_start = date - days(18),  # 19 days including sampling day
+    period_end = date
+  ) %>%
+  left_join(
+    wind_plot_data %>% select(date, year, se_component),
+    by = "year",
+    relationship = "many-to-many"
+  ) %>%
+  filter(date.y >= period_start & date.y <= period_end) %>%
+  group_by(year, date.x) %>%
+  summarise(
+    se_avg_19day = mean(se_component, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  rename(date = date.x) %>%
+  left_join(sampling_dates, by = c("year", "date"))
+
+# Handle overlapping periods and prepare sampling markers
+sampling_markers <- se_averages %>%
+  mutate(
+    period_start = date - days(18),
+    period_end = date,
+    month_day = format(date, "%m-%d"),
+    period_start_md = format(period_start, "%m-%d"),
+    period_end_md = format(period_end, "%m-%d")
+  ) %>%
+  # Check for overlapping periods within each year and average if needed
+  group_by(year) %>%
+  arrange(date) %>%
+  mutate(
+    # Create groups for overlapping periods
+    overlap_group = cumsum(c(TRUE, diff(as.numeric(date)) > 18))
+  ) %>%
+  group_by(year, overlap_group) %>%
+  summarise(
+    # For overlapping periods, use the mean date and average the SE values
+    date = if(n() > 1) as.Date(mean(as.numeric(date)), origin = "1970-01-01") else first(date),
+    period_start = min(date) - days(18),
+    period_end = max(date),
+    se_avg_19day = mean(se_avg_19day, na.rm = TRUE),
+    # Use earliest start and latest end for the box
+    period_start_md = format(min(date) - days(18), "%m-%d"),
+    period_end_md = format(max(date), "%m-%d"),
+    month_day = format(if(n() > 1) as.Date(mean(as.numeric(date)), origin = "1970-01-01") else first(date), "%m-%d"),
+    n_samples = n(),
+    .groups = "drop"
+  ) %>%
+  mutate(
+    # Format the average for display, noting if multiple samples were averaged
+    se_avg_label = if_else(n_samples > 1,
+                          paste0("19-day SE avg:\n", round(se_avg_19day, 2), " m/s\n(", n_samples, " samples)"),
+                          paste0("19-day SE avg:\n", round(se_avg_19day, 2), " m/s")),
+    # Add vertical offset for label positioning to prevent overlap
+    label_offset = (row_number() - 1) * 0.15  # Stagger labels vertically
+  )
+
+# Create the enhanced plot
+ggplot() +
+  # Add grey boxes for 19-day backward periods
+  geom_rect(data = sampling_markers,
+            aes(xmin = period_start_md, 
+                xmax = period_end_md,
+                ymin = -Inf, 
+                ymax = Inf),
+            fill = "grey80", 
+            alpha = 0.6) +
+  
+  # SE component line
+  geom_line(data = wind_plot_data,
+            aes(x = month_day, y = se_component, group = year),
+            color = "black", 
+            linewidth = 0.9,
+            alpha = 0.9) +
+  
+  # SE component points colored by wind speed
+  geom_point(data = wind_plot_data,
+             aes(x = month_day, y = se_component, color = ws),
+             size = 2.2, alpha = 0.8) +
+  
+  # Vertical lines for exact sampling dates
+  geom_vline(data = sampling_markers,
+             aes(xintercept = month_day),
+             color = "red", 
+             linewidth = 1.2,
+             alpha = 0.8) +
+  
+  geom_hline(yintercept = 0) +
+  
+  # Add SE average text labels in grey boxes with offset positioning
+  geom_text(data = sampling_markers,
+            aes(x = period_start_md, 
+                y = Inf,
+                label = se_avg_label),
+            hjust = 0, 
+            vjust = 1.1 + sampling_markers$label_offset,  # Use offset to prevent overlap
+            size = 3.5,
+            color = "darkblue",
+            fontface = "bold") +
+  
+  # Color scale for wind speed
+  scale_color_viridis_c(option = "plasma", 
+                        name = "Wind Speed\n(m/s)",
+                        guide = guide_colorbar(barwidth = 1, 
+                                              barheight = 8)) +
+  
+  # X-axis with better date formatting
+  scale_x_discrete(name = "Date (Month-Day)",
+                   breaks = function(x) {
+                     # Show every 5th date for readability
+                     indices <- seq(1, length(x), by = 5)
+                     return(x[indices])
+                   }) +
+  
+  scale_y_continuous(name = "SE-NW Wind Component (m/s)",
+                     expand = expansion(mult = c(0.1, 0.05))) +  # Extra space at top for labels
+  
+  # Faceting by year
+  facet_wrap(~ year, 
+             labeller = label_both,
+             scales = "free_x") +
+  
+  # Theme
+  theme_bw() +
+  theme(
+    panel.grid.minor.x = element_line(color = "grey95", size = 0.3),
+    panel.grid.major = element_line(color = "grey90", size = 0.5),
+    text = element_text(size = 12),
+    strip.text = element_text(size = 14, face = "bold"),
+    axis.text = element_text(color = "black"),
+    axis.text.x = element_text(angle = 45, hjust = 1, size = 10),
+    legend.position = "right",
+    plot.title = element_text(size = 16, face = "bold"),
+    plot.subtitle = element_text(size = 12, color = "grey30")
+  ) +
+  
+  # Labels and title
+  labs(title = "SE-NW Wind Component Around April Sampling",
+       subtitle = "30 days before sampling + remainder of sampling month\nSE Component line with points colored by wind speed - Daily averages",
+       caption = paste("Grey boxes: 19-day backward averaging periods with SE-NW component averages | Red lines: Sampling dates"))
+
+ggsave(here("figures", "lag_period_test_with_averages3.png"),
+        width = 16, height = 8, dpi = 300)
 ```
 
 
