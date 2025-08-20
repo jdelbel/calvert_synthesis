@@ -346,19 +346,24 @@ plot_qc_progression <- function(qc_steps) {
 
 
 #Downloading hourly data from the KC10 buoy fl
-chl <- read_csv(here("files", "2024-12-05.1hourSamples.all.csv"))
+chl <- read_csv(here("files", "2025-08-20.1hourSamples.all.csv"))
+
+# 2024-12-05.1hourSamples.all
+# 2025-08-20.1hourSamples.all
 
 # Define your 2024 bad period
 bad_periods_2024 <- list(
-  list(start = "2024-03-20",
-       end = "2024-03-25",
-       description = "Instrument failure")
+  list(start = "2023-05-06", end = "2023-12-31", description = "Instrument failure"),
+  list(start = "2024-03-20", end = "2024-03-25", description = "Instrument failure"),
+  list(start = "2024-12-24", end = "2024-12-31", description = "Instrument failure"),
+  list(start = "2025-04-28", end = "2025-05-11", description = "Turn Around"),
+  list(start = "2025-07-10", end = "2025-07-14", description = "Instrument failure")
 )
 
 # # Prepare data
 chl_multi <- prepare_fluorometry_data(
   chl_data = chl,
-  years = c(2022, 2024),
+  years = c(2022, 2023, 2024, 2025),
   bad_periods = bad_periods_2024
 )
 
@@ -369,74 +374,14 @@ qc_results <- fluorometry_qc_pipeline(chl_multi)
 progression_plot <- plot_qc_progression(qc_results)
 print(progression_plot)
   # 
-  # # Access final cleaned dataset
-  # final_data <- qc_results$final
+# # Access final cleaned dataset
+final_data <- qc_results$final
   
-  
-chl_22 <- chl %>%
-  filter(year == 2024)
+final_data %>% 
+  select(date_corr, fl_med_day, group) %>% 
+  distinct() %>% 
+  filter(date_corr > "2022-01-01") %>% 
+  ggplot(aes(x = date_corr, y = fl_med_day, color = as.factor(group))) +
+  geom_line()
 
-# %>% 
-#   select(measurementTime:year, fl = Fluorometer) %>% 
-#   mutate(measurementTime_2 = lubridate::mdy_hm(measurementTime),
-#          date = lubridate::date(measurementTime_2),
-#          month = lubridate::month(measurementTime_2),
-#          hour = lubridate::hour(measurementTime_2)) %>% 
-#   mutate(group = 1)
-# # %>% 
-#   # mutate(group = case_when(date > "2024-03-25" ~ 2, #Prior to bad data gap
-#   #                          date < "2024-03-20" ~ 1)) %>% #after bad data gap.
-#   filter(date >= "2024-03-25" |
-#            date <= "2024-03-20")
-
-  
-  # ============================================================================
-  # USAGE EXAMPLES
-  # ============================================================================
-  
-  # Example 1: Single year (2024) with bad data period
-  # bad_periods_2024 <- list(
-  #   list(start = "2024-03-20", end = "2024-03-25", description = "Instrument failure")
-  # )
-  # 
-  # # Prepare data
-  # chl_22 <- prepare_fluorometry_data(
-  #   chl_data = chl, 
-  #   years = 2024,
-  #   bad_periods = bad_periods_2024,
-  #   fluorescence_col = c("Chlorophyll", "Fluorometer")
-  # )
-  # 
-  # # Run QC pipeline
-  # qc_results <- fluorometry_qc_pipeline(chl_22)
-  # progression_plot <- plot_qc_progression(qc_results)
-  # print(progression_plot)
-  
-  # Example 2:  = "2022-07-15", end = "2022-07-20", description = "Buoy turnaround"),
-  #   list(start = "2023-05-01", end = "2023-05-10", description = "Maintenance"),
-  #   list(start = "2024-03-20", end = "2024-03-25", description = "Instrument failure")
-  # )Multiple years with various bad periods
-  # bad_periods_multi <- list(
-  #   list(start
-  # 
-  # # Prepare multi-year data
-  # chl_multi <- prepare_fluorometry_data(
-  #   chl_data = chl,
-  #   years = c(2022, 2023, 2024),
-  #   bad_periods = bad_periods_multi
-  # )
-  # 
-  # # Run QC pipeline
-  # qc_results_multi <- fluorometry_qc_pipeline(chl_multi)
-  
-  # Example 3: No bad periods (simple yearly grouping)
-  # chl_simple <- prepare_fluorometry_data(
-  #   chl_data = chl,
-  #   years = c(2023, 2024),
-  #   bad_periods = NULL
-  # )  
-  
-# ============================================================================
-# USAGE EXAMPLE
-# ============================================================================
-
+write.csv(final_data, here("outputs", "qc_buoy_2025-08-20.csv."))
