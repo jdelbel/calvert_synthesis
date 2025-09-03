@@ -1,0 +1,901 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+#Upload packages
+library(tidyverse)
+library(here)
+library(readxl)
+library(patchwork)
+library(lubridate)
+library(MBA)
+library(mgcv)
+library(FNN)
+library(zoo)
+library(reshape2)
+library(rioja)
+library(egg)
+library(palr)
+library(ggsci)
+
+```
+
+```{r}
+#Uploading files
+
+#Uploading QC'd buoy data
+b <- read.csv(here("outputs", "qc_buoy_2025-08-20.csv"))
+
+#Uploading lookout wind data
+w <- read_csv(here("files", "2025-08-20.1hourSamples_wind.all.csv"))
+
+#Uploading Pruth PAR data
+p <- read_csv(here("files", "2025-08-21.1hourSamples_par_pruth.all.csv"))
+
+#Uploading koeye Para data
+pk_25 <- read_csv(here("files", "2025-08-21.1hourSamples_par_koeye.2025.csv"))
+  
+#Uploading wrangled weather data
+weath <- read_csv(here("outputs", "enviro_weather_2025-04-14.csv"))
+```
+
+```{r}
+#Old files that could be useful
+
+# bsal <- read.csv(here("files", "buoy_ts_all.csv"))
+# wind <- read_csv(here("files", "wind_all.csv"))
+
+# #Downloading discrete chlorophyll samples
+# cd <- read_csv(here("files", "2025-03-25_HakaiData_chlorophyll.csv"))
+```
+
+```{r}
+#Setting data formats, calculating u and v components and correcting to SE wind component.
+w2 <- w %>% 
+  mutate(measurementTime2 = mdy_hm(measurementTime),
+         date = date(measurementTime2),
+         year = year(date)) %>%
+  # filter(year > 2021) %>% 
+  select(date, measurementTime = measurementTime2,
+         ws = WindSpd_Avg, wd = WindDir_Avg) %>% 
+  mutate(
+    # Convert to meteorological convention (direction wind is coming FROM)
+    # u = eastward component, v = northward component
+    u = -ws * sin(wd * pi/180),  # Negative because wd is "from" direction
+    v = -ws * cos(wd * pi/180),
+    # Calculate SE component for each hourly observation
+    se_component = (u - v) / sqrt(2)) %>%
+  pivot_longer(c(ws:se_component), values_to = "val", names_to = "par") %>% 
+  group_by(date, par) %>%
+  summarise(dm = mean(val, na.rm = T)) %>% 
+  ungroup() 
+
+#Pivoting wider for joining with other data
+w2_wide <- w2 %>% 
+  pivot_wider(names_from = "par", values_from = "dm") %>% 
+  mutate(year = year(date)) %>% 
+  group_by(year) %>% 
+  mutate(c_sum = cumsum(se_component)) %>% 
+  ungroup()
+```
+
+```{r}
+#Working with PRUTH data for years with good data available
+p2 <- p %>% 
+  mutate(measurementTime2 = mdy_hm(measurementTime),
+         date = date(measurementTime2),
+         year = year(date)) %>%
+  filter(year < 2025) %>% 
+  select(date, year, measurementTime = measurementTime2,
+         PAR_Avg) %>% 
+  group_by(date) %>%
+  summarise(dm = mean(PAR_Avg)) %>% 
+  ungroup()
+
+#Using Koeye data for 2025 as PRUTH not available
+pk_25_2 <- pk_25 %>% 
+  mutate(measurementTime2 = mdy_hm(measurementTime),
+         date = date(measurementTime2),
+         year = year(date)) %>%
+  filter(year %in% c(2025)) %>% 
+  select(date, year, measurementTime = measurementTime2,
+         PAR_Avg) %>% 
+  group_by(date) %>%
+  summarise(dm = mean(PAR_Avg)) %>% 
+  ungroup()
+
+#combining the two datasets for plotting
+p2 <- rbind(p2, pk_25_2)
+
+p2 <- p2 %>% 
+  mutate(year = year(date))
+```
+
+
+```{r}
+#Wrangling buoy data for plotting
+b2 <- b %>% 
+  select(date = date_corr, fl_med_day, group) %>% 
+  distinct() %>% 
+  mutate(date = ymd(date),
+         year = year(date),
+         month = month(date),
+         yday = yday(date)) %>%
+  filter(year %in% c(2022, 2023, 2024, 2025)) %>% 
+  mutate(group = as.character(group))
+
+# Create a temporary dataset with dates of a the 2024 SB data gap.
+gap_dates <- data.frame(
+  date = seq(as.Date("2024-03-19"), as.Date("2024-03-24"), by = 1)
+)
+
+# Get the data surrounding the data gap and doing linear interpolation between dates.
+interp_window <- b2 %>%
+  filter(date >= "2024-03-15" & date <= "2024-03-30") %>%
+  bind_rows(gap_dates) %>%
+  arrange(date) %>%
+  mutate(
+    fl_med_day = na.approx(fl_med_day, na.rm = FALSE),
+    # Mark interpolated points
+    group = ifelse(
+      date >= "2024-03-19" & date <= "2024-03-24",
+      "interpolated",
+      group
+    )
+  )
+
+# Merge back with original data
+b24_gapfilled <- b2 %>%
+  bind_rows(
+    interp_window %>% filter(date >= "2024-03-19" & date <= "2024-03-24")
+  ) %>%
+  arrange(date) %>% 
+  mutate(date = ymd(date),
+         year = year(date),
+         month = month(date),
+         yday = yday(date)) 
+```
+
+```{r}
+# Function to identify bloom periods and calculate metrics
+calculate_bloom_metrics <- function(df, gap_tolerance = 0, smoothing = FALSE) {
+  
+  # Initialize results dataframe
+  bloom_summary <- data.frame()
+  
+  # Process each year separately
+  for (yr in unique(df$year)) {
+    
+    year_data <- df %>% 
+      filter(year == yr) %>%
+      arrange(date)
+    
+    # Skip if insufficient data for the year
+    if (nrow(year_data) < 30) {
+      warning(paste("Insufficient data for year", yr, "- skipping"))
+      next
+    }
+    
+    # Optional: Apply smoothing to reduce spikiness
+    if (smoothing) {
+      # 3-day rolling mean to smooth spikes
+      year_data$fl_smoothed <- zoo::rollmedian(year_data$fl_med_day, k = 3, 
+                                            fill = NA, align = "center")
+      year_data$fl_smoothed[is.na(year_data$fl_smoothed)] <- year_data$fl_med_day[is.na(year_data$fl_smoothed)]
+      comparison_var <- year_data$fl_smoothed
+    } else {
+      comparison_var <- year_data$fl_med_day
+    }
+    
+    # Calculate annual median
+    annual_median <- median(year_data$fl_med_day, na.rm = TRUE)
+    
+    # Define bloom threshold (5% above annual median)
+    bloom_threshold <- annual_median * 1.05
+    
+    # Identify days above threshold
+    year_data$above_threshold <- comparison_var > bloom_threshold
+    
+    # Apply gap tolerance - fill short gaps between bloom periods
+    if (gap_tolerance > 0) {
+      # Find gaps of <= gap_tolerance days and fill them
+      rle_result <- rle(year_data$above_threshold)
+      
+      # Identify short FALSE periods between TRUE periods
+      for (i in 2:(length(rle_result$lengths) - 1)) {
+        if (!rle_result$values[i] && rle_result$lengths[i] <= gap_tolerance &&
+            rle_result$values[i-1] && rle_result$values[i+1]) {
+          rle_result$values[i] <- TRUE
+        }
+      }
+      
+      # Reconstruct the vector
+      year_data$above_threshold <- inverse.rle(rle_result)
+    }
+    
+    # Find consecutive periods above threshold
+    # Create groups of consecutive TRUE values
+    year_data$group <- cumsum(c(1, diff(year_data$above_threshold) != 0))
+    
+    # Identify bloom periods (consecutive days >= 14 days above threshold)
+    bloom_periods <- year_data %>%
+      group_by(group, above_threshold) %>%
+      summarise(
+        start_date = min(date),
+        end_date = max(date),
+        duration = n(),
+        max_fl = max(fl_med_day, na.rm = TRUE),
+        max_fl_date = date[which.max(fl_med_day)],
+        # Additional metrics for gap-filled blooms
+        days_above_threshold = sum(fl_med_day > bloom_threshold),
+        percent_days_above = round(100 * sum(fl_med_day > bloom_threshold) / n(), 1),
+        .groups = 'drop'
+      ) %>%
+      filter(above_threshold == TRUE & duration >= 7)
+    
+    # Calculate year-level metrics
+    if (nrow(bloom_periods) > 0) {
+      
+      # Number of bloom events
+      n_bloom_events <- nrow(bloom_periods)
+      
+      # Spring bloom timing (first bloom of the year)
+      spring_bloom_start <- min(bloom_periods$start_date)
+      spring_bloom_yday <- yday(spring_bloom_start)
+      
+      # Annual peak chlorophyll value and timing
+      annual_peak_fl <- max(year_data$fl_med_day, na.rm = TRUE)
+      annual_peak_date <- year_data$date[which.max(year_data$fl_med_day)]
+      annual_peak_yday <- yday(annual_peak_date)
+      
+      # Individual bloom event details
+      bloom_events <- bloom_periods %>%
+        mutate(
+          year = yr,
+          bloom_number = row_number(),
+          start_yday = yday(start_date),
+          end_yday = yday(end_date)
+        ) %>%
+        select(year, bloom_number, start_date, end_date, start_yday, end_yday, 
+               duration, max_fl, max_fl_date, days_above_threshold, percent_days_above)
+      
+      # Year summary
+      year_summary <- data.frame(
+        year = yr,
+        annual_median = annual_median,
+        bloom_threshold = bloom_threshold,
+        n_bloom_events = n_bloom_events,
+        spring_bloom_start = spring_bloom_start,
+        spring_bloom_yday = spring_bloom_yday,
+        annual_peak_fl = annual_peak_fl,
+        annual_peak_date = annual_peak_date,
+        annual_peak_yday = annual_peak_yday,
+        total_bloom_days = sum(bloom_periods$duration)
+      )
+      
+    } else {
+      # No blooms detected for this year
+      annual_peak_fl <- max(year_data$fl_med_day, na.rm = TRUE)
+      annual_peak_date <- year_data$date[which.max(year_data$fl_med_day)]
+      annual_peak_yday <- yday(annual_peak_date)
+      
+      bloom_events <- data.frame()
+      
+      year_summary <- data.frame(
+        year = yr,
+        annual_median = annual_median,
+        bloom_threshold = bloom_threshold,
+        n_bloom_events = 0,
+        spring_bloom_start = as.Date(NA),
+        spring_bloom_yday = NA,
+        annual_peak_fl = annual_peak_fl,
+        annual_peak_date = annual_peak_date,
+        annual_peak_yday = annual_peak_yday,
+        total_bloom_days = 0
+      )
+    }
+    
+    # Store results
+    if (nrow(bloom_summary) == 0) {
+      bloom_summary <- year_summary
+      if (exists("all_bloom_events")) {
+        if (nrow(bloom_events) > 0) {
+          all_bloom_events <- rbind(all_bloom_events, bloom_events)
+        }
+      } else {
+        all_bloom_events <- bloom_events
+      }
+    } else {
+      bloom_summary <- rbind(bloom_summary, year_summary)
+      if (nrow(bloom_events) > 0) {
+        all_bloom_events <- rbind(all_bloom_events, bloom_events)
+      }
+    }
+  }
+  
+  # Return list with summary and detailed bloom events
+  result <- list(
+    annual_summary = bloom_summary,
+    bloom_events = if(exists("all_bloom_events")) all_bloom_events else data.frame()
+  )
+  
+  return(result)
+}
+```
+
+
+```{r}
+# Option 1: Default approach (original)
+bloom_metrics_original <- calculate_bloom_metrics(b24_gapfilled)
+
+# Option 2: Allow 3-day gaps (recommended for spiky data) 
+bloom_metrics_gap3 <- calculate_bloom_metrics(b24_gapfilled, gap_tolerance = 1,
+                                              smoothing = F)
+
+# Option 3: Use smoothing to reduce spikiness
+bloom_metrics_smooth <- calculate_bloom_metrics(b24_gapfilled, smoothing = TRUE)
+
+summary_annual <- bloom_metrics_smooth$annual_summary
+summary_event <- bloom_metrics_smooth$bloom_events
+
+# Option 4: Both gap tolerance and smoothing (most robust for noisy data)
+bloom_metrics_robust <- calculate_bloom_metrics(b24_gapfilled, gap_tolerance = 3, smoothing = TRUE)
+
+
+```
+
+
+```{r}
+# Create comparison visualizations showing different bloom detection approaches
+library(gridExtra)
+
+# Function to create a bloom visualization plot
+create_bloom_plot <- function(year_data, bloom_events, plot_title, method_subtitle) {
+  
+  annual_median <- median(year_data$fl_med_day, na.rm = TRUE)
+  bloom_threshold <- annual_median * 1.05
+  
+  p <- ggplot(year_data, aes(x = date, y = fl_med_day)) +
+    geom_line(color = "darkgreen", alpha = 0.8, size = 0.5) +
+    geom_hline(yintercept = annual_median, linetype = "dashed", color = "blue", 
+               alpha = 0.7, size = 0.8) +
+    geom_hline(yintercept = bloom_threshold, linetype = "solid", color = "red", 
+               alpha = 0.8, size = 0.8) +
+    labs(
+      title = plot_title,
+      subtitle = paste(method_subtitle, "| Blooms:", nrow(bloom_events)),
+      x = "Date",
+      y = "Fluorescence"
+    ) +
+    theme_minimal() +
+    theme(
+      plot.title = element_text(size = 11, hjust = 0.5),
+      plot.subtitle = element_text(size = 9, hjust = 0.5),
+      axis.text = element_text(size = 8),
+      axis.title = element_text(size = 9)
+    )
+  
+  # Add bloom period rectangles
+  if (nrow(bloom_events) > 0) {
+    for (i in 1:nrow(bloom_events)) {
+      p <- p + annotate("rect", 
+                       xmin = bloom_events$start_date[i], 
+                       xmax = bloom_events$end_date[i],
+                       ymin = -Inf, ymax = Inf, 
+                       alpha = 0.2, fill = "red")
+    }
+  }
+  
+  return(p)
+}
+```
+
+
+```{r}
+# Plot comparison for specified year
+plot_year <- 2024  # Change this to any year you want to visualize
+
+if (plot_year %in% unique(b24_gapfilled$year)) {
+  
+  year_data <- b24_gapfilled %>% filter(year == plot_year)
+  
+  # Create plots for each approach
+  p1 <- create_bloom_plot(
+    year_data, 
+    bloom_metrics_original$bloom_events %>% filter(year == plot_year),
+    paste("Original Approach -", plot_year),
+    "Strict threshold"
+  )
+  
+  p2 <- create_bloom_plot(
+    year_data, 
+    bloom_metrics_gap3$bloom_events %>% filter(year == plot_year),
+    paste("Gap Tolerance (3d) -", plot_year),
+    "3-day gaps filled"
+  )
+  
+  p3 <- create_bloom_plot(
+    year_data, 
+    bloom_metrics_smooth$bloom_events %>% filter(year == plot_year),
+    paste("Smoothed Data -", plot_year),
+    "3-day rolling mean"
+  )
+  
+  p4 <- create_bloom_plot(
+    year_data, 
+    bloom_metrics_robust$bloom_events %>% filter(year == plot_year),
+    paste("Robust Approach -", plot_year),
+    "Smoothed + 3d gaps"
+  )
+  
+  # Arrange plots in 2x2 grid
+  comparison_plot <- grid.arrange(p1, p2, p3, p4, ncol = 2, 
+                                 top = paste("Bloom Detection Method Comparison -", plot_year))
+  
+  # Also create a summary comparison table
+  cat("\n=== BLOOM DETECTION COMPARISON FOR", plot_year, "===\n")
+  comparison_summary <- data.frame(
+    Method = c("Original", "Gap Tolerance", "Smoothing", "Robust"),
+    N_Blooms = c(
+      nrow(bloom_metrics_original$bloom_events %>% filter(year == plot_year)),
+      nrow(bloom_metrics_gap3$bloom_events %>% filter(year == plot_year)),
+      nrow(bloom_metrics_smooth$bloom_events %>% filter(year == plot_year)),
+      nrow(bloom_metrics_robust$bloom_events %>% filter(year == plot_year))
+    ),
+    Total_Bloom_Days = c(
+      sum((bloom_metrics_original$bloom_events %>% filter(year == plot_year))$duration, na.rm = TRUE),
+      sum((bloom_metrics_gap3$bloom_events %>% filter(year == plot_year))$duration, na.rm = TRUE),
+      sum((bloom_metrics_smooth$bloom_events %>% filter(year == plot_year))$duration, na.rm = TRUE),
+      sum((bloom_metrics_robust$bloom_events %>% filter(year == plot_year))$duration, na.rm = TRUE)
+    )
+  )
+  
+  print(comparison_summary)
+  
+}
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+```{r}
+# Function to identify favorable conditions combining ws^3 and PAR
+identify_ws_cube_periods <- function(data) {
+  data %>%
+    filter(!is.na(ws)) %>%
+    arrange(year, date2) %>%
+    group_by(year) %>%
+    mutate(
+      calm = (ws^3) < 500,  # Low wind energy
+      calm_start = calm & (lag(calm, default = FALSE) == FALSE),
+      calm_group = cumsum(calm_start)
+    ) %>%
+    filter(calm == TRUE) %>%
+    group_by(year, calm_group) %>%
+    summarise(
+      start_date = min(date2),
+      end_date = max(date2),
+      duration = n(),
+      .groups = "drop"
+    ) %>%
+    filter(duration >= 6)  # 6+ consecutive days
+}
+
+identify_par_periods <- function(data) {
+  data %>%
+    filter(!is.na(dm)) %>%
+    arrange(year, date2) %>%
+    group_by(year) %>%
+    mutate(
+      high_light = dm > 200,
+      light_start = high_light & (lag(high_light, default = FALSE) == FALSE),
+      light_group = cumsum(light_start)
+    ) %>%
+    filter(high_light == TRUE) %>%
+    group_by(year, light_group) %>%
+    summarise(
+      start_date = min(date2),
+      end_date = max(date2),
+      duration = n(),
+      .groups = "drop"
+    ) %>%
+    filter(duration >= 6)  # 6+ consecutive days
+}
+
+# Function for combined bloom trigger periods
+identify_bloom_trigger_periods <- function(data) {
+  data %>%
+    filter(!is.na(ws) & !is.na(dm)) %>%
+    arrange(year, date2) %>%
+    group_by(year) %>%
+    mutate(
+      # Both conditions: low wind energy AND sufficient light
+      bloom_conditions = (ws^3) < 500 & dm > 200,
+      # Only consider periods after February (yday > 32)
+      post_feb = yday(date2) > 32,
+      # Combined trigger condition
+      trigger = bloom_conditions & post_feb,
+      trigger_start = trigger & (lag(trigger, default = FALSE) == FALSE),
+      trigger_group = cumsum(trigger_start)
+    ) %>%
+    filter(trigger == TRUE) %>%
+    group_by(year, trigger_group) %>%
+    summarise(
+      start_date = min(date2),
+      end_date = max(date2),
+      duration = n(),
+      avg_wind_cube = mean(ws^3),
+      avg_par = mean(dm),
+      .groups = "drop"
+    ) %>%
+    filter(duration >= 6)  # 6+ consecutive days
+}
+
+# Use wind data as the base (since it has complete coverage) and join others to it
+plot_data_full <- w2_wide %>%
+  full_join(b24_gapfilled, by = c("year", "date")) %>%
+  full_join(p2, by = c("year", "date")) %>%
+  mutate(date2 = as.Date(yday, origin = "2024-01-01")) %>%
+  filter(date2 != as.Date("2024-12-31")) %>%
+  filter(year %in% c(2022, 2023, 2024, 2025)) %>%
+  # Set fluorescence to NA for the gap period only (but keep wind/PAR data)
+  mutate(
+    fl_med_day = ifelse(
+      year == 2025 & date2 >= as.Date("2024-04-27") & date2 <= as.Date("2024-05-11"),
+      NA,
+      fl_med_day
+    )
+  )
+
+# Create period datasets
+ws_cube_periods_full <- identify_ws_cube_periods(plot_data_full)
+par_periods_full <- identify_par_periods(plot_data_full) 
+bloom_trigger_periods_full <- identify_bloom_trigger_periods(plot_data_full)
+
+# Filter for plot data
+plot_data <- plot_data_full %>%
+  mutate(month = month(date2)) %>%
+  filter(month < 7)
+
+# Filter periods for plot window
+ws_cube_periods <- ws_cube_periods_full %>%
+  filter(
+    (start_date <= as.Date("2024-06-30")) & (end_date >= as.Date("2024-01-01"))
+  ) %>%
+  mutate(
+    start_date = pmax(start_date, as.Date("2024-01-01")),
+    end_date = pmin(end_date, as.Date("2024-06-30"))
+  )
+
+par_periods <- par_periods_full %>%
+  filter(
+    (start_date <= as.Date("2024-06-30")) & (end_date >= as.Date("2024-01-01"))
+  ) %>%
+  mutate(
+    start_date = pmax(start_date, as.Date("2024-01-01")),
+    end_date = pmin(end_date, as.Date("2024-06-30"))
+  )
+
+bloom_trigger_periods <- bloom_trigger_periods_full %>%
+  filter(
+    (start_date <= as.Date("2024-06-30")) & (end_date >= as.Date("2024-01-01"))
+  ) %>%
+  mutate(
+    start_date = pmax(start_date, as.Date("2024-01-01")),
+    end_date = pmin(end_date, as.Date("2024-06-30"))
+  )
+
+# Create year annotations for all years
+year_annotations <- data.frame(
+  year = c(2022, 2023, 2024, 2025),
+  date2 = as.Date("2024-01-15"),
+  fl_med_day = 18,
+  label = c("2022", "2023", "2024", "2025")
+)
+
+# Create the plot
+plot_data %>%
+  ggplot(aes(x = date2)) +
+  # Add shaded areas for low wind energy periods (light blue)
+  geom_rect(data = ws_cube_periods,
+            aes(xmin = start_date, xmax = end_date,
+                ymin = -Inf, ymax = Inf),
+            alpha = 0.2, fill = "lightblue", inherit.aes = FALSE) +
+  # Add shaded areas for high PAR periods (light yellow) 
+  geom_rect(data = par_periods,
+            aes(xmin = start_date, xmax = end_date,
+                ymin = -Inf, ymax = Inf),
+            alpha = 0.2, fill = "yellow", inherit.aes = FALSE) +
+  # Add BLOOM TRIGGER periods (dark purple)
+  geom_rect(data = bloom_trigger_periods,
+            aes(xmin = start_date, xmax = end_date,
+                ymin = -Inf, ymax = Inf),
+            alpha = 0.5, fill = "purple", inherit.aes = FALSE) +
+  # Add wind speed cubed line
+  geom_line(aes(y = (ws^3) / 200), color = "gray40", size = 1, alpha = 0.8) +
+  # Add threshold line for ws^3 < 250
+  geom_hline(yintercept = 250 / 200, linetype = "dashed", color = "blue", alpha = 0.7) +
+  # Add fluorescence line
+  geom_line(aes(y = fl_med_day, color = as.factor(year)), size = 2) +
+  # Add year annotations
+  geom_text(data = year_annotations,
+            aes(x = date2, y = fl_med_day, label = label),
+            size = 10, fontface = "bold", hjust = 0.5, vjust = 0.5,
+            color = "black", inherit.aes = FALSE) +
+  # Dual y-axis labels
+  scale_y_continuous(
+    name = bquote("Flu"[BUOY]~"(mg" ~ m^-2*")"),
+    sec.axis = sec_axis(~ . * 200, name = bquote("Wind Speed"^3~"(m/s)"^3),
+                       breaks = seq(0, 4000, 500))
+  ) +
+  scale_x_date(date_breaks = "months", date_labels = "%b",
+               limits = c(as.Date("2024-01-01"), as.Date("2024-06-30"))) +
+  scale_color_jama() +
+  facet_grid(year~.) +
+  labs(color = NULL) +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    text = element_text(size = 35),
+    axis.text = element_text(color = "black"),
+    axis.title.x = element_blank(),
+    axis.title.y.right = element_text(color = "gray50", size = 30),
+    axis.text.y.right = element_text(color = "gray50"),
+    strip.text = element_blank(),
+    panel.spacing = unit(0.8, "lines")
+  )
+
+# Print summaries
+print("Low wind energy periods (ws^3 < 500 for 6+ days):")
+ws_cube_periods %>%
+  group_by(year) %>%
+  summarise(
+    num_periods = n(),
+    total_days = sum(duration),
+    .groups = "drop"
+  )
+
+print("High PAR periods (dm > 200 for 6+ days) - only years with PAR data:")
+par_periods %>%
+  group_by(year) %>%
+  summarise(
+    num_periods = n(), 
+    total_days = sum(duration),
+    .groups = "drop"
+  )
+
+print("BLOOM TRIGGER periods (BOTH conditions post-Feb for 6+ days) - only years with PAR data:")
+bloom_trigger_periods %>%
+  group_by(year) %>%
+  summarise(
+    num_periods = n(),
+    total_days = sum(duration),
+    first_trigger = if(n() > 0) min(start_date) else as.Date(NA),
+    .groups = "drop"
+  )
+
+# ggsave(here("figures", "buoy_spring_wind_par_triggers.png"), 
+#         width = 16, height = 10, dpi = 300)
+```
+
+```{r}
+# Function to predict spring bloom initiation for years prior to buoy data
+predict_spring_bloom_initiation <- function(wind_data, par_data) {
+  
+  # Combine wind and PAR data
+  combined_data <- wind_data %>%
+    full_join(par_data, by = c("year", "date")) %>%
+    filter(!is.na(ws), !is.na(dm)) %>%  # Only days with both wind and PAR data
+    arrange(year, date)
+  
+  # Identify first spring bloom trigger period for each year
+  spring_bloom_predictions <- combined_data %>%
+    group_by(year) %>%
+    arrange(date) %>%
+    mutate(
+      # Apply validated thresholds - no date restriction
+      bloom_conditions = (ws^3) < 500 & dm > 200,
+      # Identify consecutive periods
+      trigger_start = bloom_conditions & (lag(bloom_conditions, default = FALSE) == FALSE),
+      trigger_group = cumsum(trigger_start)
+    ) %>%
+    filter(bloom_conditions == TRUE) %>%
+    group_by(year, trigger_group) %>%
+    summarise(
+      start_date = min(date),
+      end_date = max(date),
+      duration = n(),
+      avg_wind_cube = mean(ws^3),
+      avg_par = mean(dm),
+      start_yday = yday(first(date)),
+      .groups = "drop"
+    ) %>%
+    # Only keep periods of 6+ consecutive days (validated threshold)
+    filter(duration >= 6) %>%
+    # Get first qualifying period for each year (spring bloom initiation)
+    group_by(year) %>%
+    slice(1) %>%  # First period only
+    ungroup() %>%
+    select(year, spring_bloom_start = start_date, bloom_duration = duration,
+           bloom_start_yday = start_yday, avg_wind_energy = avg_wind_cube, 
+           avg_light = avg_par)
+  
+  return(spring_bloom_predictions)
+}
+
+# Example usage:
+# Assuming you have historical wind data (w2_historical) and PAR data (p2_historical)
+# for years prior to 2022:
+
+# historical_predictions <- predict_spring_bloom_initiation(w2_historical, p2_historical)
+
+# Print summary statistics
+# print("Predicted spring bloom initiation dates:")
+# print(historical_predictions)
+
+# Calculate average bloom timing
+# historical_predictions %>%
+#   summarise(
+#     avg_bloom_day = mean(bloom_start_yday, na.rm = TRUE),
+#     earliest_bloom = min(bloom_start_yday, na.rm = TRUE),
+#     latest_bloom = max(bloom_start_yday, na.rm = TRUE),
+#     avg_duration = mean(bloom_duration, na.rm = TRUE)
+#   )
+
+# Function to validate predictions against known buoy data (2022-2024)
+validate_predictions <- function(predictions, buoy_data) {
+  # Compare predicted vs observed bloom timing
+  validation <- predictions %>%
+    left_join(buoy_data, by = "year") %>%
+    mutate(
+      prediction_error_days = abs(bloom_start_yday - observed_bloom_yday)
+    )
+  
+  return(validation)
+}
+```
+
+
+```{r}
+# Apply to your historical data
+historical_blooms <- predict_spring_bloom_initiation(w2_wide, p2)
+
+# See predicted bloom timing
+historical_blooms %>%
+  mutate(bloom_date_readable = as.Date(bloom_start_yday - 1, origin = paste0(year, "-01-01"))) %>%
+  select(year, bloom_date_readable, bloom_duration, avg_wind_energy, avg_light)
+```
+
+```{r}
+# Function to plot spring bloom conditions for a selected year
+plot_spring_bloom_conditions <- function(wind_par_data, bloom_periods_data, selected_year) {
+  
+  # Filter data for selected year and spring months
+  year_data <- wind_par_data %>%
+    filter(year == selected_year, month(date) %in% c(2, 3, 4))
+  
+  # Filter bloom periods for selected year
+  bloom_periods <- bloom_periods_data %>%
+    filter(year == selected_year)
+  
+  # Create the plot
+  p <- year_data %>%
+    ggplot(aes(x = date)) +
+    # Add bloom period shading
+    {if(nrow(bloom_periods) > 0) {
+      geom_rect(data = bloom_periods, 
+                aes(xmin = spring_bloom_start, xmax = spring_bloom_start + bloom_duration,
+                    ymin = -Inf, ymax = Inf),
+                alpha = 0.3, fill = "purple", inherit.aes = FALSE)
+    }} +
+    # Add wind speed cubed line (better scaling)
+    geom_line(aes(y = (ws^3) / 5), color = "steelblue", size = 1.5, alpha = 0.8) +
+    # Add PAR line 
+    geom_line(aes(y = dm), color = "orange", size = 1.5, alpha = 0.8) +
+    # Add threshold lines
+    geom_hline(yintercept = 500 / 5, linetype = "dashed", color = "steelblue", alpha = 0.7) +
+    geom_hline(yintercept = 200, linetype = "dashed", color = "orange", alpha = 0.7) +
+    # Dual y-axis with proper scaling
+    scale_y_continuous(
+      name = "PAR (μmol m⁻² s⁻¹)",
+      limits = c(0, max(year_data$dm, na.rm = TRUE) * 1.1),
+      sec.axis = sec_axis(~ . * 5, name = "Wind Speed³ (m/s)³",
+                         breaks = seq(0, 2500, 500))
+    ) +
+    scale_x_date(date_breaks = "2 weeks", date_labels = "%b %d") +
+    labs(
+      title = paste("Spring Bloom Conditions -", selected_year),
+      subtitle = "Purple shading: Bloom initiation periods (ws³ < 500 AND PAR > 200 for 6+ days)",
+      x = "Date",
+      caption = "Blue line: Wind Speed³ (right axis), Orange line: PAR (left axis)\nDashed lines: Threshold levels"
+    ) +
+    theme_bw() +
+    theme(
+      text = element_text(size = 12),
+      plot.title = element_text(size = 16, face = "bold"),
+      plot.subtitle = element_text(size = 12, color = "gray50"),
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      axis.title.y.left = element_text(color = "orange"),
+      axis.text.y.left = element_text(color = "orange"),
+      axis.title.y.right = element_text(color = "steelblue"),
+      axis.text.y.right = element_text(color = "steelblue"),
+      panel.grid.minor = element_blank(),
+      legend.position = "none"
+    )
+  
+  return(p)
+}
+
+# Example usage:
+# Assuming you have:
+# - wind_par_data: dataframe with columns: year, date, ws, dm
+# - bloom_periods: dataframe with columns: year, spring_bloom_start, bloom_duration
+
+# Plot for 2022
+# p2022 <- plot_spring_bloom_conditions(wind_par_data, bloom_periods, 2022)
+# print(p2022)
+
+# Plot for 2023
+# p2023 <- plot_spring_bloom_conditions(wind_par_data, bloom_periods, 2023)
+# print(p2023)
+
+# Or create a function to plot multiple years
+plot_multiple_years <- function(wind_par_data, bloom_periods_data, years) {
+  plots <- list()
+  
+  for(i in seq_along(years)) {
+    plots[[i]] <- plot_spring_bloom_conditions(wind_par_data, bloom_periods_data, years[i])
+  }
+  
+  # Arrange plots in a grid
+  if(length(plots) == 1) {
+    return(plots[[1]])
+  } else if(length(plots) == 2) {
+    return(gridExtra::grid.arrange(plots[[1]], plots[[2]], nrow = 2))
+  } else if(length(plots) <= 4) {
+    return(gridExtra::grid.arrange(grobs = plots, nrow = 2))
+  } else {
+    return(gridExtra::grid.arrange(grobs = plots, nrow = 3))
+  }
+}
+
+# Example: Plot all years
+# plot_multiple_years(wind_par_data, bloom_periods, c(2022, 2023, 2024, 2025))
+```
+
+
+
+
+
+```{r}
+# First, get your bloom periods
+bloom_periods <- predict_spring_bloom_initiation(w2_wide, p2)
+
+# Then create your combined wind/PAR dataset
+wind_par_data <- w2_wide %>%
+  full_join(p2, by = c("year", "date"))
+
+# Plot individual years
+p2015 <- plot_spring_bloom_conditions(wind_par_data, bloom_periods, 2019)
+print(p2015)
+```
+
+
+
+
+
+
+
+

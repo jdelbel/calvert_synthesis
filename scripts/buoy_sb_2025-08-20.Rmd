@@ -1,0 +1,1604 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+```{r}
+#Upload packages
+library(tidyverse)
+library(here)
+library(readxl)
+library(patchwork)
+library(lubridate)
+library(MBA)
+library(mgcv)
+library(FNN)
+library(zoo)
+library(reshape2)
+library(rioja)
+library(egg)
+library(palr)
+library(ggsci)
+
+```
+
+```{r}
+# 2024 corrected buoy data
+# b22 <- read.csv(here("outputs", "buoy_corr_dm_2022.csv"))
+# b23 <- read.csv(here("outputs", "buoy_corr_dm_2023.csv"))
+# b24 <- read.csv(here("outputs", "buoy_corr_dm_2024.csv"))
+# b25 <- read.csv(here("outputs", "buoy_corr_dm_2025.csv"))
+
+b <- read.csv(here("outputs", "qc_buoy_2025-08-20.csv"))
+
+w <- read_csv(here("files", "2025-08-20.1hourSamples_wind.all.csv"))
+
+p <- read_csv(here("files", "2025-08-21.1hourSamples_par_pruth.all.csv"))
+
+pk_25 <- read_csv(here("files", "2025-08-21.1hourSamples_par_koeye.2025.csv"))
+  
+# bsal <- read.csv(here("files", "buoy_ts_all.csv"))
+# 
+# wind <- read_csv(here("files", "wind_all.csv"))
+# 
+weath <- read_csv(here("outputs", "enviro_weather_2025-04-14.csv"))
+# 
+# #Downloading discrete chlorophyll samples
+# cd <- read_csv(here("files", "2025-03-25_HakaiData_chlorophyll.csv"))
+
+```
+
+```{r}
+#Setting the date format for the daily mean wind data and then pulling out each year separated.
+w2 <- w %>% 
+  mutate(measurementTime2 = mdy_hm(measurementTime),
+         date = date(measurementTime2),
+         year = year(date)) %>%
+  filter(year > 2021) %>% 
+  select(date, measurementTime = measurementTime2,
+         ws = WindSpd_Avg, wd = WindDir_Avg) %>% 
+  mutate(
+    # Convert to meteorological convention (direction wind is coming FROM)
+    # u = eastward component, v = northward component
+    u = -ws * sin(wd * pi/180),  # Negative because wd is "from" direction
+    v = -ws * cos(wd * pi/180),
+    # Calculate SE component for each hourly observation
+    se_component = (u - v) / sqrt(2)) %>%
+  pivot_longer(c(ws:se_component), values_to = "val", names_to = "par") %>% 
+  group_by(date, par) %>%
+  summarise(dm = mean(val, na.rm = T)) %>% 
+  ungroup() 
+
+w2_wide <- w2 %>% 
+  pivot_wider(names_from = "par", values_from = "dm") %>% 
+  mutate(year = year(date)) %>% 
+  group_by(year) %>% 
+  mutate(c_sum = cumsum(se_component)) %>% 
+  ungroup()
+      
+```
+
+```{r}
+p2 <- p %>% 
+  mutate(measurementTime2 = mdy_hm(measurementTime),
+         date = date(measurementTime2),
+         year = year(date)) %>%
+  filter(year %in% c(2022, 2023, 2024)) %>% 
+  select(date, measurementTime = measurementTime2,
+         PAR_Avg) %>% 
+  group_by(date) %>%
+  summarise(dm = mean(PAR_Avg)) %>% 
+  ungroup()
+
+pk_25_2 <- pk_25 %>% 
+  mutate(measurementTime2 = mdy_hm(measurementTime),
+         date = date(measurementTime2),
+         year = year(date)) %>%
+  filter(year %in% c(2025)) %>% 
+  select(date, measurementTime = measurementTime2,
+         PAR_Avg) %>% 
+  group_by(date) %>%
+  summarise(dm = mean(PAR_Avg)) %>% 
+  ungroup()
+
+p2 <- rbind(p2, pk_25_2)
+
+```
+
+
+```{r}
+#Wrangling buoy data for plotting
+b2 <- b %>% 
+  select(date = date_corr, fl_med_day, group) %>% 
+  distinct() %>% 
+  mutate(date = ymd(date),
+         year = year(date),
+         month = month(date),
+         yday = yday(date)) %>%
+  filter(year %in% c(2022, 2023, 2024, 2025)) %>% 
+  mutate(group = as.character(group))
+
+# Create a temporary dataset with just the gap dates
+gap_dates <- data.frame(
+  date = seq(as.Date("2024-03-19"), as.Date("2024-03-24"), by = 1)
+)
+
+# Get the surrounding data for interpolation context
+interp_window <- b2 %>%
+  filter(date >= "2024-03-15" & date <= "2024-03-30") %>%
+  bind_rows(gap_dates) %>%
+  arrange(date) %>%
+  mutate(
+    fl_med_day = na.approx(fl_med_day, na.rm = FALSE),
+    # Mark interpolated points
+    group = ifelse(
+      date >= "2024-03-19" & date <= "2024-03-24",
+      "interpolated",
+      group
+    )
+  )
+
+# Merge back with original data
+b24_gapfilled <- b2 %>%
+  bind_rows(
+    interp_window %>% filter(date >= "2024-03-19" & date <= "2024-03-24")
+  ) %>%
+  arrange(date) %>% 
+  mutate(date = ymd(date),
+         year = year(date),
+         month = month(date),
+         yday = yday(date)) 
+```
+
+
+
+
+
+
+
+
+
+```{r}
+# Create function to identify consecutive calm periods
+identify_calm_periods <- function(data) {
+  data %>%
+    filter(!is.na(se_component)) %>%  # Remove rows with missing wind data
+    arrange(date2) %>%
+    mutate(
+      calm = se_component > -1,
+      # Identify start/end of calm periods
+      calm_start = calm & (lag(calm, default = FALSE) == FALSE),
+      calm_end = calm & (lead(calm, default = FALSE) == FALSE),
+      # Create group identifier
+      calm_group = cumsum(calm_start)
+    ) %>%
+    filter(calm == TRUE) %>%
+    group_by(year, calm_group) %>%
+    summarise(
+      start_date = min(date2),
+      end_date = max(date2),
+      duration = n(),
+      .groups = "drop"
+    ) %>%
+    # Only keep periods of 3+ consecutive days
+    filter(duration >= 3)
+}
+
+# Prepare data - filter out the problematic date first
+plot_data_full <- b24_gapfilled %>% 
+  full_join(w2_wide) %>%
+  mutate(date2 = as.Date(yday, origin = "2024-01-01")) %>%
+  filter(date2 != as.Date("2024-12-31"))  # Remove the problematic date
+
+# Create calm periods on full dataset first
+calm_periods_full <- plot_data_full %>%
+  filter(!is.na(se_component)) %>%
+  arrange(year, date2) %>%
+  select(year, date2, se_component) %>%
+  mutate(
+    calm = se_component > -1,
+    calm_yesterday = lag(calm, default = FALSE),
+    new_calm_period = calm & !calm_yesterday,
+    period_id = cumsum(new_calm_period)
+  ) %>%
+  filter(calm == TRUE) %>%
+  group_by(year, period_id) %>%
+  summarise(
+    start_date = min(date2),
+    end_date = max(date2),
+    duration = n(),
+    avg_wind = mean(se_component),
+    .groups = "drop"
+  ) %>%
+  filter(duration >= 3)
+
+# Now filter plot data for display and add NA gap for 2025
+plot_data <- plot_data_full %>%
+  mutate(month = month(date2)) %>%
+  filter(month < 7) %>%
+  # Add NA gap for 2025 between April 27 and May 11
+  mutate(
+    se_component = ifelse(
+      year == 2025 & date2 >= as.Date("2024-04-27") & date2 <= as.Date("2024-05-11"),
+      NA,
+      se_component),
+    fl_med_day = ifelse(
+      year == 2025 & date2 >= as.Date("2024-04-27") & date2 <= as.Date("2024-05-11"),
+      NA,
+      fl_med_day
+    )
+  )
+
+# Filter calm periods to only show those that overlap with our plot window
+calm_periods <- calm_periods_full %>%
+  filter(
+    # Keep periods that start before July OR end after January
+    (start_date <= as.Date("2024-06-30")) & (end_date >= as.Date("2024-01-01"))
+  ) %>%
+  # Trim the periods to fit within our plot window
+  mutate(
+    start_date = pmax(start_date, as.Date("2024-01-01")),
+    end_date = pmin(end_date, as.Date("2024-06-30"))
+  )
+
+# Create year annotations for top-left of each facet
+year_annotations <- data.frame(
+  year = c(2022, 2023, 2024, 2025),
+  date2 = as.Date("2024-01-15"),  # Position at left
+  fl_med_day = 18,  # Position at top
+  label = c("2022", "2023", "2024", "2025")
+)
+
+# Plot with improved layout
+plot_data %>%
+  ggplot(aes(x = date2)) +
+  # Add shaded areas for calm periods
+  geom_rect(data = calm_periods,
+            aes(xmin = start_date, xmax = end_date,
+                ymin = -Inf, ymax = Inf),
+            alpha = 0.4, fill = "lightblue", inherit.aes = FALSE) +
+  # Add se_component as line (scaled to fluorescence range)
+  geom_line(aes(y = (se_component + 20) * 0.5), color = "gray40", size = 1, alpha = 0.8) +
+  # Add calm threshold line
+  geom_hline(yintercept = (-1 + 20) * 0.5, linetype = "dashed", color = "red", alpha = 0.7) +
+  # Add fluorescence line
+  geom_line(aes(y = fl_med_day, color = as.factor(year)), size = 2) +
+  # Add year annotations
+  geom_text(data = year_annotations,
+            aes(x = date2, y = fl_med_day, label = label),
+            size = 10, fontface = "bold", hjust = 0.5, vjust = 0.5,
+            color = "black", inherit.aes = FALSE) +
+  # Dual y-axis labels
+  scale_y_continuous(
+    name = bquote("Flu"[BUOY]~"(mg" ~ m^-2*")"),
+    sec.axis = sec_axis(~ (. / 0.5) - 20, name = "SE Wind Component",
+                       breaks = seq(-20, 20, 10))
+  ) +
+  scale_x_date(date_breaks = "months", date_labels = "%b",
+               limits = c(as.Date("2024-01-01"), as.Date("2024-06-30"))) +  # Force x-axis limits
+  scale_color_jama() +
+  facet_grid(year~.) +  # Remove strip.position to use default (no labels)
+  labs(color = NULL) +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    text = element_text(size = 35),
+    axis.text = element_text(color = "black"),
+    axis.title.x = element_blank(),
+    axis.title.y.right = element_text(color = "gray50", size = 30),
+    axis.text.y.right = element_text(color = "gray50"),
+    strip.text = element_blank(),  # Remove facet labels completely
+    strip.placement = "outside",
+    panel.spacing = unit(0.8, "lines")  # More space for right axis
+  )
+
+# Print calm period summary for insight
+print("Calm periods summary:")
+calm_periods %>%
+  group_by(year) %>%
+  summarise(
+    num_calm_periods = n(),
+    total_calm_days = sum(duration),
+    longest_calm_spell = max(duration),
+    avg_calm_duration = mean(duration),
+    .groups = "drop"
+  )
+
+ggsave(here("figures", "buoy_spring_wind_calm.png"), 
+        width = 16, height = 10, dpi = 300)
+```
+
+```{r}
+# Create function to identify consecutive calm periods
+identify_calm_periods <- function(data) {
+  data %>%
+    filter(!is.na(ws)) %>%  # Remove rows with missing wind speed data
+    arrange(date2) %>%
+    mutate(
+      calm = ws < 7,  # Low wind speed threshold (adjust as needed)
+      # Identify start/end of calm periods
+      calm_start = calm & (lag(calm, default = FALSE) == FALSE),
+      calm_end = calm & (lead(calm, default = FALSE) == FALSE),
+      # Create group identifier
+      calm_group = cumsum(calm_start)
+    ) %>%
+    filter(calm == TRUE) %>%
+    group_by(year, calm_group) %>%
+    summarise(
+      start_date = min(date2),
+      end_date = max(date2),
+      duration = n(),
+      .groups = "drop"
+    ) %>%
+    # Only keep periods of 3+ consecutive days
+    filter(duration >= 3)
+}
+
+# Prepare data - filter out the problematic date first
+plot_data_full <- b24_gapfilled %>% 
+  full_join(w2_wide) %>%
+  mutate(date2 = as.Date(yday, origin = "2024-01-01")) %>%
+  filter(date2 != as.Date("2024-12-31"))  # Remove the problematic date
+
+# Create calm periods on full dataset first
+calm_periods_full <- plot_data_full %>%
+  filter(!is.na(ws)) %>%
+  arrange(year, date2) %>%
+  select(year, date2, ws) %>%
+  mutate(
+    calm = ws < 7,  # Low wind speed threshold
+    calm_yesterday = lag(calm, default = FALSE),
+    new_calm_period = calm & !calm_yesterday,
+    period_id = cumsum(new_calm_period)
+  ) %>%
+  filter(calm == TRUE) %>%
+  group_by(year, period_id) %>%
+  summarise(
+    start_date = min(date2),
+    end_date = max(date2),
+    duration = n(),
+    avg_wind = mean(ws),
+    .groups = "drop"
+  ) %>%
+  filter(duration >= 3)
+
+plot_data <- plot_data_full %>%
+  mutate(month = month(date2)) %>%
+  filter(month < 7) %>%
+  # Add NA gap for 2025 between April 27 and May 11
+  mutate(
+    wst = ifelse(
+      year == 2025 & date2 >= as.Date("2024-04-27") & date2 <= as.Date("2024-05-11"),
+      NA,
+      ws),
+    fl_med_day = ifelse(
+      year == 2025 & date2 >= as.Date("2024-04-27") & date2 <= as.Date("2024-05-11"),
+      NA,
+      fl_med_day
+    )
+  )
+
+# Filter calm periods to only show those that overlap with our plot window
+calm_periods <- calm_periods_full %>%
+  filter(
+    # Keep periods that start before July OR end after January
+    (start_date <= as.Date("2024-06-30")) & (end_date >= as.Date("2024-01-01"))
+  ) %>%
+  # Trim the periods to fit within our plot window
+  mutate(
+    start_date = pmax(start_date, as.Date("2024-01-01")),
+    end_date = pmin(end_date, as.Date("2024-06-30"))
+  )
+
+# Create year annotations for top-left of each facet
+year_annotations <- data.frame(
+  year = c(2022, 2023, 2024, 2025),
+  date2 = as.Date("2024-01-15"),  # Position at left
+  fl_med_day = 18,  # Position at top
+  label = c("2022", "2023", "2024", "2025")
+)
+
+# Plot with improved layout
+plot_data %>%
+  ggplot(aes(x = date2)) +
+  # Add shaded areas for calm periods
+  geom_rect(data = calm_periods,
+            aes(xmin = start_date, xmax = end_date,
+                ymin = -Inf, ymax = Inf),
+            alpha = 0.4, fill = "lightblue", inherit.aes = FALSE) +
+  # Add wind speed as line (scaled to fluorescence range)
+  geom_line(aes(y = ws * 0.8), color = "gray40", size = 1, alpha = 0.8) +
+  # Add calm threshold line (ws < 5)
+  geom_hline(yintercept = 7 * 0.8, linetype = "dashed", color = "red", alpha = 0.7) +
+  # Add fluorescence line
+  geom_line(aes(y = fl_med_day, color = as.factor(year)), size = 2) +
+  # Add year annotations
+  geom_text(data = year_annotations,
+            aes(x = date2, y = fl_med_day, label = label),
+            size = 12, fontface = "bold", hjust = 0, vjust = 1,
+            color = "black", inherit.aes = FALSE) +
+  # Dual y-axis labels
+  scale_y_continuous(
+    name = bquote("Flu"[BUOY]~"(mg" ~ m^-2*")"),
+    sec.axis = sec_axis(~ . / 0.8, name = "Wind Speed (m/s)",
+                       breaks = seq(0, 25, 5))
+  ) +
+  scale_x_date(date_breaks = "months", date_labels = "%b",
+               limits = c(as.Date("2024-01-01"), as.Date("2024-06-30"))) +  # Force x-axis limits
+  scale_color_jama() +
+  facet_grid(year~.) +  # Remove strip.position to use default (no labels)
+  labs(color = NULL) +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    text = element_text(size = 35),
+    axis.text = element_text(color = "black"),
+    axis.title.x = element_blank(),
+    axis.title.y.right = element_text(color = "gray50", size = 30),
+    axis.text.y.right = element_text(color = "gray50"),
+    strip.text = element_blank(),  # Remove facet labels completely
+    strip.placement = "outside",
+    panel.spacing = unit(0.8, "lines")  # More space for right axis
+  )
+
+# Print calm period summary for insight
+print("Calm periods summary:")
+calm_periods %>%
+  group_by(year) %>%
+  summarise(
+    num_calm_periods = n(),
+    total_calm_days = sum(duration),
+    longest_calm_spell = max(duration),
+    avg_calm_duration = mean(duration),
+    .groups = "drop"
+  )
+
+ggsave(here("figures", "buoy_spring_ws_calm.png"), 
+        width = 16, height = 10, dpi = 300)
+```
+
+```{r}
+# Create function to identify consecutive calm periods
+identify_calm_periods <- function(data) {
+  data %>%
+    filter(!is.na(se_component) & !is.na(ws)) %>%  # Remove rows with missing data
+    arrange(date2) %>%
+    mutate(
+      calm = se_component > -1 & ws < 5,  # Combined conditions
+      # Identify start/end of calm periods
+      calm_start = calm & (lag(calm, default = FALSE) == FALSE),
+      calm_end = calm & (lead(calm, default = FALSE) == FALSE),
+      # Create group identifier
+      calm_group = cumsum(calm_start)
+    ) %>%
+    filter(calm == TRUE) %>%
+    group_by(year, calm_group) %>%
+    summarise(
+      start_date = min(date2),
+      end_date = max(date2),
+      duration = n(),
+      .groups = "drop"
+    ) %>%
+    # Only keep periods of 3+ consecutive days
+    filter(duration >= 3)
+}
+
+# Prepare data - filter out the problematic date first
+plot_data_full <- b24_gapfilled %>% 
+  full_join(w2_wide) %>%
+  mutate(date2 = as.Date(yday, origin = "2024-01-01")) %>%
+  filter(date2 != as.Date("2024-12-31"))  # Remove the problematic date
+
+# Create calm periods on full dataset first
+calm_periods_full <- plot_data_full %>%
+  filter(!is.na(se_component) & !is.na(ws)) %>%
+  arrange(year, date2) %>%
+  select(year, date2, se_component, ws) %>%
+  mutate(
+    calm = se_component > -1 & ws < 5,  # Combined conditions
+    calm_yesterday = lag(calm, default = FALSE),
+    new_calm_period = calm & !calm_yesterday,
+    period_id = cumsum(new_calm_period)
+  ) %>%
+  filter(calm == TRUE) %>%
+  group_by(year, period_id) %>%
+  summarise(
+    start_date = min(date2),
+    end_date = max(date2),
+    duration = n(),
+    avg_se_wind = mean(se_component),
+    avg_wind_speed = mean(ws),
+    .groups = "drop"
+  ) %>%
+  filter(duration >= 3)
+
+# Now filter plot data for display and add NA gap for 2025
+plot_data <- plot_data_full %>%
+  mutate(month = month(date2)) %>%
+  filter(month < 7) %>%
+  # Add NA gap for 2025 between April 27 and May 11
+  mutate(
+    se_component = ifelse(
+      year == 2025 & date2 >= as.Date("2024-04-27") & date2 <= as.Date("2024-05-11"),
+      NA,
+      se_component
+    )
+  )
+
+# Filter calm periods to only show those that overlap with our plot window
+calm_periods <- calm_periods_full %>%
+  filter(
+    # Keep periods that start before July OR end after January
+    (start_date <= as.Date("2024-06-30")) & (end_date >= as.Date("2024-01-01"))
+  ) %>%
+  # Trim the periods to fit within our plot window
+  mutate(
+    start_date = pmax(start_date, as.Date("2024-01-01")),
+    end_date = pmin(end_date, as.Date("2024-06-30"))
+  )
+
+# Create year annotations for top-left of each facet
+year_annotations <- data.frame(
+  year = c(2022, 2023, 2024, 2025),
+  date2 = as.Date("2024-01-15"),  # Position at left
+  fl_med_day = 18,  # Position at top
+  label = c("2022", "2023", "2024", "2025")
+)
+
+# Plot with improved layout
+plot_data %>%
+  ggplot(aes(x = date2)) +
+  # Add shaded areas for calm periods
+  geom_rect(data = calm_periods,
+            aes(xmin = start_date, xmax = end_date,
+                ymin = -Inf, ymax = Inf),
+            alpha = 0.4, fill = "lightblue", inherit.aes = FALSE) +
+  # Add se_component as line (scaled to fluorescence range)
+  geom_line(aes(y = (se_component + 20) * 0.5), color = "gray40", size = 1, alpha = 0.8) +
+  # Add calm threshold line (se_component > -1)
+  geom_hline(yintercept = (-1 + 20) * 0.5, linetype = "dashed", color = "red", alpha = 0.7) +
+  # Add fluorescence line
+  geom_line(aes(y = fl_med_day, color = as.factor(year)), size = 2) +
+  # Add year annotations
+  geom_text(data = year_annotations,
+            aes(x = date2, y = fl_med_day, label = label),
+            size = 12, fontface = "bold", hjust = 0, vjust = 1,
+            color = "black", inherit.aes = FALSE) +
+  # Dual y-axis labels
+  scale_y_continuous(
+    name = bquote("Flu"[BUOY]~"(mg" ~ m^-2*")"),
+    sec.axis = sec_axis(~ (. / 0.5) - 20, name = "SE Wind Component",
+                       breaks = seq(-20, 20, 10))
+  ) +
+  scale_x_date(date_breaks = "months", date_labels = "%b",
+               limits = c(as.Date("2024-01-01"), as.Date("2024-06-30"))) +  # Force x-axis limits
+  scale_color_jama() +
+  facet_grid(year~.) +  # Remove strip.position to use default (no labels)
+  labs(color = NULL) +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    text = element_text(size = 35),
+    axis.text = element_text(color = "black"),
+    axis.title.x = element_blank(),
+    axis.title.y.right = element_text(color = "gray50", size = 30),
+    axis.text.y.right = element_text(color = "gray50"),
+    strip.text = element_blank(),  # Remove facet labels completely
+    strip.placement = "outside",
+    panel.spacing = unit(0.8, "lines")  # More space for right axis
+  )
+
+# Print calm period summary for insight
+print("Calm periods summary:")
+calm_periods %>%
+  group_by(year) %>%
+  summarise(
+    num_calm_periods = n(),
+    total_calm_days = sum(duration),
+    longest_calm_spell = max(duration),
+    avg_calm_duration = mean(duration),
+    .groups = "drop"
+  )
+
+ggsave(here("figures", "buoy_spring_wind_calm_ws_se.png"), 
+        width = 16, height = 10, dpi = 300)
+```
+
+```{r}
+# Create functions to identify different types of calm periods
+identify_se_calm_periods <- function(data) {
+  data %>%
+    filter(!is.na(se_component)) %>%
+    arrange(year, date2) %>%  # Add year to arrange
+    group_by(year) %>%  # Group by year
+    mutate(
+      calm = se_component > -1.5,
+      calm_start = calm & (lag(calm, default = FALSE) == FALSE),
+      calm_group = cumsum(calm_start)
+    ) %>%
+    filter(calm == TRUE) %>%
+    group_by(year, calm_group) %>%
+    summarise(
+      start_date = min(date2),
+      end_date = max(date2),
+      duration = n(),
+      .groups = "drop"
+    ) %>%
+    filter(duration >= 6)
+}
+
+identify_ws_calm_periods <- function(data) {
+  data %>%
+    filter(!is.na(ws)) %>%
+    arrange(year, date2) %>%  # Add year to arrange
+    group_by(year) %>%  # Group by year
+    mutate(
+      calm = ws < 5,
+      calm_start = calm & (lag(calm, default = FALSE) == FALSE),
+      calm_group = cumsum(calm_start)
+    ) %>%
+    filter(calm == TRUE) %>%
+    group_by(year, calm_group) %>%
+    summarise(
+      start_date = min(date2),
+      end_date = max(date2),
+      duration = n(),
+      .groups = "drop"
+    ) %>%
+    filter(duration >= 6)
+}
+
+# Prepare data - filter out the problematic date first
+plot_data_full <- b24_gapfilled %>% 
+  full_join(w2_wide) %>%  # Back to using wind data
+  mutate(date2 = as.Date(yday, origin = "2024-01-01")) %>%
+  filter(date2 != as.Date("2024-12-31"))  # Remove the problematic date
+
+# Create separate calm periods on full dataset
+se_calm_periods_full <- identify_se_calm_periods(plot_data_full)
+ws_calm_periods_full <- identify_ws_calm_periods(plot_data_full)
+
+# Now filter plot data for display and add NA gap for 2025
+plot_data <- plot_data_full %>%
+  mutate(month = month(date2)) %>%
+  filter(month < 7) %>%
+  # Add NA gap for 2025 between April 27 and May 11
+  mutate(
+    se_component = ifelse(
+      year == 2025 & date2 >= as.Date("2024-04-27") & date2 <= as.Date("2024-05-11"),
+      NA,
+      se_component
+    )
+  )
+
+# Filter periods to only show those that overlap with our plot window
+se_calm_periods <- se_calm_periods_full %>%
+  filter(
+    (start_date <= as.Date("2024-06-30")) & (end_date >= as.Date("2024-01-01"))
+  ) %>%
+  mutate(
+    start_date = pmax(start_date, as.Date("2024-01-01")),
+    end_date = pmin(end_date, as.Date("2024-06-30"))
+  )
+
+ws_calm_periods <- ws_calm_periods_full %>%
+  filter(
+    (start_date <= as.Date("2024-06-30")) & (end_date >= as.Date("2024-01-01"))
+  ) %>%
+  mutate(
+    start_date = pmax(start_date, as.Date("2024-01-01")),
+    end_date = pmin(end_date, as.Date("2024-06-30"))
+  )
+
+# Create year annotations for top-left of each facet
+year_annotations <- data.frame(
+  year = c(2022, 2023, 2024, 2025),
+  date2 = as.Date("2024-01-15"),  # Position at left
+  fl_med_day = 18,  # Position at top
+  label = c("2022", "2023", "2024", "2025")
+)
+
+# Plot with improved layout
+plot_data %>%
+  ggplot(aes(x = date2)) +
+  # Add shaded areas for SE wind calm periods (blue)
+  geom_rect(data = se_calm_periods,
+            aes(xmin = start_date, xmax = end_date,
+                ymin = -Inf, ymax = Inf),
+            alpha = 0.6, fill = "lightblue", inherit.aes = FALSE) +
+  # Add shaded areas for wind speed calm periods (green)
+  geom_rect(data = ws_calm_periods,
+            aes(xmin = start_date, xmax = end_date,
+                ymin = -Inf, ymax = Inf),
+            alpha = 0.2, fill = "red", inherit.aes = FALSE) +
+  # Add se_component as line (scaled to fluorescence range)
+  geom_line(aes(y = (se_component + 20) * 0.5), color = "gray40", size = 1, alpha = 0.8) +
+  # Add calm threshold line (se_component > -1)
+  geom_hline(yintercept = (-1 + 20) * 0.5, linetype = "dashed", color = "red", alpha = 0.7) +
+  # Add fluorescence line
+  geom_line(aes(y = fl_med_day, color = as.factor(year)), size = 2) +
+  # Add year annotations
+  geom_text(data = year_annotations,
+            aes(x = date2, y = fl_med_day, label = label),
+            size = 12, fontface = "bold", hjust = 0, vjust = 1,
+            color = "black", inherit.aes = FALSE) +
+  # Dual y-axis labels
+  scale_y_continuous(
+    name = bquote("Flu"[BUOY]~"(mg" ~ m^-2*")"),
+    sec.axis = sec_axis(~ (. / 0.5) - 20, name = "SE Wind Component",
+                       breaks = seq(-20, 20, 10))
+  ) +
+  scale_x_date(date_breaks = "months", date_labels = "%b",
+               limits = c(as.Date("2024-01-01"), as.Date("2024-06-30"))) +  # Force x-axis limits
+  scale_color_jama() +
+  facet_grid(year~.) +  # Remove strip.position to use default (no labels)
+  labs(color = NULL) +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    text = element_text(size = 35),
+    axis.text = element_text(color = "black"),
+    axis.title.x = element_blank(),
+    axis.title.y.right = element_text(color = "gray50", size = 30),
+    axis.text.y.right = element_text(color = "gray50"),
+    strip.text = element_blank(),  # Remove facet labels completely
+    strip.placement = "outside",
+    panel.spacing = unit(0.8, "lines")  # More space for right axis
+  )
+
+# Print calm period summary for insight
+print("SE Wind calm periods (se_component > -1 for 3+ days):")
+se_calm_periods %>%
+  group_by(year) %>%
+  summarise(
+    num_periods = n(),
+    total_days = sum(duration),
+    longest_spell = max(duration),
+    avg_duration = mean(duration),
+    .groups = "drop"
+  )
+
+print("Wind speed calm periods (ws < 5 for 3+ days):")
+ws_calm_periods %>%
+  group_by(year) %>%
+  summarise(
+    num_periods = n(),
+    total_days = sum(duration),
+    longest_spell = max(duration),
+    avg_duration = mean(duration),
+    .groups = "drop"
+  )
+
+
+ggsave(here("figures", "buoy_spring_wind_calm_ws_se_overlap.png"), 
+        width = 16, height = 10, dpi = 300)
+```
+
+```{r}
+# Create functions to identify different types of calm periods
+identify_se_calm_periods <- function(data) {
+  data %>%
+    filter(!is.na(se_component)) %>%
+    arrange(year, date2) %>%
+    group_by(year) %>%
+    mutate(
+      calm = se_component > -1.5,  # Updated threshold
+      calm_start = calm & (lag(calm, default = FALSE) == FALSE),
+      calm_group = cumsum(calm_start)
+    ) %>%
+    filter(calm == TRUE) %>%
+    group_by(year, calm_group) %>%
+    summarise(
+      start_date = min(date2),
+      end_date = max(date2),
+      duration = n(),
+      .groups = "drop"
+    ) %>%
+    filter(duration >= 6)  # Updated to 5 days
+}
+
+identify_ws_calm_periods <- function(data) {
+  data %>%
+    filter(!is.na(ws)) %>%
+    arrange(year, date2) %>%
+    group_by(year) %>%
+    mutate(
+      calm = ws < 5,  # Changed to <= for consistency
+      calm_start = calm & (lag(calm, default = FALSE) == FALSE),
+      calm_group = cumsum(calm_start)
+    ) %>%
+    filter(calm == TRUE) %>%
+    group_by(year, calm_group) %>%
+    summarise(
+      start_date = min(date2),
+      end_date = max(date2),
+      duration = n(),
+      .groups = "drop"
+    ) %>%
+    filter(duration >= 6)  # Updated to 5 days
+}
+
+# NEW: Function to identify the critical overlap periods
+identify_bloom_trigger_periods <- function(data) {
+  data %>%
+    filter(!is.na(se_component) & !is.na(ws)) %>%
+    arrange(year, date2) %>%
+    group_by(year) %>%
+    mutate(
+      # Both conditions must be met
+      bloom_conditions = se_component > -1.5 & ws < 5,
+      # Only consider periods after March (yday > 60 for March 1st)
+      post_march = yday(date2) > 60,
+      # Combined trigger condition
+      trigger = bloom_conditions & post_march,
+      trigger_start = trigger & (lag(trigger, default = FALSE) == FALSE),
+      trigger_group = cumsum(trigger_start)
+    ) %>%
+    filter(trigger == TRUE) %>%
+    group_by(year, trigger_group) %>%
+    summarise(
+      start_date = min(date2),
+      end_date = max(date2),
+      duration = n(),
+      avg_se_wind = mean(se_component),
+      avg_wind_speed = mean(ws),
+      .groups = "drop"
+    ) %>%
+    filter(duration >= 6)  # 5+ consecutive days
+}
+
+# Prepare data - filter out the problematic date first
+plot_data_full <- b24_gapfilled %>% 
+  full_join(w2_wide) %>%  # Back to using wind data
+  mutate(date2 = as.Date(yday, origin = "2024-01-01")) %>%
+  filter(date2 != as.Date("2024-12-31"))  # Remove the problematic date
+
+# Create separate calm periods on full dataset
+se_calm_periods_full <- identify_se_calm_periods(plot_data_full)
+ws_calm_periods_full <- identify_ws_calm_periods(plot_data_full)
+bloom_trigger_periods_full <- identify_bloom_trigger_periods(plot_data_full)
+
+# Now filter plot data for display and add NA gap for 2025
+plot_data <- plot_data_full %>%
+  mutate(month = month(date2)) %>%
+  filter(month < 7) %>%
+  # Add NA gap for 2025 between April 27 and May 11
+  mutate(
+    se_component = ifelse(
+      year == 2025 & date2 >= as.Date("2024-04-27") & date2 <= as.Date("2024-05-11"),
+      NA,
+      se_component
+    )
+  )
+
+# Filter periods to only show those that overlap with our plot window
+se_calm_periods <- se_calm_periods_full %>%
+  filter(
+    (start_date <= as.Date("2024-06-30")) & (end_date >= as.Date("2024-01-01"))
+  ) %>%
+  mutate(
+    start_date = pmax(start_date, as.Date("2024-01-01")),
+    end_date = pmin(end_date, as.Date("2024-06-30"))
+  )
+
+ws_calm_periods <- ws_calm_periods_full %>%
+  filter(
+    (start_date <= as.Date("2024-06-30")) & (end_date >= as.Date("2024-01-01"))
+  ) %>%
+  mutate(
+    start_date = pmax(start_date, as.Date("2024-01-01")),
+    end_date = pmin(end_date, as.Date("2024-06-30"))
+  )
+
+bloom_trigger_periods <- bloom_trigger_periods_full %>%
+  filter(
+    (start_date <= as.Date("2024-06-30")) & (end_date >= as.Date("2024-01-01"))
+  ) %>%
+  mutate(
+    start_date = pmax(start_date, as.Date("2024-01-01")),
+    end_date = pmin(end_date, as.Date("2024-06-30"))
+  )
+
+# Create year annotations for top-left of each facet
+year_annotations <- data.frame(
+  year = c(2022, 2023, 2024, 2025),
+  date2 = as.Date("2024-01-15"),  # Position at left
+  fl_med_day = 18,  # Position at top
+  label = c("2022", "2023", "2024", "2025")
+)
+
+# Plot with improved layout
+plot_data %>%
+  ggplot(aes(x = date2)) +
+  # Add shaded areas for SE wind calm periods (blue, lighter)
+  geom_rect(data = se_calm_periods,
+            aes(xmin = start_date, xmax = end_date,
+                ymin = -Inf, ymax = Inf),
+            alpha = 0.4, fill = "lightblue", inherit.aes = FALSE) +
+  # Add shaded areas for wind speed calm periods (red, lighter)
+  geom_rect(data = ws_calm_periods,
+            aes(xmin = start_date, xmax = end_date,
+                ymin = -Inf, ymax = Inf),
+            alpha = 0.4, fill = "pink", inherit.aes = FALSE) +
+  # Add BLOOM TRIGGER periods (dark purple, prominent)
+  geom_rect(data = bloom_trigger_periods,
+            aes(xmin = start_date, xmax = end_date,
+                ymin = -Inf, ymax = Inf),
+            alpha = 0.5, fill = "purple", inherit.aes = FALSE) +
+  # Add se_component as line (scaled to fluorescence range)
+  geom_line(aes(y = (se_component + 20) * 0.5), color = "gray40", size = 1, alpha = 0.8) +
+  # Add calm threshold line (se_component > -1.5)
+  geom_hline(yintercept = (-1.5 + 20) * 0.5, linetype = "dashed", color = "red", alpha = 0.7) +
+  # Add fluorescence line
+  geom_line(aes(y = fl_med_day, color = as.factor(year)), size = 2) +
+  # Add year annotations
+  geom_text(data = year_annotations,
+            aes(x = date2, y = fl_med_day, label = label),
+            size = 12, fontface = "bold", hjust = 0, vjust = 1,
+            color = "black", inherit.aes = FALSE) +
+  # Dual y-axis labels
+  scale_y_continuous(
+    name = bquote("Flu"[BUOY]~"(mg" ~ m^-2*")"),
+    sec.axis = sec_axis(~ (. / 0.5) - 20, name = "SE Wind Component",
+                       breaks = seq(-20, 20, 10))
+  ) +
+  scale_x_date(date_breaks = "months", date_labels = "%b",
+               limits = c(as.Date("2024-01-01"), as.Date("2024-06-30"))) +  # Force x-axis limits
+  scale_color_jama() +
+  facet_grid(year~.) +  # Remove strip.position to use default (no labels)
+  labs(color = NULL) +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    text = element_text(size = 35),
+    axis.text = element_text(color = "black"),
+    axis.title.x = element_blank(),
+    axis.title.y.right = element_text(color = "gray50", size = 30),
+    axis.text.y.right = element_text(color = "gray50"),
+    strip.text = element_blank(),  # Remove facet labels completely
+    strip.placement = "outside",
+    panel.spacing = unit(0.8, "lines")  # More space for right axis
+  )
+
+# Print calm period summary for insight
+print("SE Wind calm periods (se_component > -1.5 for 5+ days):")
+se_calm_periods %>%
+  group_by(year) %>%
+  summarise(
+    num_periods = n(),
+    total_days = sum(duration),
+    longest_spell = max(duration),
+    avg_duration = mean(duration),
+    .groups = "drop"
+  )
+
+print("Wind speed calm periods (ws <= 5 for 5+ days):")
+ws_calm_periods %>%
+  group_by(year) %>%
+  summarise(
+    num_periods = n(),
+    total_days = sum(duration),
+    longest_spell = max(duration),
+    avg_duration = mean(duration),
+    .groups = "drop"
+  )
+
+print("BLOOM TRIGGER periods (BOTH conditions + post-March for 5+ days):")
+bloom_trigger_periods %>%
+  group_by(year) %>%
+  summarise(
+    num_periods = n(),
+    total_days = sum(duration),
+    longest_spell = max(duration),
+    avg_duration = mean(duration),
+    first_trigger = min(start_date),
+    .groups = "drop"
+  )
+
+ggsave(here("figures", "buoy_spring_wind_calm_ws_se_overlap2.png"), 
+        width = 16, height = 10, dpi = 300)
+```
+
+```{r}
+# Create functions to identify different types of calm periods
+identify_se_calm_periods <- function(data) {
+  data %>%
+    filter(!is.na(se_component)) %>%
+    arrange(year, date2) %>%
+    group_by(year) %>%
+    mutate(
+      calm = se_component > -1.5,  # Updated threshold
+      calm_start = calm & (lag(calm, default = FALSE) == FALSE),
+      calm_group = cumsum(calm_start)
+    ) %>%
+    filter(calm == TRUE) %>%
+    group_by(year, calm_group) %>%
+    summarise(
+      start_date = min(date2),
+      end_date = max(date2),
+      duration = n(),
+      .groups = "drop"
+    ) %>%
+    filter(duration >= 6)  # Updated to 6 days
+}
+
+identify_ws_calm_periods <- function(data) {
+  data %>%
+    filter(!is.na(ws)) %>%
+    arrange(year, date2) %>%
+    group_by(year) %>%
+    mutate(
+      calm = ws <= 5,  # Changed to <= for consistency
+      calm_start = calm & (lag(calm, default = FALSE) == FALSE),
+      calm_group = cumsum(calm_start)
+    ) %>%
+    filter(calm == TRUE) %>%
+    group_by(year, calm_group) %>%
+    summarise(
+      start_date = min(date2),
+      end_date = max(date2),
+      duration = n(),
+      .groups = "drop"
+    ) %>%
+    filter(duration >= 6)  # Updated to 6 days
+}
+
+# NEW: Function to identify the critical overlap periods
+identify_bloom_trigger_periods <- function(data) {
+  data %>%
+    filter(!is.na(se_component) & !is.na(ws) & !is.na(dm)) %>%  # All three variables needed
+    arrange(year, date2) %>%
+    group_by(year) %>%
+    mutate(
+      # All three conditions must be met
+      bloom_conditions = se_component > -1.5 & ws <= 5 & dm > 150,
+      # Only consider periods after March (yday > 60 for March 1st)
+      post_march = yday(date2) > 60,
+      # Combined trigger condition
+      trigger = bloom_conditions & post_march,
+      trigger_start = trigger & (lag(trigger, default = FALSE) == FALSE),
+      trigger_group = cumsum(trigger_start)
+    ) %>%
+    filter(trigger == TRUE) %>%
+    group_by(year, trigger_group) %>%
+    summarise(
+      start_date = min(date2),
+      end_date = max(date2),
+      duration = n(),
+      avg_se_wind = mean(se_component),
+      avg_wind_speed = mean(ws),
+      avg_par = mean(dm),
+      .groups = "drop"
+    ) %>%
+    filter(duration >= 6)  # 6+ consecutive days
+}
+
+# NEW: Function to identify PAR periods
+identify_par_periods <- function(data) {
+  data %>%
+    filter(!is.na(dm)) %>%
+    arrange(year, date2) %>%
+    group_by(year) %>%
+    mutate(
+      high_light = dm > 150,
+      light_start = high_light & (lag(high_light, default = FALSE) == FALSE),
+      light_group = cumsum(light_start)
+    ) %>%
+    filter(high_light == TRUE) %>%
+    group_by(year, light_group) %>%
+    summarise(
+      start_date = min(date2),
+      end_date = max(date2),
+      duration = n(),
+      .groups = "drop"
+    ) %>%
+    filter(duration >= 3)  # 6+ consecutive days
+}
+
+# Prepare data - add PAR data and filter to 2022-2023 only
+plot_data_full <- b24_gapfilled %>% 
+  full_join(w2_wide) %>%
+  full_join(p2) %>%  # Add PAR data
+  mutate(date2 = as.Date(yday, origin = "2024-01-01")) %>%
+  filter(date2 != as.Date("2024-12-31")) %>%  # Remove the problematic date
+  filter(year %in% c(2022, 2023, 2024, 2025))  # Only 2022 and 2023 for PAR data
+
+# Create separate calm periods on full dataset
+se_calm_periods_full <- identify_se_calm_periods(plot_data_full)
+ws_calm_periods_full <- identify_ws_calm_periods(plot_data_full)
+par_periods_full <- identify_par_periods(plot_data_full)
+bloom_trigger_periods_full <- identify_bloom_trigger_periods(plot_data_full)
+
+# Now filter plot data for display and add NA gap for 2025
+plot_data <- plot_data_full %>%
+  mutate(month = month(date2)) %>%
+  filter(month < 7) %>%
+  # Add NA gap for 2025 between April 27 and May 11
+  mutate(
+    se_component = ifelse(
+      year == 2025 & date2 >= as.Date("2024-04-27") & date2 <= as.Date("2024-05-11"),
+      NA,
+      se_component
+    )
+  )
+
+# Filter periods to only show those that overlap with our plot window
+se_calm_periods <- se_calm_periods_full %>%
+  filter(
+    (start_date <= as.Date("2024-06-30")) & (end_date >= as.Date("2024-01-01"))
+  ) %>%
+  mutate(
+    start_date = pmax(start_date, as.Date("2024-01-01")),
+    end_date = pmin(end_date, as.Date("2024-06-30"))
+  )
+
+ws_calm_periods <- ws_calm_periods_full %>%
+  filter(
+    (start_date <= as.Date("2024-06-30")) & (end_date >= as.Date("2024-01-01"))
+  ) %>%
+  mutate(
+    start_date = pmax(start_date, as.Date("2024-01-01")),
+    end_date = pmin(end_date, as.Date("2024-06-30"))
+  )
+
+par_periods <- par_periods_full %>%
+  filter(
+    (start_date <= as.Date("2024-06-30")) & (end_date >= as.Date("2024-01-01"))
+  ) %>%
+  mutate(
+    start_date = pmax(start_date, as.Date("2024-01-01")),
+    end_date = pmin(end_date, as.Date("2024-06-30"))
+  )
+
+bloom_trigger_periods <- bloom_trigger_periods_full %>%
+  filter(
+    (start_date <= as.Date("2024-06-30")) & (end_date >= as.Date("2024-01-01"))
+  ) %>%
+  mutate(
+    start_date = pmax(start_date, as.Date("2024-01-01")),
+    end_date = pmin(end_date, as.Date("2024-06-30"))
+  )
+
+# Create year annotations for 2022-2023 only
+year_annotations <- data.frame(
+  year = c(2022, 2023, 2024),
+  date2 = as.Date("2024-01-15"),  # Position at left
+  fl_med_day = 18,  # Position at top
+  label = c("2022", "2023", "2024")
+)
+
+# Plot with improved layout
+plot_data %>%
+  ggplot(aes(x = date2)) +
+  # Add shaded areas for SE wind calm periods (blue, lighter)
+  geom_rect(data = se_calm_periods,
+            aes(xmin = start_date, xmax = end_date,
+                ymin = -Inf, ymax = Inf),
+            alpha = 0.2, fill = "lightblue", inherit.aes = FALSE) +
+  # Add shaded areas for wind speed calm periods (red, lighter)
+  geom_rect(data = ws_calm_periods,
+            aes(xmin = start_date, xmax = end_date,
+                ymin = -Inf, ymax = Inf),
+            alpha = 0.2, fill = "pink", inherit.aes = FALSE) +
+  # Add shaded areas for high PAR periods (yellow)
+  geom_rect(data = par_periods,
+            aes(xmin = start_date, xmax = end_date,
+                ymin = -Inf, ymax = Inf),
+            alpha = 0.2, fill = "yellow", inherit.aes = FALSE) +
+  # Add ULTIMATE BLOOM TRIGGER periods (dark purple, prominent)
+  geom_rect(data = bloom_trigger_periods,
+            aes(xmin = start_date, xmax = end_date,
+                ymin = -Inf, ymax = Inf),
+            alpha = 0.6, fill = "purple", inherit.aes = FALSE) +
+  # Add se_component as line (scaled to fluorescence range)
+  geom_line(aes(y = (se_component + 20) * 0.5), color = "gray40", size = 1, alpha = 0.8) +
+  # Add calm threshold line (se_component > -1.5)
+  geom_hline(yintercept = (-1.5 + 20) * 0.5, linetype = "dashed", color = "red", alpha = 0.7) +
+  # Add fluorescence line
+  geom_line(aes(y = fl_med_day, color = as.factor(year)), size = 2) +
+  # Add year annotations
+  geom_text(data = year_annotations,
+            aes(x = date2, y = fl_med_day, label = label),
+            size = 12, fontface = "bold", hjust = 0, vjust = 1,
+            color = "black", inherit.aes = FALSE) +
+  # Dual y-axis labels
+  scale_y_continuous(
+    name = bquote("Flu"[BUOY]~"(mg" ~ m^-2*")"),
+    sec.axis = sec_axis(~ (. / 0.5) - 20, name = "SE Wind Component",
+                       breaks = seq(-20, 20, 10))
+  ) +
+  scale_x_date(date_breaks = "months", date_labels = "%b",
+               limits = c(as.Date("2024-01-01"), as.Date("2024-06-30"))) +  # Force x-axis limits
+  scale_color_jama() +
+  facet_grid(year~.) +  # Remove strip.position to use default (no labels)
+  labs(color = NULL) +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    text = element_text(size = 35),
+    axis.text = element_text(color = "black"),
+    axis.title.x = element_blank(),
+    axis.title.y.right = element_text(color = "gray50", size = 30),
+    axis.text.y.right = element_text(color = "gray50"),
+    strip.text = element_blank(),  # Remove facet labels completely
+    strip.placement = "outside",
+    panel.spacing = unit(0.8, "lines")  # More space for right axis
+  )
+
+# Print calm period summary for insight
+print("SE Wind calm periods (se_component > -1.5 for 5+ days):")
+se_calm_periods %>%
+  group_by(year) %>%
+  summarise(
+    num_periods = n(),
+    total_days = sum(duration),
+    longest_spell = max(duration),
+    avg_duration = mean(duration),
+    .groups = "drop"
+  )
+
+print("Wind speed calm periods (ws <= 5 for 5+ days):")
+ws_calm_periods %>%
+  group_by(year) %>%
+  summarise(
+    num_periods = n(),
+    total_days = sum(duration),
+    longest_spell = max(duration),
+    avg_duration = mean(duration),
+    .groups = "drop"
+  )
+
+print("PAR periods (dm > 200 for 6+ days):")
+par_periods %>%
+  group_by(year) %>%
+  summarise(
+    num_periods = n(),
+    total_days = sum(duration),
+    longest_spell = max(duration),
+    avg_duration = mean(duration),
+    .groups = "drop"
+  )
+
+print("ULTIMATE BLOOM TRIGGER periods (ALL 3 conditions + post-March for 6+ days):")
+bloom_trigger_periods %>%
+  group_by(year) %>%
+  summarise(
+    num_periods = n(),
+    total_days = sum(duration),
+    longest_spell = max(duration),
+    avg_duration = mean(duration),
+    first_trigger = if(n() > 0) min(start_date) else as.Date(NA),
+    avg_par = if(n() > 0) mean(avg_par) else NA,
+    .groups = "drop"
+  )
+
+ggsave(here("figures", "buoy_spring_wind_calm_ws_se_overlap4.png"), 
+        width = 16, height = 10, dpi = 300)
+```
+```{r}
+# Simple plot with wind speed cubed instead of SE component
+plot_data <- b24_gapfilled %>% 
+  full_join(w2_wide) %>%
+  mutate(date2 = as.Date(yday, origin = "2024-01-01"),
+         month = month(date)) %>%
+  filter(month < 7) %>%
+  filter(date2 != as.Date("2024-12-31"))  # Remove problematic date
+
+# Create year annotations
+year_annotations <- data.frame(
+  year = c(2022, 2023, 2024, 2025),
+  date2 = as.Date("2024-01-15"),  # Position at left
+  fl_med_day = 18,  # Position at top
+  label = c("2022", "2023", "2024", "2025")
+)
+
+# Simple plot
+plot_data %>%
+  ggplot(aes(x = date2)) +
+  # Add wind speed cubed as line (scaled to fluorescence range)
+  geom_line(aes(y = (ws^3) / 200), color = "gray40", size = 1, alpha = 0.8) +
+  # Add fluorescence line
+  geom_line(aes(y = fl_med_day, color = as.factor(year)), size = 2) +
+  # Add year annotations
+  geom_text(data = year_annotations,
+            aes(x = date2, y = fl_med_day, label = label),
+            size = 10, fontface = "bold", hjust = 0.5, vjust = 0.5,
+            color = "black", inherit.aes = FALSE) +
+  # Dual y-axis labels
+  scale_y_continuous(
+    name = bquote("Flu"[BUOY]~"(mg" ~ m^-2*")"),
+    sec.axis = sec_axis(~ . * 200, name = bquote("Wind Speed"^3~"(m/s)"^3),
+                       breaks = seq(0, 4000, 1000))
+  ) +
+  scale_x_date(date_breaks = "months", date_labels = "%b",
+               limits = c(as.Date("2024-01-01"), as.Date("2024-06-30"))) +
+  scale_color_jama() +
+  facet_grid(year~.) +
+  labs(color = NULL) +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    text = element_text(size = 35),
+    axis.text = element_text(color = "black"),
+    axis.title.x = element_blank(),
+    axis.title.y.right = element_text(color = "gray50", size = 30),
+    axis.text.y.right = element_text(color = "gray50"),
+    strip.text = element_blank(),  # Remove facet labels
+    panel.spacing = unit(0.8, "lines")
+  )
+
+ggsave(here("figures", "buoy_spring_wind_cube.png"), 
+        width = 16, height = 10, dpi = 300)
+```
+```{r}
+# Function to identify favorable conditions combining ws^3 and PAR
+identify_ws_cube_periods <- function(data) {
+  data %>%
+    filter(!is.na(ws)) %>%
+    arrange(year, date2) %>%
+    group_by(year) %>%
+    mutate(
+      calm = (ws^3) < 500,  # Low wind energy
+      calm_start = calm & (lag(calm, default = FALSE) == FALSE),
+      calm_group = cumsum(calm_start)
+    ) %>%
+    filter(calm == TRUE) %>%
+    group_by(year, calm_group) %>%
+    summarise(
+      start_date = min(date2),
+      end_date = max(date2),
+      duration = n(),
+      .groups = "drop"
+    ) %>%
+    filter(duration >= 6)  # 6+ consecutive days
+}
+
+identify_par_periods <- function(data) {
+  data %>%
+    filter(!is.na(dm)) %>%
+    arrange(year, date2) %>%
+    group_by(year) %>%
+    mutate(
+      high_light = dm > 200,
+      light_start = high_light & (lag(high_light, default = FALSE) == FALSE),
+      light_group = cumsum(light_start)
+    ) %>%
+    filter(high_light == TRUE) %>%
+    group_by(year, light_group) %>%
+    summarise(
+      start_date = min(date2),
+      end_date = max(date2),
+      duration = n(),
+      .groups = "drop"
+    ) %>%
+    filter(duration >= 6)  # 6+ consecutive days
+}
+
+# Function for combined bloom trigger periods
+identify_bloom_trigger_periods <- function(data) {
+  data %>%
+    filter(!is.na(ws) & !is.na(dm)) %>%
+    arrange(year, date2) %>%
+    group_by(year) %>%
+    mutate(
+      # Both conditions: low wind energy AND sufficient light
+      bloom_conditions = (ws^3) < 500 & dm > 200,
+      # Only consider periods after February (yday > 32)
+      post_feb = yday(date2) > 32,
+      # Combined trigger condition
+      trigger = bloom_conditions & post_feb,
+      trigger_start = trigger & (lag(trigger, default = FALSE) == FALSE),
+      trigger_group = cumsum(trigger_start)
+    ) %>%
+    filter(trigger == TRUE) %>%
+    group_by(year, trigger_group) %>%
+    summarise(
+      start_date = min(date2),
+      end_date = max(date2),
+      duration = n(),
+      avg_wind_cube = mean(ws^3),
+      avg_par = mean(dm),
+      .groups = "drop"
+    ) %>%
+    filter(duration >= 6)  # 6+ consecutive days
+}
+
+# Use wind data as the base (since it has complete coverage) and join others to it
+plot_data_full <- w2_wide %>%
+  full_join(b24_gapfilled, by = c("year", "date")) %>%
+  full_join(p2, by = c("year", "date")) %>%
+  mutate(date2 = as.Date(yday, origin = "2024-01-01")) %>%
+  filter(date2 != as.Date("2024-12-31")) %>%
+  filter(year %in% c(2022, 2023, 2024, 2025)) %>%
+  # Set fluorescence to NA for the gap period only (but keep wind/PAR data)
+  mutate(
+    fl_med_day = ifelse(
+      year == 2025 & date2 >= as.Date("2024-04-27") & date2 <= as.Date("2024-05-11"),
+      NA,
+      fl_med_day
+    )
+  )
+
+# Create period datasets
+ws_cube_periods_full <- identify_ws_cube_periods(plot_data_full)
+par_periods_full <- identify_par_periods(plot_data_full) 
+bloom_trigger_periods_full <- identify_bloom_trigger_periods(plot_data_full)
+
+# Filter for plot data
+plot_data <- plot_data_full %>%
+  mutate(month = month(date2)) %>%
+  filter(month < 7)
+
+# Filter periods for plot window
+ws_cube_periods <- ws_cube_periods_full %>%
+  filter(
+    (start_date <= as.Date("2024-06-30")) & (end_date >= as.Date("2024-01-01"))
+  ) %>%
+  mutate(
+    start_date = pmax(start_date, as.Date("2024-01-01")),
+    end_date = pmin(end_date, as.Date("2024-06-30"))
+  )
+
+par_periods <- par_periods_full %>%
+  filter(
+    (start_date <= as.Date("2024-06-30")) & (end_date >= as.Date("2024-01-01"))
+  ) %>%
+  mutate(
+    start_date = pmax(start_date, as.Date("2024-01-01")),
+    end_date = pmin(end_date, as.Date("2024-06-30"))
+  )
+
+bloom_trigger_periods <- bloom_trigger_periods_full %>%
+  filter(
+    (start_date <= as.Date("2024-06-30")) & (end_date >= as.Date("2024-01-01"))
+  ) %>%
+  mutate(
+    start_date = pmax(start_date, as.Date("2024-01-01")),
+    end_date = pmin(end_date, as.Date("2024-06-30"))
+  )
+
+# Create year annotations for all years
+year_annotations <- data.frame(
+  year = c(2022, 2023, 2024, 2025),
+  date2 = as.Date("2024-01-15"),
+  fl_med_day = 18,
+  label = c("2022", "2023", "2024", "2025")
+)
+
+# Create the plot
+plot_data %>%
+  ggplot(aes(x = date2)) +
+  # Add shaded areas for low wind energy periods (light blue)
+  geom_rect(data = ws_cube_periods,
+            aes(xmin = start_date, xmax = end_date,
+                ymin = -Inf, ymax = Inf),
+            alpha = 0.2, fill = "lightblue", inherit.aes = FALSE) +
+  # Add shaded areas for high PAR periods (light yellow) 
+  geom_rect(data = par_periods,
+            aes(xmin = start_date, xmax = end_date,
+                ymin = -Inf, ymax = Inf),
+            alpha = 0.2, fill = "yellow", inherit.aes = FALSE) +
+  # Add BLOOM TRIGGER periods (dark purple)
+  geom_rect(data = bloom_trigger_periods,
+            aes(xmin = start_date, xmax = end_date,
+                ymin = -Inf, ymax = Inf),
+            alpha = 0.5, fill = "purple", inherit.aes = FALSE) +
+  # Add wind speed cubed line
+  geom_line(aes(y = (ws^3) / 200), color = "gray40", size = 1, alpha = 0.8) +
+  # Add threshold line for ws^3 < 250
+  geom_hline(yintercept = 250 / 200, linetype = "dashed", color = "blue", alpha = 0.7) +
+  # Add fluorescence line
+  geom_line(aes(y = fl_med_day, color = as.factor(year)), size = 2) +
+  # Add year annotations
+  geom_text(data = year_annotations,
+            aes(x = date2, y = fl_med_day, label = label),
+            size = 10, fontface = "bold", hjust = 0.5, vjust = 0.5,
+            color = "black", inherit.aes = FALSE) +
+  # Dual y-axis labels
+  scale_y_continuous(
+    name = bquote("Flu"[BUOY]~"(mg" ~ m^-2*")"),
+    sec.axis = sec_axis(~ . * 200, name = bquote("Wind Speed"^3~"(m/s)"^3),
+                       breaks = seq(0, 4000, 500))
+  ) +
+  scale_x_date(date_breaks = "months", date_labels = "%b",
+               limits = c(as.Date("2024-01-01"), as.Date("2024-06-30"))) +
+  scale_color_jama() +
+  facet_grid(year~.) +
+  labs(color = NULL) +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    text = element_text(size = 35),
+    axis.text = element_text(color = "black"),
+    axis.title.x = element_blank(),
+    axis.title.y.right = element_text(color = "gray50", size = 30),
+    axis.text.y.right = element_text(color = "gray50"),
+    strip.text = element_blank(),
+    panel.spacing = unit(0.8, "lines")
+  )
+
+# Print summaries
+print("Low wind energy periods (ws^3 < 500 for 6+ days):")
+ws_cube_periods %>%
+  group_by(year) %>%
+  summarise(
+    num_periods = n(),
+    total_days = sum(duration),
+    .groups = "drop"
+  )
+
+print("High PAR periods (dm > 200 for 6+ days) - only years with PAR data:")
+par_periods %>%
+  group_by(year) %>%
+  summarise(
+    num_periods = n(), 
+    total_days = sum(duration),
+    .groups = "drop"
+  )
+
+print("BLOOM TRIGGER periods (BOTH conditions post-Feb for 6+ days) - only years with PAR data:")
+bloom_trigger_periods %>%
+  group_by(year) %>%
+  summarise(
+    num_periods = n(),
+    total_days = sum(duration),
+    first_trigger = if(n() > 0) min(start_date) else as.Date(NA),
+    .groups = "drop"
+  )
+
+ggsave(here("figures", "buoy_spring_wind_par_triggers.png"), 
+        width = 16, height = 10, dpi = 300)
+```
+
+```{r}
+# Calculate 19-day rolling mean SE component for ALL days, then test against fluorescence
+daily_prediction <- plot_data %>%
+  arrange(year, date) %>%
+  group_by(year) %>%
+  mutate(
+    se_19day = zoo::rollmean(se_component, 19, fill = NA, align = "right")
+  ) %>%
+  ungroup() %>%
+  filter(!is.na(se_19day), !is.na(fl_med_day)) %>%
+  filter(month(date) == 4)  # Focus on April responses
+
+# Test the correlation with all daily April data points
+cor.test(daily_prediction$se_19day, daily_prediction$fl_med_day)
+
+# Plot it to see the relationship
+ggplot(daily_prediction, aes(x = se_19day, y = fl_med_day, color = as.factor(year))) +
+  geom_point(size = 3) +
+  geom_smooth(method = "lm", se = TRUE, color = "black") +
+  labs(x = "19-day mean SE component", 
+       y = "Daily fluorescence",
+       title = "Daily April fluorescence vs preceding 19-day SE winds") +
+  theme_bw()
+```
+
+
+```{r}
+# Test if the relationship is consistent within years
+yearly_cors <- daily_prediction %>%
+  group_by(year) %>%
+  summarise(
+    n = n(),
+    correlation = cor(se_19day, fl_med_day, use = "complete.obs"),
+    .groups = "drop"
+  )
+
+print(yearly_cors)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
