@@ -28,6 +28,8 @@ library(ggsci)
 #Uploading QC'd buoy data
 b <- read.csv(here("outputs", "qc_buoy_2025-08-20.csv"))
 
+b_ts <- read.csv(here("files", "buoy_ts_all.csv"))
+
 #Uploading lookout wind data
 w <- read_csv(here("files", "2025-08-20.1hourSamples_wind.all.csv"))
 
@@ -157,6 +159,20 @@ b24_gapfilled <- b2 %>%
          month = month(date),
          yday = yday(date)) 
 ```
+
+```{r}
+#Pulling out buoy salinity data without flags for 2022 and 2024 and calculating daily mean
+b_ts <- b_ts %>% 
+  mutate(measurementTime = mdy_hm(measurementTime),
+         date = date(measurementTime)) %>% 
+  # filter(year %in% c(2022, 2024)) %>% 
+  group_by(date) %>% 
+  summarise(mean_sal = mean(WaterSalinity[WaterSalinity_UQL == 2], na.rm = TRUE),
+            mean_temp = mean(WaterTemp[WaterTemp_UQL == 2], na.rm = TRUE),
+            .groups = "drop")
+```
+
+
 
 ```{r}
 # Function to identify bloom periods and calculate metrics
@@ -346,7 +362,6 @@ bloom_metrics_robust <- calculate_bloom_metrics(b24_gapfilled, gap_tolerance = 3
 
 ```
 
-
 ```{r}
 # Create comparison visualizations showing different bloom detection approaches
 library(gridExtra)
@@ -395,7 +410,7 @@ create_bloom_plot <- function(year_data, bloom_events, plot_title, method_subtit
 
 ```{r}
 # Plot comparison for specified year
-plot_year <- 2024  # Change this to any year you want to visualize
+plot_year <- 2022  # Change this to any year you want to visualize
 
 if (plot_year %in% unique(b24_gapfilled$year)) {
   
@@ -409,7 +424,7 @@ if (plot_year %in% unique(b24_gapfilled$year)) {
     "Strict threshold"
   )
   
-  p2 <- create_bloom_plot(
+  p2_f <- create_bloom_plot(
     year_data, 
     bloom_metrics_gap3$bloom_events %>% filter(year == plot_year),
     paste("Gap Tolerance (3d) -", plot_year),
@@ -431,7 +446,7 @@ if (plot_year %in% unique(b24_gapfilled$year)) {
   )
   
   # Arrange plots in 2x2 grid
-  comparison_plot <- grid.arrange(p1, p2, p3, p4, ncol = 2, 
+  comparison_plot <- grid.arrange(p1, p2_f, p3, p4, ncol = 2, 
                                  top = paste("Bloom Detection Method Comparison -", plot_year))
   
   # Also create a summary comparison table
@@ -458,6 +473,1002 @@ if (plot_year %in% unique(b24_gapfilled$year)) {
 
 
 ```
+
+
+
+------------------------
+
+```{r}
+# Function to identify bloom periods and calculate metrics
+calculate_bloom_metrics <- function(df, 
+                                  gap_tolerance = 0, 
+                                  smoothing = FALSE,
+                                  min_bloom_days = 14,
+                                  threshold_percent = 1.05,
+                                  smoothing_period = 3,
+                                  smoothing_type = "mean") {
+  
+  # Initialize results dataframe
+  bloom_summary <- data.frame()
+  
+  # Process each year separately
+  for (yr in unique(df$year)) {
+    
+    year_data <- df %>% 
+      filter(year == yr) %>%
+      arrange(date)
+    
+    # Skip if insufficient data for the year
+    if (nrow(year_data) < 30) {
+      warning(paste("Insufficient data for year", yr, "- skipping"))
+      next
+    }
+    
+    # Optional: Apply smoothing to reduce spikiness
+    if (smoothing) {
+      if (smoothing_type == "mean") {
+        # Rolling mean
+        year_data$fl_smoothed <- zoo::rollmean(year_data$fl_med_day, k = smoothing_period, 
+                                              fill = NA, align = "center")
+      } else if (smoothing_type == "median") {
+        # Rolling median
+        year_data$fl_smoothed <- zoo::rollmedian(year_data$fl_med_day, k = smoothing_period, 
+                                                fill = NA, align = "center")
+      } else {
+        stop("smoothing_type must be either 'mean' or 'median'")
+      }
+      
+      # Fill NAs at edges with original values
+      year_data$fl_smoothed[is.na(year_data$fl_smoothed)] <- year_data$fl_med_day[is.na(year_data$fl_smoothed)]
+      comparison_var <- year_data$fl_smoothed
+    } else {
+      comparison_var <- year_data$fl_med_day
+    }
+    
+    # Calculate annual median
+    annual_median <- median(year_data$fl_med_day, na.rm = TRUE)
+    
+    # Define bloom threshold (customizable percentage above annual median)
+    bloom_threshold <- annual_median * threshold_percent
+    
+    # Identify days above threshold
+    year_data$above_threshold <- comparison_var > bloom_threshold
+    
+    # Apply gap tolerance - fill short gaps between bloom periods
+    if (gap_tolerance > 0) {
+      # Find gaps of <= gap_tolerance days and fill them
+      rle_result <- rle(year_data$above_threshold)
+      
+      # Identify short FALSE periods between TRUE periods
+      for (i in 2:(length(rle_result$lengths) - 1)) {
+        if (!rle_result$values[i] && rle_result$lengths[i] <= gap_tolerance &&
+            rle_result$values[i-1] && rle_result$values[i+1]) {
+          rle_result$values[i] <- TRUE
+        }
+      }
+      
+      # Reconstruct the vector
+      year_data$above_threshold <- inverse.rle(rle_result)
+    }
+    
+    # Find consecutive periods above threshold
+    # Create groups of consecutive TRUE values
+    year_data$group <- cumsum(c(1, diff(year_data$above_threshold) != 0))
+    
+    # Identify bloom periods (consecutive days >= min_bloom_days above threshold)
+    bloom_periods <- year_data %>%
+      group_by(group, above_threshold) %>%
+      summarise(
+        start_date = min(date),
+        end_date = max(date),
+        duration = n(),
+        max_fl = max(fl_med_day, na.rm = TRUE),
+        max_fl_date = date[which.max(fl_med_day)],
+        # Additional metrics for gap-filled blooms
+        days_above_threshold = sum(fl_med_day > bloom_threshold),
+        percent_days_above = round(100 * sum(fl_med_day > bloom_threshold) / n(), 1),
+        mean_fl = mean(fl_med_day, na.rm = TRUE),
+        median_fl = median(fl_med_day, na.rm = TRUE),
+        .groups = 'drop'
+      ) %>%
+      filter(above_threshold == TRUE & duration >= min_bloom_days)
+    
+    # Calculate year-level metrics
+    if (nrow(bloom_periods) > 0) {
+      
+      # Number of bloom events
+      n_bloom_events <- nrow(bloom_periods)
+      
+      # Spring bloom timing (first bloom of the year)
+      spring_bloom_start <- min(bloom_periods$start_date)
+      spring_bloom_yday <- yday(spring_bloom_start)
+      
+      # Annual peak chlorophyll value and timing
+      annual_peak_fl <- max(year_data$fl_med_day, na.rm = TRUE)
+      annual_peak_date <- year_data$date[which.max(year_data$fl_med_day)]
+      annual_peak_yday <- yday(annual_peak_date)
+      
+      # Individual bloom event details
+      bloom_events <- bloom_periods %>%
+        mutate(
+          year = yr,
+          bloom_number = row_number(),
+          start_yday = yday(start_date),
+          end_yday = yday(end_date)
+        ) %>%
+        select(year, bloom_number, start_date, end_date, start_yday, end_yday, 
+               duration, max_fl, max_fl_date, days_above_threshold, percent_days_above,
+               mean_fl, median_fl)
+      
+      # Year summary
+      year_summary <- data.frame(
+        year = yr,
+        annual_median = annual_median,
+        bloom_threshold = bloom_threshold,
+        threshold_percent = threshold_percent,
+        min_bloom_days = min_bloom_days,
+        gap_tolerance = gap_tolerance,
+        smoothing = smoothing,
+        smoothing_type = if(smoothing) smoothing_type else NA,
+        smoothing_period = if(smoothing) smoothing_period else NA,
+        n_bloom_events = n_bloom_events,
+        spring_bloom_start = spring_bloom_start,
+        spring_bloom_yday = spring_bloom_yday,
+        annual_peak_fl = annual_peak_fl,
+        annual_peak_date = annual_peak_date,
+        annual_peak_yday = annual_peak_yday,
+        total_bloom_days = sum(bloom_periods$duration)
+      )
+      
+    } else {
+      # No blooms detected for this year
+      annual_peak_fl <- max(year_data$fl_med_day, na.rm = TRUE)
+      annual_peak_date <- year_data$date[which.max(year_data$fl_med_day)]
+      annual_peak_yday <- yday(annual_peak_date)
+      
+      bloom_events <- data.frame()
+      
+      year_summary <- data.frame(
+        year = yr,
+        annual_median = annual_median,
+        bloom_threshold = bloom_threshold,
+        threshold_percent = threshold_percent,
+        min_bloom_days = min_bloom_days,
+        gap_tolerance = gap_tolerance,
+        smoothing = smoothing,
+        smoothing_type = if(smoothing) smoothing_type else NA,
+        smoothing_period = if(smoothing) smoothing_period else NA,
+        n_bloom_events = 0,
+        spring_bloom_start = as.Date(NA),
+        spring_bloom_yday = NA,
+        annual_peak_fl = annual_peak_fl,
+        annual_peak_date = annual_peak_date,
+        annual_peak_yday = annual_peak_yday,
+        total_bloom_days = 0
+      )
+    }
+    
+    # Store results
+    if (nrow(bloom_summary) == 0) {
+      bloom_summary <- year_summary
+      if (exists("all_bloom_events")) {
+        if (nrow(bloom_events) > 0) {
+          all_bloom_events <- rbind(all_bloom_events, bloom_events)
+        }
+      } else {
+        all_bloom_events <- bloom_events
+      }
+    } else {
+      bloom_summary <- rbind(bloom_summary, year_summary)
+      if (nrow(bloom_events) > 0) {
+        all_bloom_events <- rbind(all_bloom_events, bloom_events)
+      }
+    }
+  }
+  
+  # Return list with summary and detailed bloom events
+  result <- list(
+    annual_summary = bloom_summary,
+    bloom_events = if(exists("all_bloom_events")) all_bloom_events else data.frame()
+  )
+  
+  return(result)
+}
+```
+
+```{r}
+# Your preferred approach
+bloom_metrics_final <- calculate_bloom_metrics(b24_gapfilled,
+                                             smoothing = F,
+                                             smoothing_period = 9,
+                                             smoothing_type = "median",
+                                             min_bloom_days = 7,
+                                             threshold_percent = 1.05,
+                                             gap_tolerance = 0)
+```
+
+```{r}
+# Publication Quality Plot of Bloom Detection Results
+# Shows annual fluorescence data with bloom periods and thresholds
+
+library(ggplot2)
+library(dplyr)
+library(lubridate)
+library(gridExtra)
+
+# Extract annual summary and bloom events
+annual_summary <- bloom_metrics_final$annual_summary
+bloom_events <- bloom_metrics_final$bloom_events
+
+# Calculate global y-axis limits
+all_data <- b24_gapfilled %>% filter(year %in% unique(annual_summary$year))
+global_y_min <- 0
+global_y_max <- max(all_data$fl_med_day, na.rm = TRUE) * 1.05
+
+# Function to create individual year plot
+create_year_plot <- function(year_to_plot) {
+  
+  # Get year data and clean specific issues
+  year_data <- b24_gapfilled %>% filter(year == year_to_plot)
+  
+  # Remove specific problematic data points
+  if (year_to_plot == 2023) {
+    year_data <- year_data %>% filter(date != as.Date("2023-12-31"))
+  }
+  
+  # Add NA after 2025-04-27 to break line before gap
+  if (year_to_plot == 2025) {
+    # Find if the date exists
+    if (any(year_data$date == as.Date("2025-04-27"))) {
+      # Add a row with NA after 2025-04-27
+      na_row <- data.frame(
+        date = as.Date("2025-04-28"),
+        fl_med_day = NA,
+        year = 2025,
+        month = 4,
+        yday = yday(as.Date("2025-04-28"))
+      )
+      year_data <- bind_rows(year_data, na_row) %>% arrange(date)
+    }
+  }
+  
+  year_blooms <- bloom_events %>% filter(year == year_to_plot)
+  year_summary <- annual_summary %>% filter(year == year_to_plot)
+  
+  if (nrow(year_data) == 0) {
+    return(NULL)
+  }
+  
+  # Get threshold information
+  annual_median <- year_summary$annual_median
+  bloom_threshold <- year_summary$bloom_threshold
+  n_blooms <- year_summary$n_bloom_events
+  
+  # Create base plot
+  p <- ggplot(year_data, aes(x = date, y = fl_med_day)) +
+    # Add bloom period rectangles first (behind the line)
+    {if (nrow(year_blooms) > 0) {
+      list(
+        geom_rect(data = year_blooms, 
+                  aes(xmin = start_date, xmax = end_date, 
+                      ymin = -Inf, ymax = Inf),
+                  fill = "red", alpha = 0.15, inherit.aes = FALSE),
+        # Add bloom numbers as text
+        geom_text(data = year_blooms,
+                  aes(x = start_date + (end_date - start_date)/2, 
+                      y = global_y_max * 0.95,
+                      label = paste("B", bloom_number, sep = "")),
+                  size = 3, fontface = "bold", color = "darkred",
+                  inherit.aes = FALSE)
+      )
+    }} +
+    # Main fluorescence line
+    geom_line(color = "#2E8B57", linewidth = 1, alpha = 0.8) +
+    # Threshold lines
+    geom_hline(yintercept = annual_median, 
+               linetype = "dashed", color = "#4169E1", linewidth = 0.8) +
+    geom_hline(yintercept = bloom_threshold, 
+               linetype = "solid", color = "#DC143C", linewidth = 0.8) +
+    # Formatting
+    scale_x_date(date_breaks = "1 months", date_labels = "%b",
+                 limits = c(as.Date(paste0(year_to_plot, "-01-01")), 
+                           as.Date(paste0(year_to_plot, "-12-31")))) +
+    scale_y_continuous(limits = c(global_y_min, global_y_max)) +
+    labs(
+      title = paste(year_to_plot),
+      x = "",
+      y = "Fluorescence",
+      subtitle = paste0("Blooms: ", n_blooms, 
+                       " | Threshold: ", round(bloom_threshold, 2),
+                       " | Median: ", round(annual_median, 2))
+    ) +
+    theme_bw() +
+    theme(
+      plot.title = element_text(size = 16, hjust = 0.5, face = "bold"),
+      plot.subtitle = element_text(size = 12, hjust = 0.5, color = "gray40"),
+      axis.text.x = element_text(size = 14),
+      axis.text.y = element_text(size = 14),
+      axis.title.y = element_text(size = 12),
+      panel.grid.minor = element_blank(),
+      panel.grid.major.x = element_line(linewidth = 0.3),
+      panel.grid.major.y = element_line(linewidth = 0.3),
+      plot.margin = margin(5, 10, 5, 5)
+    )
+  
+  return(p)
+}
+
+# Get all available years
+available_years <- sort(unique(annual_summary$year))
+
+# Create plots for each year
+year_plots <- list()
+for (i in seq_along(available_years)) {
+  year_plots[[i]] <- create_year_plot(available_years[i])
+}
+
+# Remove any NULL plots
+year_plots <- year_plots[!sapply(year_plots, is.null)]
+
+# Arrange plots in a grid
+if (length(year_plots) > 0) {
+  
+  # Determine grid layout based on number of years
+  n_years <- length(year_plots)
+  
+  if (n_years <= 2) {
+    ncol <- 1
+    nrow <- n_years
+  } else if (n_years <= 4) {
+    ncol <- 2
+    nrow <- ceiling(n_years / 2)
+  } else {
+    ncol <- 2
+    nrow <- ceiling(n_years / 2)
+  }
+  
+  # Create the combined plot
+  combined_plot <- do.call(grid.arrange, c(year_plots, 
+                                          ncol = ncol, 
+                                          nrow = nrow,
+                                          top = "Phytoplankton Bloom Detection Results"))
+  
+  # Print summary table
+  cat("=== BLOOM DETECTION SUMMARY ===\n")
+  summary_table <- annual_summary %>%
+    select(year, n_bloom_events, spring_bloom_yday, annual_peak_yday, 
+           total_bloom_days, annual_median, bloom_threshold) %>%
+    mutate(
+      spring_bloom_yday = ifelse(is.na(spring_bloom_yday), "No spring bloom", 
+                                paste("Day", spring_bloom_yday)),
+      annual_peak_yday = paste("Day", annual_peak_yday),
+      across(c(annual_median, bloom_threshold), ~round(.x, 2))
+    )
+  
+  print(summary_table)
+  
+  # Create a legend explanation
+  cat("\n=== PLOT LEGEND ===\n")
+  cat("Green line: Daily fluorescence measurements\n")
+  cat("Blue dashed line: Annual median fluorescence\n") 
+  cat("Red solid line: Bloom threshold (+15% above median)\n")
+  cat("Red shaded areas: Detected bloom periods\n")
+  cat("B1, B2, etc.: Bloom event numbers\n")
+  cat("Method: 7-day minimum duration, 15% threshold\n")
+  
+} else {
+  cat("No data available for plotting.\n")
+}
+
+# Optional: Save the plot
+# ggsave("bloom_detection_results.png", combined_plot, 
+#        width = 12, height = 8, dpi = 300, bg = "white")
+
+# Optional: Save the plot
+# ggsave("bloom_detection_results.png", combined_plot, 
+#        width = 12, height = 8, dpi = 300, bg = "white")
+ggsave(here("figures", "premlall_bloom_detection_results.png"), combined_plot,
+       width = 16, height = 8, dpi = 300, bg = "white")
+```
+
+```{r}
+test <- b24_gapfilled %>% 
+  left_join(b_ts)
+
+test %>% 
+  filter(month %in% c(7)) %>% 
+  filter(year == 2022) %>% 
+  ggplot(aes(x = lag(mean_sal, 9), y = fl_med_day)) +
+  geom_point()
+
+test %>% 
+  filter(month %in% c(7)) %>% 
+  filter(year == 2024) %>% 
+  ggplot(aes(x = mean_sal, y = fl_med_day)) +
+  geom_point()
+```
+
+```{r}
+# Simple correlation for your specific example
+test_filtered <- test %>% 
+  filter(month %in% c(7)) %>% 
+  filter(year == 2022) %>%
+  mutate(lagged_sal = lag(mean_sal, 9)) %>%
+  filter(!is.na(lagged_sal), !is.na(fl_med_day))
+
+# Calculate correlation
+correlation_result <- cor(test_filtered$lagged_sal, test_filtered$fl_med_day, 
+                         use = "complete.obs")
+
+# Create plot with correlation annotation
+test %>% 
+  filter(month %in% c(7)) %>% 
+  filter(year == 2022) %>% 
+  ggplot(aes(x = lag(mean_sal, 9), y = fl_med_day)) +
+  geom_point() +
+  geom_smooth(method = "lm", se = TRUE, color = "blue", alpha = 0.3) +
+  annotate("text", 
+           x = Inf, y = Inf, 
+           label = paste("r =", round(correlation_result, 3)), 
+           hjust = 1.1, vjust = 1.5, 
+           size = 4, fontface = "bold") +
+  labs(
+    title = "Fluorescence vs 9-day Lagged Salinity",
+    subtitle = "July 2022",
+    x = "Mean Salinity (9-day lag)",
+    y = "Median Daily Fluorescence"
+  ) +
+  theme_minimal()
+```
+
+
+
+```{r}
+# Function to add environmental data to existing bloom metrics
+add_environmental_data <- function(bloom_metrics, par_data, wind_data) {
+  
+  # Extract bloom events from the bloom_metrics list
+  bloom_events <- bloom_metrics$bloom_events
+  
+  # Return empty dataframe if no bloom events
+  if (nrow(bloom_events) == 0) {
+    cat("No bloom events found to analyze.\n")
+    return(data.frame())
+  }
+  
+  cat("Adding environmental data to", nrow(bloom_events), "bloom events...\n")
+  
+  # Calculate environmental averages for each bloom event
+  bloom_env <- bloom_events %>%
+    rowwise() %>%
+    mutate(
+      # PAR metrics during bloom period
+      par_mean = {
+        bloom_par <- par_data %>% 
+          filter(date >= start_date & date <= end_date, !is.na(dm))
+        if (nrow(bloom_par) > 0) {
+          mean(bloom_par$dm, na.rm = TRUE)
+        } else {
+          NA_real_
+        }
+      },
+      par_median = {
+        bloom_par <- par_data %>% 
+          filter(date >= start_date & date <= end_date, !is.na(dm))
+        if (nrow(bloom_par) > 0) {
+          median(bloom_par$dm, na.rm = TRUE)
+        } else {
+          NA_real_
+        }
+      },
+      par_min = {
+        bloom_par <- par_data %>% 
+          filter(date >= start_date & date <= end_date, !is.na(dm))
+        if (nrow(bloom_par) > 0) {
+          min(bloom_par$dm, na.rm = TRUE)
+        } else {
+          NA_real_
+        }
+      },
+      par_max = {
+        bloom_par <- par_data %>% 
+          filter(date >= start_date & date <= end_date, !is.na(dm))
+        if (nrow(bloom_par) > 0) {
+          max(bloom_par$dm, na.rm = TRUE)
+        } else {
+          NA_real_
+        }
+      },
+      par_sd = {
+        bloom_par <- par_data %>% 
+          filter(date >= start_date & date <= end_date, !is.na(dm))
+        if (nrow(bloom_par) > 0) {
+          sd(bloom_par$dm, na.rm = TRUE)
+        } else {
+          NA_real_
+        }
+      },
+      par_n_days = {
+        bloom_par <- par_data %>% 
+          filter(date >= start_date & date <= end_date, !is.na(dm))
+        nrow(bloom_par)
+      },
+      
+      # Wind speed metrics during bloom period
+      wind_speed_mean = {
+        bloom_wind <- wind_data %>% 
+          filter(date >= start_date & date <= end_date, !is.na(ws))
+        if (nrow(bloom_wind) > 0) {
+          mean(bloom_wind$ws, na.rm = TRUE)
+        } else {
+          NA_real_
+        }
+      },
+      wind_speed_median = {
+        bloom_wind <- wind_data %>% 
+          filter(date >= start_date & date <= end_date, !is.na(ws))
+        if (nrow(bloom_wind) > 0) {
+          median(bloom_wind$ws, na.rm = TRUE)
+        } else {
+          NA_real_
+        }
+      },
+      wind_speed_max = {
+        bloom_wind <- wind_data %>% 
+          filter(date >= start_date & date <= end_date, !is.na(ws))
+        if (nrow(bloom_wind) > 0) {
+          max(bloom_wind$ws, na.rm = TRUE)
+        } else {
+          NA_real_
+        }
+      },
+      wind_speed_sd = {
+        bloom_wind <- wind_data %>% 
+          filter(date >= start_date & date <= end_date, !is.na(ws))
+        if (nrow(bloom_wind) > 0) {
+          sd(bloom_wind$ws, na.rm = TRUE)
+        } else {
+          NA_real_
+        }
+      },
+      
+      # Wind direction (circular mean)
+      wind_direction_mean = {
+        bloom_wind <- wind_data %>% 
+          filter(date >= start_date & date <= end_date, !is.na(wd))
+        if (nrow(bloom_wind) > 0) {
+          # Circular mean for wind direction
+          mean_u <- mean(cos(bloom_wind$wd * pi / 180), na.rm = TRUE)
+          mean_v <- mean(sin(bloom_wind$wd * pi / 180), na.rm = TRUE)
+          mean_dir <- atan2(mean_v, mean_u) * 180 / pi
+          if (mean_dir < 0) mean_dir <- mean_dir + 360
+          mean_dir
+        } else {
+          NA_real_
+        }
+      },
+      
+      # Wind components
+      u_component_mean = {
+        bloom_wind <- wind_data %>% 
+          filter(date >= start_date & date <= end_date, !is.na(u))
+        if (nrow(bloom_wind) > 0) {
+          mean(bloom_wind$u, na.rm = TRUE)
+        } else {
+          NA_real_
+        }
+      },
+      v_component_mean = {
+        bloom_wind <- wind_data %>% 
+          filter(date >= start_date & date <= end_date, !is.na(v))
+        if (nrow(bloom_wind) > 0) {
+          mean(bloom_wind$v, na.rm = TRUE)
+        } else {
+          NA_real_
+        }
+      },
+      se_component_mean = {
+        bloom_wind <- wind_data %>% 
+          filter(date >= start_date & date <= end_date, !is.na(se_component))
+        if (nrow(bloom_wind) > 0) {
+          mean(bloom_wind$se_component, na.rm = TRUE)
+        } else {
+          NA_real_
+        }
+      },
+      
+      # Wind data availability
+      wind_n_days = {
+        bloom_wind <- wind_data %>% 
+          filter(date >= start_date & date <= end_date, !is.na(ws))
+        nrow(bloom_wind)
+      }
+    ) %>%
+    ungroup()
+  
+  cat("Environmental data added successfully!\n")
+  cat("PAR data coverage:", round(mean(bloom_env$par_n_days / bloom_env$duration, na.rm = TRUE) * 100, 1), "% of bloom days\n")
+  cat("Wind data coverage:", round(mean(bloom_env$wind_n_days / bloom_env$duration, na.rm = TRUE) * 100, 1), "% of bloom days\n")
+  
+  return(bloom_env)
+}
+```
+
+
+```{r}
+# Usage example:
+bloom_events_with_env <- add_environmental_data(bloom_metrics_final,
+                                                p2,
+                                                w2_wide)
+
+sb_stats <- bloom_events_with_env %>% 
+  filter(bloom_number == 1)
+
+```
+
+```{r}
+# Function to analyze environmental conditions around bloom events
+analyze_bloom_environmental_triggers <- function(bloom_metrics, par_data, wind_data, b_ts,
+                                                pre_bloom_days = 7, 
+                                                post_bloom_days = 7) {
+  
+  # Extract bloom events from the bloom_metrics list
+  bloom_events <- bloom_metrics$bloom_events
+  
+  # Return empty dataframe if no bloom events
+  if (nrow(bloom_events) == 0) {
+    cat("No bloom events found to analyze.\n")
+    return(data.frame())
+  }
+  
+  cat("Analyzing environmental triggers for", nrow(bloom_events), "bloom events...\n")
+  cat("Pre-bloom period:", pre_bloom_days, "days\n")
+  cat("Post-bloom period:", post_bloom_days, "days\n")
+  
+  # Helper function to calculate environmental stats for a period
+  calc_env_stats <- function(start_date, end_date, par_data, wind_data, b_ts, period_name) {
+    
+    # PAR data for period
+    period_par <- par_data %>% 
+      filter(date >= start_date & date <= end_date, !is.na(dm))
+    
+    # Wind data for period  
+    period_wind <- wind_data %>%
+      filter(date >= start_date & date <= end_date, !is.na(ws))
+    
+    # Temperature and salinity data for period
+    period_ts <- b_ts %>%
+      filter(date >= start_date & date <= end_date, 
+             !is.na(mean_temp) | !is.na(mean_sal))
+    
+    # Calculate PAR stats
+    par_stats <- if(nrow(period_par) > 0) {
+      list(
+        mean = mean(period_par$dm, na.rm = TRUE),
+        median = median(period_par$dm, na.rm = TRUE),
+        max = max(period_par$dm, na.rm = TRUE),
+        sd = sd(period_par$dm, na.rm = TRUE),
+        n_days = nrow(period_par)
+      )
+    } else {
+      list(mean = NA, median = NA, max = NA, sd = NA, n_days = 0)
+    }
+    
+    # Calculate wind stats
+    wind_stats <- if(nrow(period_wind) > 0) {
+      # Wind direction circular mean
+      if(any(!is.na(period_wind$wd))) {
+        mean_u <- mean(cos(period_wind$wd * pi / 180), na.rm = TRUE)
+        mean_v <- mean(sin(period_wind$wd * pi / 180), na.rm = TRUE)
+        mean_dir <- atan2(mean_v, mean_u) * 180 / pi
+        if (mean_dir < 0) mean_dir <- mean_dir + 360
+      } else {
+        mean_dir <- NA
+      }
+      
+      list(
+        speed_mean = mean(period_wind$ws, na.rm = TRUE),
+        speed_median = median(period_wind$ws, na.rm = TRUE),
+        speed_max = max(period_wind$ws, na.rm = TRUE),
+        speed_sd = sd(period_wind$ws, na.rm = TRUE),
+        direction_mean = mean_dir,
+        u_mean = mean(period_wind$u, na.rm = TRUE),
+        v_mean = mean(period_wind$v, na.rm = TRUE),
+        se_mean = mean(period_wind$se_component, na.rm = TRUE),
+        n_days = nrow(period_wind)
+      )
+    } else {
+      list(speed_mean = NA, speed_median = NA, speed_max = NA, speed_sd = NA,
+           direction_mean = NA, u_mean = NA, v_mean = NA, se_mean = NA, n_days = 0)
+    }
+    
+    # Calculate temperature and salinity stats
+    temp_stats <- if(nrow(period_ts) > 0 && any(!is.na(period_ts$mean_temp))) {
+      list(
+        mean = mean(period_ts$mean_temp, na.rm = TRUE),
+        median = median(period_ts$mean_temp, na.rm = TRUE),
+        min = min(period_ts$mean_temp, na.rm = TRUE),
+        max = max(period_ts$mean_temp, na.rm = TRUE),
+        sd = sd(period_ts$mean_temp, na.rm = TRUE),
+        n_days = sum(!is.na(period_ts$mean_temp))
+      )
+    } else {
+      list(mean = NA, median = NA, min = NA, max = NA, sd = NA, n_days = 0)
+    }
+    
+    sal_stats <- if(nrow(period_ts) > 0 && any(!is.na(period_ts$mean_sal))) {
+      list(
+        mean = mean(period_ts$mean_sal, na.rm = TRUE),
+        median = median(period_ts$mean_sal, na.rm = TRUE),
+        min = min(period_ts$mean_sal, na.rm = TRUE),
+        max = max(period_ts$mean_sal, na.rm = TRUE),
+        sd = sd(period_ts$mean_sal, na.rm = TRUE),
+        n_days = sum(!is.na(period_ts$mean_sal))
+      )
+    } else {
+      list(mean = NA, median = NA, min = NA, max = NA, sd = NA, n_days = 0)
+    }
+    
+    # Combine with prefixes
+    result <- c()
+    names_par <- paste0("par_", period_name, "_", names(par_stats))
+    names_wind <- paste0("wind_", period_name, "_", names(wind_stats))
+    names_temp <- paste0("temp_", period_name, "_", names(temp_stats))
+    names_sal <- paste0("sal_", period_name, "_", names(sal_stats))
+    
+    result[names_par] <- unlist(par_stats)
+    result[names_wind] <- unlist(wind_stats)
+    result[names_temp] <- unlist(temp_stats)
+    result[names_sal] <- unlist(sal_stats)
+    
+    return(result)
+  }
+  
+  # Calculate environmental conditions for each bloom event using a loop approach
+  bloom_env_list <- list()
+  
+  for (i in 1:nrow(bloom_events)) {
+    bloom <- bloom_events[i, ]
+    
+    # Calculate pre-bloom stats
+    pre_stats <- calc_env_stats(bloom$start_date - days(pre_bloom_days), 
+                               bloom$start_date - days(1), 
+                               par_data, wind_data, b_ts, "pre")
+    
+    # Calculate during-bloom stats
+    during_stats <- calc_env_stats(bloom$start_date, bloom$end_date, 
+                                  par_data, wind_data, b_ts, "during")
+    
+    # Calculate post-bloom stats
+    post_stats <- calc_env_stats(bloom$end_date + days(1), 
+                                bloom$end_date + days(post_bloom_days), 
+                                par_data, wind_data, b_ts, "post")
+    
+    # Combine all stats
+    all_stats <- c(pre_stats, during_stats, post_stats)
+    
+    # Calculate changes for all variables
+    par_change_pre_to_during <- all_stats[["par_during_mean"]] - all_stats[["par_pre_mean"]]
+    wind_speed_change_pre_to_during <- all_stats[["wind_during_speed_mean"]] - all_stats[["wind_pre_speed_mean"]]
+    temp_change_pre_to_during <- all_stats[["temp_during_mean"]] - all_stats[["temp_pre_mean"]]
+    sal_change_pre_to_during <- all_stats[["sal_during_mean"]] - all_stats[["sal_pre_mean"]]
+    
+    par_change_during_to_post <- all_stats[["par_post_mean"]] - all_stats[["par_during_mean"]]
+    wind_speed_change_during_to_post <- all_stats[["wind_post_speed_mean"]] - all_stats[["wind_during_speed_mean"]]
+    temp_change_during_to_post <- all_stats[["temp_post_mean"]] - all_stats[["temp_during_mean"]]
+    sal_change_during_to_post <- all_stats[["sal_post_mean"]] - all_stats[["sal_during_mean"]]
+    
+    # Calculate temperature and salinity gradients
+    temp_gradient_pre_during <- temp_change_pre_to_during
+    sal_gradient_pre_during <- sal_change_pre_to_during
+    temp_range_during <- all_stats[["temp_during_max"]] - all_stats[["temp_during_min"]]
+    sal_range_during <- all_stats[["sal_during_max"]] - all_stats[["sal_during_min"]]
+    
+    # Classify bloom type
+    bloom_type <- case_when(
+      bloom$bloom_number == 1 & month(bloom$start_date) %in% c(3, 4, 5) ~ "Spring_Primary",
+      bloom$bloom_number > 1 & month(bloom$start_date) %in% c(3, 4, 5) ~ "Spring_Secondary", 
+      month(bloom$start_date) %in% c(6, 7, 8) ~ "Summer",
+      month(bloom$start_date) %in% c(9, 10, 11) ~ "Fall",
+      TRUE ~ "Winter"
+    )
+    
+    # Combine original bloom data with environmental stats
+    bloom_with_env <- c(
+      as.list(bloom),
+      all_stats,
+      list(
+        par_change_pre_to_during = par_change_pre_to_during,
+        wind_speed_change_pre_to_during = wind_speed_change_pre_to_during,
+        temp_change_pre_to_during = temp_change_pre_to_during,
+        sal_change_pre_to_during = sal_change_pre_to_during,
+        par_change_during_to_post = par_change_during_to_post,
+        wind_speed_change_during_to_post = wind_speed_change_during_to_post,
+        temp_change_during_to_post = temp_change_during_to_post,
+        sal_change_during_to_post = sal_change_during_to_post,
+        temp_gradient_pre_during = temp_gradient_pre_during,
+        sal_gradient_pre_during = sal_gradient_pre_during,
+        temp_range_during = temp_range_during,
+        sal_range_during = sal_range_during,
+        bloom_type = bloom_type
+      )
+    )
+    
+    bloom_env_list[[i]] <- bloom_with_env
+  }
+  
+  # Convert list to dataframe
+  bloom_env <- do.call(rbind, lapply(bloom_env_list, function(x) as.data.frame(x, stringsAsFactors = FALSE)))
+  
+  cat("Environmental trigger analysis complete!\n")
+  
+  # Data coverage summary
+  cat("\nData coverage summary:\n")
+  cat("Pre-bloom PAR coverage:", round(mean(bloom_env$par_pre_n_days / pre_bloom_days, na.rm = TRUE) * 100, 1), "%\n")
+  cat("Pre-bloom wind coverage:", round(mean(bloom_env$wind_pre_n_days / pre_bloom_days, na.rm = TRUE) * 100, 1), "%\n")
+  cat("Pre-bloom temperature coverage:", round(mean(bloom_env$temp_pre_n_days / pre_bloom_days, na.rm = TRUE) * 100, 1), "%\n")
+  cat("Pre-bloom salinity coverage:", round(mean(bloom_env$sal_pre_n_days / pre_bloom_days, na.rm = TRUE) * 100, 1), "%\n")
+  cat("Post-bloom PAR coverage:", round(mean(bloom_env$par_post_n_days / post_bloom_days, na.rm = TRUE) * 100, 1), "%\n")
+  cat("Post-bloom wind coverage:", round(mean(bloom_env$wind_post_n_days / post_bloom_days, na.rm = TRUE) * 100, 1), "%\n")
+  cat("Post-bloom temperature coverage:", round(mean(bloom_env$temp_post_n_days / post_bloom_days, na.rm = TRUE) * 100, 1), "%\n")
+  cat("Post-bloom salinity coverage:", round(mean(bloom_env$sal_post_n_days / post_bloom_days, na.rm = TRUE) * 100, 1), "%\n")
+  
+  return(bloom_env)
+}
+
+# Function to analyze inter-bloom periods (gaps between blooms) - enhanced with T/S
+analyze_inter_bloom_conditions <- function(bloom_metrics, par_data, wind_data, b_ts) {
+  
+  bloom_events <- bloom_metrics$bloom_events
+  
+  if (nrow(bloom_events) <= 1) {
+    cat("Need at least 2 bloom events to analyze inter-bloom periods.\n")
+    return(data.frame())
+  }
+  
+  # Calculate inter-bloom periods for each year
+  inter_bloom_results <- data.frame()
+  
+  for (yr in unique(bloom_events$year)) {
+    year_blooms <- bloom_events %>% 
+      filter(year == yr) %>% 
+      arrange(start_date)
+    
+    if (nrow(year_blooms) <= 1) next
+    
+    # Calculate gaps between consecutive blooms
+    for (i in 1:(nrow(year_blooms) - 1)) {
+      gap_start <- year_blooms$end_date[i] + days(1)
+      gap_end <- year_blooms$start_date[i + 1] - days(1)
+      gap_duration <- as.numeric(gap_end - gap_start + 1)
+      
+      if (gap_duration > 0) {
+        # Environmental conditions during gap
+        gap_par <- par_data %>% 
+          filter(date >= gap_start & date <= gap_end, !is.na(dm))
+        gap_wind <- wind_data %>%
+          filter(date >= gap_start & date <= gap_end, !is.na(ws))
+        gap_ts <- b_ts %>%
+          filter(date >= gap_start & date <= gap_end, 
+                 !is.na(mean_temp) | !is.na(mean_sal))
+        
+        gap_result <- data.frame(
+          year = yr,
+          gap_number = i,
+          gap_start = gap_start,
+          gap_end = gap_end,
+          gap_duration = gap_duration,
+          bloom_before = i,
+          bloom_after = i + 1,
+          
+          # PAR during gap
+          par_gap_mean = if(nrow(gap_par) > 0) mean(gap_par$dm, na.rm = TRUE) else NA,
+          par_gap_median = if(nrow(gap_par) > 0) median(gap_par$dm, na.rm = TRUE) else NA,
+          par_gap_min = if(nrow(gap_par) > 0) min(gap_par$dm, na.rm = TRUE) else NA,
+          par_gap_n_days = nrow(gap_par),
+          
+          # Wind during gap
+          wind_gap_speed_mean = if(nrow(gap_wind) > 0) mean(gap_wind$ws, na.rm = TRUE) else NA,
+          wind_gap_speed_max = if(nrow(gap_wind) > 0) max(gap_wind$ws, na.rm = TRUE) else NA,
+          wind_gap_u_mean = if(nrow(gap_wind) > 0) mean(gap_wind$u, na.rm = TRUE) else NA,
+          wind_gap_v_mean = if(nrow(gap_wind) > 0) mean(gap_wind$v, na.rm = TRUE) else NA,
+          wind_gap_n_days = nrow(gap_wind),
+          
+          # Temperature during gap
+          temp_gap_mean = if(nrow(gap_ts) > 0 && any(!is.na(gap_ts$mean_temp))) 
+            mean(gap_ts$mean_temp, na.rm = TRUE) else NA,
+          temp_gap_median = if(nrow(gap_ts) > 0 && any(!is.na(gap_ts$mean_temp))) 
+            median(gap_ts$mean_temp, na.rm = TRUE) else NA,
+          temp_gap_min = if(nrow(gap_ts) > 0 && any(!is.na(gap_ts$mean_temp))) 
+            min(gap_ts$mean_temp, na.rm = TRUE) else NA,
+          temp_gap_max = if(nrow(gap_ts) > 0 && any(!is.na(gap_ts$mean_temp))) 
+            max(gap_ts$mean_temp, na.rm = TRUE) else NA,
+          temp_gap_n_days = if(nrow(gap_ts) > 0) sum(!is.na(gap_ts$mean_temp)) else 0,
+          
+          # Salinity during gap
+          sal_gap_mean = if(nrow(gap_ts) > 0 && any(!is.na(gap_ts$mean_sal))) 
+            mean(gap_ts$mean_sal, na.rm = TRUE) else NA,
+          sal_gap_median = if(nrow(gap_ts) > 0 && any(!is.na(gap_ts$mean_sal))) 
+            median(gap_ts$mean_sal, na.rm = TRUE) else NA,
+          sal_gap_min = if(nrow(gap_ts) > 0 && any(!is.na(gap_ts$mean_sal))) 
+            min(gap_ts$mean_sal, na.rm = TRUE) else NA,
+          sal_gap_max = if(nrow(gap_ts) > 0 && any(!is.na(gap_ts$mean_sal))) 
+            max(gap_ts$mean_sal, na.rm = TRUE) else NA,
+          sal_gap_n_days = if(nrow(gap_ts) > 0) sum(!is.na(gap_ts$mean_sal)) else 0
+        )
+        
+        inter_bloom_results <- rbind(inter_bloom_results, gap_result)
+      }
+    }
+  }
+  
+  cat("Analyzed", nrow(inter_bloom_results), "inter-bloom periods\n")
+  return(inter_bloom_results)
+}
+
+# Additional helper function to summarize temperature/salinity conditions by bloom type
+summarize_ts_by_bloom_type <- function(bloom_env_data) {
+  
+  summary_stats <- bloom_env_data %>%
+    group_by(bloom_type) %>%
+    summarise(
+      n_blooms = n(),
+      
+      # Temperature statistics
+      temp_pre_mean = mean(temp_pre_mean, na.rm = TRUE),
+      temp_during_mean = mean(temp_during_mean, na.rm = TRUE),
+      temp_post_mean = mean(temp_post_mean, na.rm = TRUE),
+      temp_change_pre_during = mean(temp_change_pre_to_during, na.rm = TRUE),
+      temp_range_during_mean = mean(temp_range_during, na.rm = TRUE),
+      
+      # Salinity statistics
+      sal_pre_mean = mean(sal_pre_mean, na.rm = TRUE),
+      sal_during_mean = mean(sal_during_mean, na.rm = TRUE),
+      sal_post_mean = mean(sal_post_mean, na.rm = TRUE),
+      sal_change_pre_during = mean(sal_change_pre_to_during, na.rm = TRUE),
+      sal_range_during_mean = mean(sal_range_during, na.rm = TRUE),
+      
+      .groups = 'drop'
+    )
+  
+  return(summary_stats)
+}
+
+# Usage examples:
+# bloom_triggers <- analyze_bloom_environmental_triggers(bloom_metrics_final, p2, we, b_ts)
+# inter_bloom_periods <- analyze_inter_bloom_conditions(bloom_metrics_final, p2, we, b_ts)
+# ts_summary <- summarize_ts_by_bloom_type(bloom_triggers)
+```
+
+
+```{r}
+# Usage examples:
+bloom_triggers <- analyze_bloom_environmental_triggers(bloom_metrics_final,
+                                                       p2,
+                                                       w2_wide,
+                                                       b_ts)
+test2 <- bloom_triggers %>% 
+  filter(bloom_number == 1)
+
+inter_bloom_periods <- analyze_inter_bloom_conditions(bloom_metrics_final,
+                                                       p2,
+                                                       w2_wide,
+                                                       b_ts)
+
+ts_summary <- summarize_ts_by_bloom_type(bloom_triggers)
+
+# Or customize the time windows
+# bloom_triggers <- analyze_bloom_environmental_triggers(bloom_metrics_final, p2, we, 
+#                                                      pre_bloom_days = 10, 
+#                                                      post_bloom_days = 5)
+```
+
+
+
+
+
+
+
 
 
 
@@ -690,6 +1701,265 @@ bloom_trigger_periods %>%
 #         width = 16, height = 10, dpi = 300)
 ```
 
+
+```{r}
+# Function to identify favorable conditions combining ws^3 and PAR
+identify_ws_cube_periods <- function(data) {
+  data %>%
+    filter(!is.na(ws)) %>%
+    arrange(year, date2) %>%
+    group_by(year) %>%
+    mutate(
+      calm = (ws^3) < 500,  # Low wind energy
+      calm_start = calm & (lag(calm, default = FALSE) == FALSE),
+      calm_group = cumsum(calm_start)
+    ) %>%
+    filter(calm == TRUE) %>%
+    group_by(year, calm_group) %>%
+    summarise(
+      start_date = min(date2),
+      end_date = max(date2),
+      duration = n(),
+      .groups = "drop"
+    ) %>%
+    filter(duration >= 6)  # 6+ consecutive days
+}
+
+identify_par_periods <- function(data) {
+  data %>%
+    filter(!is.na(dm)) %>%
+    arrange(year, date2) %>%
+    group_by(year) %>%
+    mutate(
+      high_light = dm > 200,
+      light_start = high_light & (lag(high_light, default = FALSE) == FALSE),
+      light_group = cumsum(light_start)
+    ) %>%
+    filter(high_light == TRUE) %>%
+    group_by(year, light_group) %>%
+    summarise(
+      start_date = min(date2),
+      end_date = max(date2),
+      duration = n(),
+      .groups = "drop"
+    ) %>%
+    filter(duration >= 6)  # 6+ consecutive days
+}
+
+# Function for combined bloom trigger periods
+identify_bloom_trigger_periods <- function(data) {
+  data %>%
+    filter(!is.na(ws) & !is.na(dm)) %>%
+    arrange(year, date2) %>%
+    group_by(year) %>%
+    mutate(
+      # Both conditions: low wind energy AND sufficient light
+      bloom_conditions = (ws^3) < 500 & dm > 200,
+      # Only consider periods after February (yday > 32)
+      post_feb = yday(date2) > 32,
+      # Combined trigger condition
+      trigger = bloom_conditions & post_feb,
+      trigger_start = trigger & (lag(trigger, default = FALSE) == FALSE),
+      trigger_group = cumsum(trigger_start)
+    ) %>%
+    filter(trigger == TRUE) %>%
+    group_by(year, trigger_group) %>%
+    summarise(
+      start_date = min(date2),
+      end_date = max(date2),
+      duration = n(),
+      avg_wind_cube = mean(ws^3),
+      avg_par = mean(dm),
+      .groups = "drop"
+    ) %>%
+    filter(duration >= 6)  # 6+ consecutive days
+}
+
+# Function to calculate winter wind metrics and predict bloom timing
+calculate_bloom_predictions <- function(data) {
+  data %>%
+    mutate(
+      # Create winter groupings (Dec-Feb)
+      winter_year = ifelse(month(date2) == 12, year + 1, year),
+      winter_month = month(date2)
+    ) %>%
+    filter(winter_month %in% c(12, 1, 2)) %>%
+    group_by(winter_year) %>%
+    summarise(
+      winter_wind_cubed_mean = mean(ws^3, na.rm = TRUE),
+      winter_wind_metric = winter_wind_cubed_mean^(1/3),
+      winter_wind_raw_mean = mean(ws, na.rm = TRUE),
+      winter_par_mean = mean(dm, na.rm = TRUE),
+      winter_n_days = n(),
+      .groups = "drop"
+    ) %>%
+    mutate(
+      # Apply the prediction equation: Day = 11.3 * <W^3>^(1/3) + Dec 30
+      predicted_bloom_day = 11.3 * winter_wind_metric + 30,  # Dec 30 = day 30 of next year
+      # Convert to actual date (accounting for leap years)
+      predicted_date = as.Date(predicted_bloom_day, origin = paste0(winter_year - 1, "-12-31"))
+    ) %>%
+    rename(year = winter_year)
+}
+
+# Use wind data as the base (since it has complete coverage) and join others to it
+plot_data_full <- w2_wide %>%
+  full_join(b24_gapfilled, by = c("year", "date")) %>%
+  full_join(p2, by = c("year", "date")) %>%
+  mutate(date2 = as.Date(yday, origin = "2024-01-01")) %>%
+  filter(date2 != as.Date("2024-12-31")) %>%
+  filter(year %in% c(2022, 2023, 2024, 2025)) %>%
+  # Set fluorescence to NA for the gap period only (but keep wind/PAR data)
+  mutate(
+    fl_med_day = ifelse(
+      year == 2025 & date2 >= as.Date("2024-04-27") & date2 <= as.Date("2024-05-11"),
+      NA,
+      fl_med_day
+    )
+  )
+
+# Calculate bloom predictions based on winter wind
+bloom_predictions <- calculate_bloom_predictions(plot_data_full)
+
+# Create period datasets
+ws_cube_periods_full <- identify_ws_cube_periods(plot_data_full)
+par_periods_full <- identify_par_periods(plot_data_full) 
+bloom_trigger_periods_full <- identify_bloom_trigger_periods(plot_data_full)
+
+# Filter for plot data
+plot_data <- plot_data_full %>%
+  mutate(month = month(date2)) %>%
+  filter(month < 7)
+
+# Filter periods for plot window
+ws_cube_periods <- ws_cube_periods_full %>%
+  filter(
+    (start_date <= as.Date("2024-06-30")) & (end_date >= as.Date("2024-01-01"))
+  ) %>%
+  mutate(
+    start_date = pmax(start_date, as.Date("2024-01-01")),
+    end_date = pmin(end_date, as.Date("2024-06-30"))
+  )
+
+par_periods <- par_periods_full %>%
+  filter(
+    (start_date <= as.Date("2024-06-30")) & (end_date >= as.Date("2024-01-01"))
+  ) %>%
+  mutate(
+    start_date = pmax(start_date, as.Date("2024-01-01")),
+    end_date = pmin(end_date, as.Date("2024-06-30"))
+  )
+
+bloom_trigger_periods <- bloom_trigger_periods_full %>%
+  filter(
+    (start_date <= as.Date("2024-06-30")) & (end_date >= as.Date("2024-01-01"))
+  ) %>%
+  mutate(
+    start_date = pmax(start_date, as.Date("2024-01-01")),
+    end_date = pmin(end_date, as.Date("2024-06-30"))
+  )
+
+# Filter bloom predictions for plot window and convert to plot format
+bloom_prediction_lines <- bloom_predictions %>%
+  filter(year %in% c(2022, 2023, 2024, 2025)) %>%
+  mutate(
+    # Convert predicted date to the standard plot format (all on 2024 calendar)
+    plot_date = as.Date(paste0("2024-", format(predicted_date, "%m-%d")))
+  ) %>%
+  # Only show predictions that fall within our plot window
+  filter(plot_date >= as.Date("2024-01-01") & plot_date <= as.Date("2024-06-30"))
+
+# Create year annotations for all years
+year_annotations <- data.frame(
+  year = c(2022, 2023, 2024, 2025),
+  date2 = as.Date("2024-01-15"),
+  fl_med_day = 18,
+  label = c("2022", "2023", "2024", "2025")
+)
+
+# Create the plot
+plot_data %>%
+  filter(month < 5) %>% 
+  ggplot(aes(x = date2)) +
+  # Add shaded areas for low wind energy periods (light blue)
+  geom_rect(data = ws_cube_periods,
+            aes(xmin = start_date, xmax = end_date,
+                ymin = -Inf, ymax = Inf),
+            alpha = 0.2, fill = "lightblue", inherit.aes = FALSE) +
+  # Add shaded areas for high PAR periods (light yellow) 
+  geom_rect(data = par_periods,
+            aes(xmin = start_date, xmax = end_date,
+                ymin = -Inf, ymax = Inf),
+            alpha = 0.2, fill = "yellow", inherit.aes = FALSE) +
+  # Add BLOOM TRIGGER periods (dark purple)
+  geom_rect(data = bloom_trigger_periods,
+            aes(xmin = start_date, xmax = end_date,
+                ymin = -Inf, ymax = Inf),
+            alpha = 0.5, fill = "purple", inherit.aes = FALSE) +
+  # Add predicted bloom timing vertical lines (red dashed)
+  geom_vline(data = bloom_prediction_lines,
+             aes(xintercept = as.numeric(plot_date)),
+             color = "red", linetype = "dashed", size = 1.2, alpha = 0.8) +
+  # Add wind speed cubed line
+  geom_line(aes(y = (ws^3) / 200), color = "gray40", size = 1, alpha = 0.8) +
+  # Add threshold line for ws^3 < 500
+  geom_hline(yintercept = 500 / 200, linetype = "dashed", color = "blue", alpha = 0.7) +
+  # Add fluorescence line
+  geom_line(aes(y = fl_med_day, color = as.factor(year)), size = 2) +
+  # Add year annotations
+  geom_text(data = year_annotations,
+            aes(x = date2, y = fl_med_day, label = label),
+            size = 10, fontface = "bold", hjust = 0.5, vjust = 0.5,
+            color = "black", inherit.aes = FALSE) +
+  # Dual y-axis labels
+  scale_y_continuous(
+    name = bquote("Flu"[BUOY]~"(mg" ~ m^-2*")"),
+    sec.axis = sec_axis(~ . * 200, name = bquote("Wind Speed"^3~"(m/s)"^3),
+                       breaks = seq(0, 4000, 500))
+  ) +
+  scale_x_date(date_breaks = "months", date_labels = "%b",
+               limits = c(as.Date("2024-01-01"), as.Date("2024-04-30"))) +
+  scale_color_jama() +
+  facet_grid(year~.) +
+  labs(color = NULL) +
+  theme_bw() +
+  theme(
+    legend.position = "none",
+    text = element_text(size = 35),
+    axis.text = element_text(color = "black"),
+    axis.title.x = element_blank(),
+    axis.title.y.right = element_text(color = "gray50", size = 30),
+    axis.text.y.right = element_text(color = "gray50"),
+    strip.text = element_blank(),
+    panel.spacing = unit(0.8, "lines")
+  )
+
+# Optional: Print the predictions to see the values
+print("Bloom timing predictions based on winter winds:")
+print(bloom_predictions)
+
+ggsave(here("figures", "buoy_spring_wind_par_triggers_collins.png"),
+        width = 16, height = 10, dpi = 300)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 ```{r}
 # Function to predict spring bloom initiation for years prior to buoy data
 predict_spring_bloom_initiation <- function(wind_data, par_data) {
@@ -888,10 +2158,27 @@ wind_par_data <- w2_wide %>%
   full_join(p2, by = c("year", "date"))
 
 # Plot individual years
-p2015 <- plot_spring_bloom_conditions(wind_par_data, bloom_periods, 2019)
+p2015 <- plot_spring_bloom_conditions(wind_par_data, bloom_periods, 2023)
 print(p2015)
 ```
 
+```{r}
+par_cu <- p2 %>%
+  group_by(year) %>%
+  arrange(date) %>%
+  mutate(cumulative_par = cumsum(ifelse(is.na(dm), 0, dm))) %>%
+  mutate(cumulative_par_above_200 = cumsum(ifelse(dm > 200, dm - 200, 0))) %>% 
+  filter(year %in% c(2022, 2023, 2024, 2025)) %>% 
+  mutate(yday = yday(date),
+         month = month(date)) %>% 
+  filter(month < 5)
+
+par_cu %>% 
+  ggplot(aes(x = yday, y = cumulative_par_above_200, color = as.factor(year))) +
+  geom_line()
+
+#2024-03-13 = 8700
+```
 
 
 
